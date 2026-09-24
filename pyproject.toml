@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "octop-harness"
 # Single source of truth for the package version (runtime reads via importlib.metadata).
-version = "0.9.9"
+version = "1.0.0"
 description = "Production-grade Harness Agent built on top of LangChain Deep Agents."
 readme = "README.md"
 license = { text = "MIT" }
