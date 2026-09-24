@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import inspect
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +18,7 @@ from octop_harness.llm.session_header import (
     close_session_http_clients,
     current_session_id,
     install_request_hook,
+    iter_with_session_header,
     session_header_scope,
     session_http_clients,
 )
@@ -45,6 +48,57 @@ def test_session_header_scope_empty_inner_keeps_outer_thread_id() -> None:
             assert inner == "outer-thread"
             assert current_session_id() == "outer-thread"
         assert current_session_id() == "outer-thread"
+
+
+@pytest.mark.asyncio
+async def test_iter_with_session_header_does_not_span_yield() -> None:
+    seen: list[str] = []
+
+    async def source():
+        seen.append(current_session_id())
+        yield "first"
+        seen.append(current_session_id())
+        yield "second"
+
+    stream = iter_with_session_header(source(), "thread-abc")
+    assert await anext(stream) == "first"
+    assert current_session_id() != "thread-abc"
+    assert await anext(stream) == "second"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert seen == ["thread-abc", "thread-abc"]
+
+
+@pytest.mark.asyncio
+async def test_iter_with_session_header_can_close_from_different_context() -> None:
+    async def source():
+        assert current_session_id() == "thread-abc"
+        yield "first"
+
+    stream = iter_with_session_header(source(), "thread-abc")
+    assert await anext(stream) == "first"
+
+    closing_context = contextvars.copy_context()
+    close_task = closing_context.run(lambda: asyncio.create_task(stream.aclose()))
+    await close_task
+    assert current_session_id() != "thread-abc"
+
+
+@pytest.mark.asyncio
+async def test_iter_with_session_header_reuses_generated_id() -> None:
+    seen: list[str] = []
+
+    async def source():
+        seen.append(current_session_id())
+        yield 1
+        seen.append(current_session_id())
+        yield 2
+
+    stream = iter_with_session_header(source(), None)
+    assert await anext(stream) == 1
+    assert await anext(stream) == 2
+    assert len(set(seen)) == 1
+    assert seen[0]
 
 
 def test_hook_injects_session_id_from_scope() -> None:

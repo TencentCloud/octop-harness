@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Session-header `ContextVar` scopes now bracket each stream iteration instead of spanning async-generator yields, preventing cross-context token resets from terminating gateway workers.
+
 ## [1.0.0] - 2026-09-24
 
 ### 新增

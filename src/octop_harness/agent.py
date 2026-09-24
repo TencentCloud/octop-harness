@@ -31,7 +31,7 @@ from octop_harness.builtin.tools.web_search import load_web_search_tools
 from octop_harness.config import HarnessAgentConfig
 from octop_harness.init import InitResult
 from octop_harness.llm.factory import ChatModelFactory
-from octop_harness.llm.session_header import session_header_scope
+from octop_harness.llm.session_header import iter_with_session_header, session_header_scope
 from octop_harness.mcp import load_mcp_tools, mcp_tool_names, validate_mcp_default_servers
 from octop_harness.memory import MemoryRuntime
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
@@ -497,13 +497,13 @@ class HarnessAgent:
             cancel_event = asyncio.Event()
             if thread_id:
                 self._cancel_events[thread_id] = cancel_event
+            stream = self._iter_until_cancelled(
+                proto.stream(messages, config, **kwargs),
+                cancel_event,
+            )
             try:
-                with session_header_scope(prepared.thread_id):
-                    async for chunk in self._iter_until_cancelled(
-                        proto.stream(messages, config, **kwargs),
-                        cancel_event,
-                    ):
-                        yield chunk
+                async for chunk in iter_with_session_header(stream, prepared.thread_id):
+                    yield chunk
             finally:
                 if thread_id:
                     self._cancel_events.pop(thread_id, None)
@@ -541,9 +541,9 @@ class HarnessAgent:
             raise ValueError(msg)
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         async with self._invocation():
-            with session_header_scope(thread_id):
-                async for chunk in resume_stream(thread_id, decisions, config):
-                    yield chunk
+            stream = resume_stream(thread_id, decisions, config)
+            async for chunk in iter_with_session_header(stream, thread_id):
+                yield chunk
 
     async def stream_events(
         self,
