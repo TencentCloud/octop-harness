@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Any
@@ -52,6 +52,27 @@ def session_header_scope(thread_id: str | None) -> Iterator[str]:
         yield incoming
     finally:
         _CURRENT_SESSION_ID.reset(token)
+
+
+async def iter_with_session_header[T](iterator: AsyncIterator[T], thread_id: str | None) -> AsyncIterator[T]:
+    """Yield from *iterator* with the session header bound per iteration.
+
+    Entering the scope around each ``__anext__`` call instead of across the
+    outer ``yield`` keeps ContextVar tokens tied to the context that created
+    them. This avoids ``ValueError`` when an async generator is closed from a
+    different task/context.
+    """
+    resolved = (thread_id or "").strip()
+    if not resolved:
+        resolved = current_session_id()
+
+    while True:
+        with session_header_scope(resolved):
+            try:
+                item = await anext(iterator)
+            except StopAsyncIteration:
+                return
+        yield item
 
 
 def _stamp_session_header(request: httpx.Request, name: str, needle: str) -> None:
