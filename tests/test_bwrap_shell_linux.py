@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 import uuid
 from pathlib import Path
