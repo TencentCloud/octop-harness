@@ -48,6 +48,7 @@ jobs:
           # Isolate HOME so host PATH/PSModulePath entries under /root do not
           # trip PermissionError during local_shell path resolution on runners.
           HOME: /home/runner/harness-ci-home
+          PSModulePath: ""
         run: |
           mkdir -p "$HOME"
           make test
