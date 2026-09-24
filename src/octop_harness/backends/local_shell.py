@@ -49,6 +49,14 @@ def _path_already_under_root(path: str, root: Path) -> bool:
         return False
 
 
+def _path_exists(path: Path) -> bool:
+    """Like ``Path.exists()``, but treat permission errors as missing."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _is_under(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent)
@@ -74,7 +82,7 @@ def map_virtual_abs_path(
 
     root = _expand_local_path(root_dir)
     host_path = Path(path)
-    if is_host_root(root) or _path_already_under_root(path, root) or host_path.exists():
+    if is_host_root(root) or _path_already_under_root(path, root) or _path_exists(host_path):
         return path
 
     mapped = (root / path.lstrip("/")).resolve()
@@ -85,13 +93,13 @@ def map_virtual_abs_path(
     # Preserve host-owned top-level trees such as /usr and /tmp even when the
     # final entry does not exist. A configured workspace remains stronger proof.
     host_parts = host_path.parts
-    if len(host_parts) > 1 and Path(host_parts[0], host_parts[1]).exists():
+    if len(host_parts) > 1 and _path_exists(Path(host_parts[0], host_parts[1])):
         return path
 
     probe = mapped
     has_mapped_ancestor = False
     while probe != root and _is_under(probe, root):
-        if probe.exists():
+        if _path_exists(probe):
             has_mapped_ancestor = True
             break
         probe = probe.parent
