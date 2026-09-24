@@ -466,10 +466,11 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 )
                 rendered = getattr(result, "rendered", None) or ""
                 logger.info(
-                    "memory.trigger recall_inject thread=%s session=%s query=%r limit=%d hit=%s",
+                    "memory.trigger recall_inject thread=%s session=%s query=%r chars=%d limit=%d hit=%s",
                     thread_id,
                     session_id,
-                    query[:60],
+                    query[:500],
+                    len(query),
                     self._recall_limit,
                     bool(rendered),
                 )
