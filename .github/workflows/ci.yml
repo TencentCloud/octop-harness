@@ -29,7 +29,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+        # Skip bubblewrap on GitHub-hosted runners: unprivileged user namespaces
+        # are often blocked ("bwrap: setting up uid map: Permission denied"),
+        # and Linux bwrap integration tests already skip when bwrap is absent.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates
 
       - name: Install dependencies
         run: make install
@@ -41,4 +44,10 @@ jobs:
         run: make typecheck
 
       - name: Test
-        run: make test
+        env:
+          # Isolate HOME so host PATH/PSModulePath entries under /root do not
+          # trip PermissionError during local_shell path resolution on runners.
+          HOME: /home/runner/harness-ci-home
+        run: |
+          mkdir -p "$HOME"
+          make test

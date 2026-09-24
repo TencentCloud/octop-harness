@@ -15,9 +15,28 @@ from octop_harness.backends.bwrap_shell import BubbledLocalShellBackend
 
 _BWRAP = shutil.which("bwrap")
 
+
+def _bwrap_usable() -> bool:
+    """Return True when bwrap can create a user namespace (often false on CI)."""
+    if _BWRAP is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [_BWRAP, "--die-with-parent", "--unshare-user", "--uid", "0", "--gid", "0", "true"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        return False
+    return proc.returncode == 0
+
+
 pytestmark = [
     pytest.mark.skipif(sys.platform != "linux", reason="bwrap jail is Linux-only"),
     pytest.mark.skipif(_BWRAP is None, reason="bwrap not installed"),
+    pytest.mark.skipif(not _bwrap_usable(), reason="bwrap user namespace unavailable"),
 ]
 
 
