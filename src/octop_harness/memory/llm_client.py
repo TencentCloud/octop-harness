@@ -181,18 +181,41 @@ class HarnessAgentLLMClient:
                 f"failed to build chat model {ref!r} for tier={tier!r}: {detail}",
             ) from exc
 
+        timeout_s = self._light_timeout_s if tier == "light" else self._heavy_timeout_s
         bound_model = bind_call_options(
             model,
             max_tokens=max_tokens,
             temperature=temperature,
             response_format=response_format,
-            timeout_s=self._light_timeout_s if tier == "light" else self._heavy_timeout_s,
+            timeout_s=timeout_s,
         )
         messages = build_text_messages(prompt, system=system)
 
         try:
             response = bound_model.invoke(messages)
         except Exception as exc:
+            if temperature is not None and _is_temperature_rejection(exc):
+                # Some models accept exactly one temperature value (e.g. Kimi
+                # Coding requires 1.0) and reject every other with a
+                # deterministic 400. Retry once with the provider default so
+                # the fallback chain is not burned on a parameter mismatch.
+                logger.info(
+                    "HarnessAgentLLMClient: %s rejected temperature=%s (tier=%s); retrying with provider default",
+                    ref,
+                    temperature,
+                    tier,
+                )
+                try:
+                    default_bound = bind_call_options(
+                        model,
+                        max_tokens=max_tokens,
+                        temperature=None,
+                        response_format=response_format,
+                        timeout_s=timeout_s,
+                    )
+                    return stringify_content(default_bound.invoke(messages).content)
+                except Exception as retry_exc:  # pylint: disable=broad-except
+                    exc = retry_exc
             # Provider 400s (expired subscription, bad request) are not
             # always RuntimeError/OSError subclasses. Treat every model
             # failure as degrade-able so extract never kills the user turn.
@@ -216,6 +239,17 @@ def _first_ref(*refs: str | None) -> str | None:
         if isinstance(ref, str) and ref.strip():
             return ref.strip()
     return None
+
+
+def _is_temperature_rejection(exc: BaseException) -> bool:
+    """Whether a provider error rejects the requested temperature value.
+
+    Providers word this 400 differently ("invalid temperature",
+    "temperature only support 1"...); a broad substring match keeps us from
+    maintaining a per-provider catalogue. A false positive only costs one
+    extra call that fails the same way before the normal fallback.
+    """
+    return "temperature" in str(exc).lower()
 
 
 __all__ = ["HarnessAgentLLMClient"]
