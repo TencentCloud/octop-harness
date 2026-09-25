@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- MCP 工具参数模式保留 `object` 和 `array` 类型，避免对象参数被当作字符串。
+
 ## [1.0.0] - 2026-09-24
 
 ### 新增

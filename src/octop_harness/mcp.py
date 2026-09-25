@@ -148,6 +148,8 @@ def mcp_args_model(tool_name: str, input_schema: dict[str, Any]) -> type[Any]:
             py_type = float
         elif json_type == "boolean":
             py_type = bool
+        elif json_type in ("object", "array"):
+            py_type = dict[str, Any] if json_type == "object" else list[Any]
         else:
             py_type = str
         desc = spec_dict.get("description")
