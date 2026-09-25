@@ -176,6 +176,25 @@ class TestMcpArgsModel:
         assert "search_key" in model.model_fields
         assert model.model_fields["search_key"].is_required()
 
+    def test_preserves_object_and_array_properties(self) -> None:
+        model = mcp_args_model(
+            "lingxing_action",
+            {
+                "type": "object",
+                "required": ["toolId", "params"],
+                "properties": {
+                    "toolId": {"type": "string"},
+                    "params": {"type": "object"},
+                    "items": {"type": "array"},
+                },
+            },
+        )
+        props = model.model_json_schema()["properties"]
+        assert props["params"]["type"] == "object"
+        assert props["items"]["type"] == "array"
+        parsed = model.model_validate({"toolId": "get_my_sids", "params": {}, "items": [1]})
+        assert parsed.model_dump() == {"toolId": "get_my_sids", "params": {}, "items": [1]}
+
     def test_renames_leading_underscore_properties(self) -> None:
         model = mcp_args_model(
             "meeting_list",
