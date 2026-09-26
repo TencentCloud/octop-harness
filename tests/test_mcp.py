@@ -192,6 +192,26 @@ class TestMcpArgsModel:
         assert model.model_fields["client_info"].is_required()
         assert "query" in model.model_fields
 
+    def test_object_and_array_properties_keep_types(self) -> None:
+        model = mcp_args_model(
+            "crm_action",
+            {
+                "type": "object",
+                "required": ["tool_id", "params"],
+                "properties": {
+                    "tool_id": {"type": "string"},
+                    "params": {"type": "object", "properties": {}},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        )
+        parsed = model.model_validate({"tool_id": "t-1", "params": {"a": 1}, "tags": ["x", "y"]})
+        assert parsed.params == {"a": 1}
+        assert parsed.tags == ["x", "y"]
+        props = model.model_json_schema()["properties"]
+        assert props["params"]["type"] == "object"
+        assert props["tags"]["type"] == "array"
+
     def test_renames_reserved_base_model_properties(self) -> None:
         model = mcp_args_model(
             "tencent_lexiang_smartsheet_create",
