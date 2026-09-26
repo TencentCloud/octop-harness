@@ -141,7 +141,14 @@ def mcp_args_model(tool_name: str, input_schema: dict[str, Any]) -> type[Any]:
     used_names: set[str] = set()
     for key, spec in props.items():
         spec_dict: dict[str, Any] = spec if isinstance(spec, dict) else {}
-        json_type = spec_dict.get("type")
+        raw_type = spec_dict.get("type")
+        # JSON Schema allows type as an array (e.g. ["string", "null"]); pick the
+        # non-null entry so optional fields still map to the right Python type.
+        if isinstance(raw_type, list):
+            non_null = [t for t in raw_type if t != "null"]
+            json_type = non_null[0] if non_null else "string"
+        else:
+            json_type = raw_type
         if json_type == "integer":
             py_type: Any = int
         elif json_type == "number":
