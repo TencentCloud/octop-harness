@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- ``mcp_args_model`` maps JSON Schema ``object`` / ``array`` properties to
+  ``dict`` / ``list`` fields instead of coercing them to ``str``, so MCP tools
+  declaring structured arguments validate correctly.
+
 ## [1.0.0] - 2026-09-24
 
 ### 新增

@@ -130,6 +130,15 @@ class _McpArgsBase(BaseModel):
         return json_schema
 
 
+_JSON_TYPE_MAP: dict[str, Any] = {
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "object": dict[str, Any],
+    "array": list[Any],
+}
+
+
 def mcp_args_model(tool_name: str, input_schema: dict[str, Any]) -> type[Any]:
     """Build a Pydantic args model from an MCP tool ``inputSchema``."""
     props = input_schema.get("properties") or {}
@@ -141,15 +150,7 @@ def mcp_args_model(tool_name: str, input_schema: dict[str, Any]) -> type[Any]:
     used_names: set[str] = set()
     for key, spec in props.items():
         spec_dict: dict[str, Any] = spec if isinstance(spec, dict) else {}
-        json_type = spec_dict.get("type")
-        if json_type == "integer":
-            py_type: Any = int
-        elif json_type == "number":
-            py_type = float
-        elif json_type == "boolean":
-            py_type = bool
-        else:
-            py_type = str
+        py_type: Any = _JSON_TYPE_MAP.get(str(spec_dict.get("type") or ""), str)
         desc = spec_dict.get("description")
         field_name = _pydantic_field_name(str(key), used_names)
         if field_name != key:
