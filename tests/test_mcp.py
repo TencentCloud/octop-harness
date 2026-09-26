@@ -250,6 +250,48 @@ class TestMcpArgsModel:
         with pytest.raises(ValidationError, match="origin"):
             model.model_validate({"origin": None, "destination": None})
 
+    def test_object_and_array_schema_types_map_to_dict_list(self) -> None:
+        model = mcp_args_model(
+            "action",
+            {
+                "type": "object",
+                "required": ["toolId", "params"],
+                "properties": {
+                    "toolId": {"type": "string"},
+                    "params": {"type": "object", "properties": {}},
+                    "items": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        )
+        # object must map to dict, not str
+        params_ann = model.model_fields["params"].annotation
+        assert dict in getattr(params_ann, "__args__", (params_ann,))
+        # array must map to list
+        items_ann = model.model_fields["items"].annotation
+        assert list in getattr(items_ann, "__args__", (items_ann,))
+        # dict/list values validate
+        parsed = model.model_validate({"toolId": "t1", "params": {"k": "v"}, "items": ["a", "b"]})
+        assert parsed.params == {"k": "v"}
+        assert parsed.items == ["a", "b"]
+
+    def test_type_as_json_schema_array_picks_non_null(self) -> None:
+        model = mcp_args_model(
+            "create",
+            {
+                "type": "object",
+                "required": ["count"],
+                "properties": {
+                    "count": {"type": ["integer", "null"]},
+                    "label": {"type": ["string", "null"]},
+                },
+            },
+        )
+        # ["integer","null"] should map to int, not str
+        count_ann = model.model_fields["count"].annotation
+        assert int in getattr(count_ann, "__args__", (count_ann,))
+        parsed = model.model_validate({"count": 5})
+        assert parsed.count == 5
+
     @pytest.mark.asyncio
     async def test_strips_none_arguments_before_mcp_call(
         self,
