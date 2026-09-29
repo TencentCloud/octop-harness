@@ -114,8 +114,8 @@ def resolve_backend(
 
     Raises:
         ValueError: For unknown types or malformed specs.
-        ImportError: For ``s3`` / ``postgres`` when the
-            ``[remote-backends]`` extra isn't installed.
+        ImportError: For ``s3`` when ``boto3`` isn't installed, or for
+            ``postgres`` when the ``[remote-backends]`` extra isn't installed.
     """
     if spec is None:
         spec = DEFAULT_BACKEND_SPEC
@@ -452,25 +452,15 @@ def _looks_like_backend_instance(obj: Any) -> bool:
 def _build_s3(kwargs: dict[str, Any]) -> BackendProtocol:
     """S3-compatible backend (AWS S3, MinIO, custom S3-compatible stores).
 
-    Prefers ``deepagents_backends.S3Backend`` when available (installed via the
-    ``octop-harness[remote-backends]`` extra).  Falls back to the
-    bundled :class:`~octop_harness.backends.s3_backend.S3Backend` (boto3)
-    so that S3-compatible stores work without that optional dependency.
+    Uses the bundled :class:`~octop_harness.backends.s3_backend.S3Backend`
+    (boto3), which implements the current deepagents backend protocol.
 
     For Alibaba Cloud OSS use ``type="oss"`` and for Huawei Cloud OBS use
     ``type="obs"`` — both have dedicated backends that use the official SDKs.
     """
-    try:
-        from deepagents_backends import S3Backend, S3Config
+    from octop_harness.backends.s3_backend import S3Backend, S3Config
 
-        config = S3Config(**kwargs)
-        return cast("BackendProtocol", S3Backend(config))
-    except ImportError:
-        logger.info("deepagents-backends unavailable, falling back to S3Backend (boto3)")
-        from octop_harness.backends.s3_backend import S3Backend as _S3Backend
-        from octop_harness.backends.s3_backend import S3Config as _S3Config
-
-        return _S3Backend(_S3Config.from_kwargs(**kwargs))
+    return S3Backend(S3Config.from_kwargs(**kwargs))
 
 
 def _build_postgres(kwargs: dict[str, Any]) -> BackendProtocol:

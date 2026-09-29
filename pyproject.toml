@@ -51,7 +51,7 @@ dependencies = [
 # Fine-grained extras (prefer these in error messages / minimal installs)
 cli = ["click>=8.1", "rich>=13.0", "prompt-toolkit>=3.0", "python-dotenv>=1.0"]
 bedrock = ["langchain-aws>=0.2"]
-remote-backends = ['deepagents-backends>=0.2; python_version >= "3.12"']
+remote-backends = ['deepagents-backends>=0.2; python_version >= "3.12"', "boto3>=1.35"]
 docker = ["docker>=7.0"]
 opensandbox = ["opensandbox>=0.1.16,<1.2"]
 observability = ["langfuse>=4.9.0"]
@@ -64,12 +64,14 @@ web-search-all = [
     "google-api-python-client>=2.0",
 ]
 object-storage = [
+    "boto3>=1.35",
     "cos-python-sdk-v5>=1.9",
     "oss2>=2.18",
     "esdk-obs-python>=3.24",
 ]
 all = [  # library feature extras only; exclude cli — use [cli,all] when needed
     "langchain-aws>=0.2",
+    "boto3>=1.35",
     "cos-python-sdk-v5>=1.9",
     "oss2>=2.18",
     "esdk-obs-python>=3.24",
@@ -97,6 +99,7 @@ Changelog = "https://github.com/TencentCloud/octop-harness/blob/main/CHANGELOG.m
 
 [dependency-groups]
 dev = [
+    "boto3>=1.35",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",

@@ -1921,7 +1921,7 @@ wheels = [
 
 [[package]]
 name = "octop-harness"
-version = "0.9.9"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents" },
@@ -1947,6 +1947,7 @@ acp = [
 ]
 all = [
     { name = "agent-client-protocol" },
+    { name = "boto3" },
     { name = "cos-python-sdk-v5" },
     { name = "deepagents-backends" },
     { name = "docker" },
@@ -1980,6 +1981,7 @@ docker = [
     { name = "docker" },
 ]
 object-storage = [
+    { name = "boto3" },
     { name = "cos-python-sdk-v5" },
     { name = "esdk-obs-python" },
     { name = "oss2" },
@@ -1991,6 +1993,7 @@ opensandbox = [
     { name = "opensandbox" },
 ]
 remote-backends = [
+    { name = "boto3" },
     { name = "deepagents-backends" },
 ]
 web-search-all = [
@@ -2002,6 +2005,7 @@ web-search-all = [
 [package.dev-dependencies]
 dev = [
     { name = "agent-client-protocol" },
+    { name = "boto3" },
     { name = "click" },
     { name = "langfuse" },
     { name = "mss" },
@@ -2023,6 +2027,9 @@ dev = [
 requires-dist = [
     { name = "agent-client-protocol", marker = "extra == 'acp'", specifier = ">=0.9.0" },
     { name = "agent-client-protocol", marker = "extra == 'all'", specifier = ">=0.9.0" },
+    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.35" },
+    { name = "boto3", marker = "extra == 'object-storage'", specifier = ">=1.35" },
+    { name = "boto3", marker = "extra == 'remote-backends'", specifier = ">=1.35" },
     { name = "click", marker = "extra == 'cli'", specifier = ">=8.1" },
     { name = "cos-python-sdk-v5", marker = "extra == 'all'", specifier = ">=1.9" },
     { name = "cos-python-sdk-v5", marker = "extra == 'object-storage'", specifier = ">=1.9" },
@@ -2052,12 +2059,12 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0,<2.0" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=2.0" },
     { name = "markdownify", specifier = ">=0.13" },
-    { name = "mcp", specifier = ">=1.27.1,<2" },
+    { name = "mcp", specifier = ">=1.27.1,<3" },
     { name = "mss", marker = "extra == 'all'", specifier = ">=9.0" },
     { name = "mss", marker = "extra == 'desktop'", specifier = ">=9.0" },
     { name = "octop-browser", specifier = ">=0.9.9" },
     { name = "octop-memory", specifier = ">=0.9.9" },
-    { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=0.1.16,<0.2" },
+    { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=0.1.16,<1.2" },
     { name = "oss2", marker = "extra == 'all'", specifier = ">=2.18" },
     { name = "oss2", marker = "extra == 'object-storage'", specifier = ">=2.18" },
     { name = "pillow", marker = "extra == 'all'", specifier = ">=10.0" },
@@ -2076,6 +2083,7 @@ provides-extras = ["cli", "bedrock", "remote-backends", "docker", "opensandbox",
 [package.metadata.requires-dev]
 dev = [
     { name = "agent-client-protocol", specifier = ">=0.9.0" },
+    { name = "boto3", specifier = ">=1.35" },
     { name = "click", specifier = ">=8.1" },
     { name = "langfuse", specifier = ">=4.9.0" },
     { name = "mss", specifier = ">=9.0" },

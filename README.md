@@ -181,10 +181,10 @@ Optional dependency extras (install only what you need; missing extras fail at u
 |-------|----------------|
 | `cli` | Terminal CLI (`octop-harness`) |
 | `bedrock` | AWS Bedrock provider |
-| `object-storage` | Tencent COS + Alibaba OSS + Huawei OBS SDKs |
+| `object-storage` | S3-compatible storage (boto3) + Tencent COS + Alibaba OSS + Huawei OBS SDKs |
 | `desktop` | Desktop screenshot / input (`mss`, `pynput`, `pillow`) |
 | `web-search-all` | All web-search backends (Tavily / Brave / Google) |
-| `remote-backends` | Postgres / upstream S3 via `deepagents-backends` (Python ≥3.12) |
+| `remote-backends` | Postgres via `deepagents-backends` (Python ≥3.12) + S3-compatible storage (boto3) |
 | `observability` | Langfuse |
 | `acp` | ACP agent runner |
 | `all` | All library feature extras above (**excludes** `cli`; use `[cli,all]` for both) |

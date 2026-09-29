@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from io import BytesIO
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from deepagents.backends import CompositeBackend, LocalShellBackend
@@ -316,9 +318,7 @@ class TestRemoteBackendsImportError:
     """When ``deepagents-backends`` isn't importable, the factory must surface
     a helpful error rather than a generic ``ModuleNotFoundError``."""
 
-    def test_s3_falls_back_to_s3_compat_without_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # S3 now falls back to S3CompatBackend (boto3) instead of raising ImportError.
-        pytest.importorskip("boto3", reason="boto3 not installed; skipping S3CompatBackend fallback test")
+    def test_s3_uses_bundled_backend_without_remote_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from octop_harness.backends.s3_backend import S3CompatBackend
 
         monkeypatch.setitem(sys.modules, "deepagents_backends", None)
@@ -336,3 +336,47 @@ class TestRemoteBackendsImportError:
         monkeypatch.setitem(sys.modules, "deepagents_backends", None)
         with pytest.raises(ImportError, match="octop-harness\\[remote-backends\\]"):
             resolve_backend({"type": "postgres", "dsn": "postgresql://x"})
+
+
+def test_s3_uses_current_protocol_when_upstream_backend_is_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from botocore.exceptions import ClientError
+
+    from octop_harness.backends.s3_backend import S3Backend
+
+    def reject_upstream(*args: object, **kwargs: object) -> None:
+        pytest.fail("outdated deepagents-backends S3 backend must not be selected")
+
+    upstream = ModuleType("deepagents_backends")
+    upstream.S3Config = reject_upstream
+    upstream.S3Backend = reject_upstream
+    monkeypatch.setitem(sys.modules, "deepagents_backends", upstream)
+
+    objects: dict[str, bytes] = {}
+
+    def get_object(*, Bucket: str, Key: str) -> dict[str, BytesIO]:
+        if Key not in objects:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        return {"Body": BytesIO(objects[Key])}
+
+    def put_object(*, Bucket: str, Key: str, Body: bytes) -> None:
+        objects[Key] = Body
+
+    def list_objects_v2(**kwargs: object) -> dict[str, object]:
+        prefix = str(kwargs["Prefix"])
+        return {"Contents": [{"Key": key} for key in objects if key.startswith(prefix)]}
+
+    client = SimpleNamespace(get_object=get_object, put_object=put_object, list_objects_v2=list_objects_v2)
+    monkeypatch.setattr(S3Backend, "_build_client", staticmethod(lambda config: client))
+
+    backend = resolve_backend(
+        {
+            "type": "s3",
+            "bucket": "test-bucket",
+            "access_key_id": "test-access-key",
+            "secret_access_key": "test-secret-key",
+        }
+    )
+    assert isinstance(backend, S3Backend)
+    assert backend.write("/hello.txt", "hello").error is None
+    assert backend.read("/hello.txt").file_data["content"] == "hello"
+    assert backend.ls("/").entries == [{"path": "/hello.txt", "is_dir": False}]

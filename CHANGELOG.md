@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- S3-compatible workspaces use the bundled backend so read, write, and list work with the current deepagents protocol when `deepagents-backends` is installed.
+
 ### Fixed
 
 - Streamed content blocks (Anthropic thinking / text, OpenAI Responses) no
