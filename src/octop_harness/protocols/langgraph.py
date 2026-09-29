@@ -27,6 +27,28 @@ def _is_internal_model_stream(metadata: Any) -> bool:
     return isinstance(metadata, dict) and metadata.get("lc_source") in _INTERNAL_LC_SOURCES
 
 
+def _content_block_delta(block: Any) -> tuple[str, str]:
+    """Split a streamed content block into (text, reasoning) delta parts."""
+    if isinstance(block, str):
+        return block, ""
+    if not isinstance(block, dict):
+        return "", ""
+    block_type = block.get("type", "text")
+    if block_type == "thinking":
+        return "", str(block.get("thinking") or "")
+    if block_type == "text":
+        return str(block.get("text") or ""), ""
+    return "", ""
+
+
+def _emit_splitter_text(splitter: ThinkSplitter, text: str, node: str, out: list[dict[str, Any]]) -> None:
+    final_text, thinking_text = splitter.feed(text)
+    if thinking_text:
+        out.append({"type": AgentEventType.REASONING, "content": thinking_text, "node": node})
+    if final_text:
+        out.append({"type": AgentEventType.TOKEN, "content": final_text, "node": node})
+
+
 class AgentEventType(StrEnum):
     """Stream event types emitted by :meth:`~octop_harness.HarnessAgent.stream`."""
 
@@ -179,12 +201,17 @@ class LangGraphProtocol(ChatProtocol):
         if reasoning:
             out.append({"type": AgentEventType.REASONING, "content": reasoning, "node": node})
         content = msg_chunk.content if hasattr(msg_chunk, "content") else ""
-        if content:
-            final_text, thinking_text = splitter.feed(content)
-            if thinking_text:
-                out.append({"type": AgentEventType.REASONING, "content": thinking_text, "node": node})
-            if final_text:
-                out.append({"type": AgentEventType.TOKEN, "content": final_text, "node": node})
+        if isinstance(content, list):
+            # Anthropic / OpenAI-Responses streams deliver thinking and text as
+            # content blocks, not a plain str.
+            for block in content:
+                block_text, block_reasoning = _content_block_delta(block)
+                if block_reasoning:
+                    out.append({"type": AgentEventType.REASONING, "content": block_reasoning, "node": node})
+                if block_text:
+                    _emit_splitter_text(splitter, block_text, node, out)
+        elif content:
+            _emit_splitter_text(splitter, content, node, out)
         for tc in getattr(msg_chunk, "tool_call_chunks", None) or []:
             out.append(
                 {

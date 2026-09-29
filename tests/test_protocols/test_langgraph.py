@@ -508,6 +508,83 @@ class TestStream:
         assert "still thinking" in all_reasoning
 
     @pytest.mark.asyncio
+    async def test_stream_yields_events_from_content_blocks(self) -> None:
+        """List content (thinking + text blocks) → reasoning + token events."""
+        msg_chunk = MagicMock()
+        msg_chunk.type = "AIMessageChunk"
+        msg_chunk.content = [
+            {"type": "thinking", "thinking": "weighing options"},
+            {"type": "text", "text": "Here is the answer"},
+        ]
+        msg_chunk.additional_kwargs = {}
+        msg_chunk.tool_call_chunks = []
+
+        graph = MagicMock()
+        graph.astream = self._make_astream(
+            [
+                {"type": "messages", "data": (msg_chunk, {"langgraph_node": "agent"})},
+            ]
+        )
+
+        protocol = _make_protocol(graph)
+        chunks: list[dict[str, Any]] = []
+        async for chunk in protocol.stream([HumanMessage(content="hi")], {}):
+            chunks.append(chunk)
+
+        assert {"type": "reasoning", "content": "weighing options", "node": "agent"} in chunks
+        assert {"type": "token", "content": "Here is the answer", "node": "agent"} in chunks
+
+    @pytest.mark.asyncio
+    async def test_stream_skips_tool_use_content_blocks(self) -> None:
+        """tool_use content blocks are skipped; sibling blocks still stream."""
+        msg_chunk = MagicMock()
+        msg_chunk.type = "AIMessageChunk"
+        msg_chunk.content = [
+            {"type": "tool_use", "id": "tu1", "name": "search", "input": {"q": "hi"}},
+            {"type": "text", "text": "after the call"},
+        ]
+        msg_chunk.additional_kwargs = {}
+        msg_chunk.tool_call_chunks = []
+
+        graph = MagicMock()
+        graph.astream = self._make_astream(
+            [
+                {"type": "messages", "data": (msg_chunk, {"langgraph_node": "agent"})},
+            ]
+        )
+
+        protocol = _make_protocol(graph)
+        chunks: list[dict[str, Any]] = []
+        async for chunk in protocol.stream([HumanMessage(content="hi")], {}):
+            chunks.append(chunk)
+
+        token_events = [c for c in chunks if c["type"] == "token"]
+        assert token_events == [{"type": "token", "content": "after the call", "node": "agent"}]
+
+    @pytest.mark.asyncio
+    async def test_stream_str_content_unchanged(self) -> None:
+        """Plain str content still streams as a single token event (regression)."""
+        msg_chunk = MagicMock()
+        msg_chunk.type = "AIMessageChunk"
+        msg_chunk.content = "plain answer"
+        msg_chunk.additional_kwargs = {}
+        msg_chunk.tool_call_chunks = []
+
+        graph = MagicMock()
+        graph.astream = self._make_astream(
+            [
+                {"type": "messages", "data": (msg_chunk, {"langgraph_node": "agent"})},
+            ]
+        )
+
+        protocol = _make_protocol(graph)
+        chunks: list[dict[str, Any]] = []
+        async for chunk in protocol.stream([HumanMessage(content="hi")], {}):
+            chunks.append(chunk)
+
+        assert chunks == [{"type": "token", "content": "plain answer", "node": "agent"}]
+
+    @pytest.mark.asyncio
     async def test_stream_yields_hitl_required_on_interrupt(self) -> None:
         interrupt = MagicMock()
         interrupt.value = {

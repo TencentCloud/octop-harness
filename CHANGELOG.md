@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Streamed content blocks (Anthropic thinking / text, OpenAI Responses) no
+  longer crash chunk projection: list-typed ``AIMessageChunk.content`` is
+  normalized per block (thinking → reasoning, text → token) instead of raising
+  ``TypeError`` in ``ThinkSplitter.feed``. Plain ``str`` content is unchanged.
+
 ## [1.0.0] - 2026-09-24
 
 ### 新增
