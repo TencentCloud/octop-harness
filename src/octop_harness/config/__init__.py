@@ -468,6 +468,11 @@ class ProviderConfig:
     # most OpenAI-compatible vendors omit usage from streams without it.
     # Disable for relays that reject the ``stream_options`` field.
     stream_usage: bool = True
+    # Optional HTTP(S)/SOCKS proxy URL for this provider's LLM requests, e.g.
+    # ``"http://127.0.0.1:7890"``. When set, a dedicated httpx client is
+    # created for the provider and all its model calls go through the proxy
+    # (independent of the process-wide HTTP_PROXY / HTTPS_PROXY env vars).
+    proxy: str | None = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -480,6 +485,11 @@ class ProviderConfig:
             raise ValueError(f"Unsupported provider protocol: {self.protocol!r}")
         if self.protocol == "bedrock" and any(model.native_tool_search for model in self.models):
             raise ValueError("native_tool_search is only supported for openai and anthropic protocols")
+        if self.proxy is not None:
+            proxy = self.proxy.strip()
+            if not proxy.lower().startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://")):
+                raise ValueError(f"ProviderConfig({self.id}).proxy must be an HTTP(S)/SOCKS URL")
+            self.proxy = proxy or None
         if self.session_header is not None:
             header = self.session_header.strip()
             self.session_header = header or None
@@ -519,6 +529,7 @@ class ProviderConfig:
             "session_header": self.session_header,
             "models": [m.to_dict() for m in self.models],
             "stream_usage": self.stream_usage,
+            "proxy": self.proxy,
         }
 
     @classmethod
@@ -534,6 +545,7 @@ class ProviderConfig:
             session_header=_optional_session_header(data.get("session_header")),
             models=[ModelConfig.from_dict(m) for m in data.get("models") or []],
             stream_usage=bool(data.get("stream_usage", True)),
+            proxy=((data.get("proxy") or "").strip() or None),
         )
 
 

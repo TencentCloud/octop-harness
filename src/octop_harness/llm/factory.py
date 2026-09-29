@@ -28,6 +28,7 @@ emit the field, so it's always-on for ``protocol="openai"``.
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,8 @@ if TYPE_CHECKING:
     from octop_harness.config import HarnessAgentConfig
     from octop_harness.llm.access import ModelAccess
     from octop_harness.protocols.base import ChatProtocol
+
+logger = logging.getLogger(__name__)
 
 
 class ChatModelFactory:
@@ -275,7 +278,20 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig) -> BaseChatModel
     if provider.headers:
         kwargs["default_headers"] = dict(provider.headers)
     session_clients = None
-    if provider.session_header:
+    if provider.proxy:
+        # A dedicated httpx client pinned to this provider's proxy. trust_env
+        # is off so the configured proxy never fights the process-wide
+        # HTTP_PROXY / HTTPS_PROXY env vars (and vice versa).
+        import httpx
+
+        kwargs["http_client"] = httpx.Client(proxy=provider.proxy, trust_env=False)
+        kwargs["http_async_client"] = httpx.AsyncClient(proxy=provider.proxy, trust_env=False)
+        if provider.session_header:
+            logger.warning(
+                "Provider %r sets both proxy and session_header; session_header is ignored",
+                provider.id,
+            )
+    elif provider.session_header:
         # Dedicated clients so the hook is not installed on langchain's shared
         # default httpx client (which other providers reuse).
         session_clients = session_http_clients(provider.session_header)
@@ -652,8 +668,17 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig) -> BaseChatMo
     # Enable extended thinking when model.thinking is explicitly True.
     if model.thinking is True:
         kwargs["thinking"] = {"type": "adaptive"}
+    if provider.proxy:
+        # ChatAnthropic ships an ``anthropic_proxy`` option backed by the
+        # anthropic SDK's httpx client; no extra client plumbing needed.
+        kwargs["anthropic_proxy"] = provider.proxy
+        if provider.session_header:
+            logger.warning(
+                "Provider %r sets both proxy and session_header; session_header is ignored",
+                provider.id,
+            )
     instance_a: BaseChatModel = ChatAnthropic(**kwargs)
-    if provider.session_header:
+    if provider.session_header and not provider.proxy:
         bind_anthropic_session_header(instance_a, provider.session_header)
     _stamp_native_tool_search_capability(instance_a, provider.protocol, model.native_tool_search)
     _inject_model_token_limits(instance_a, model)
