@@ -176,6 +176,20 @@ class TestMcpArgsModel:
         assert "search_key" in model.model_fields
         assert model.model_fields["search_key"].is_required()
 
+    def test_builds_object_fields(self) -> None:
+        model = mcp_args_model(
+            "feishu_base",
+            {
+                "type": "object",
+                "required": ["args"],
+                "properties": {
+                    "args": {"type": "object"},
+                },
+            },
+        )
+        parsed = model.model_validate({"args": {"base-token": "base_x"}})
+        assert parsed.args == {"base-token": "base_x"}
+
     def test_renames_leading_underscore_properties(self) -> None:
         model = mcp_args_model(
             "meeting_list",
