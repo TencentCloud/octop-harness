@@ -805,6 +805,28 @@ class HarnessAgentConfig:
     # recently-active sessions. Default 6h.
     memory_extract_interval_seconds: float = 21600.0
 
+    # —— Memory: auxiliary LLM call options ——
+    # Call options for the aux client (extraction / promotion / page regen),
+    # independent of the main chat model's options.
+    # Read-timeout overrides per tier. ``None`` → the client defaults
+    # (light 120s / heavy 300s). These bound how long a memory call may
+    # wait for the provider — distinct from ``memory_extract_idle_seconds``,
+    # which only decides *when* extraction fires, not how long it may run
+    # (TencentCloud/Octop#1360).
+    memory_aux_light_timeout_s: float | None = None
+    memory_aux_heavy_timeout_s: float | None = None
+    # Completion budget applied when a memory call does not pass its own
+    # ``max_tokens`` (extractors pass one; promotion / page regen do not).
+    # ``None`` → no client-side default. Keeps reasoning-heavy models from
+    # chaining past the read timeout on aux calls.
+    memory_aux_max_tokens: int | None = None
+    # Vendor-specific request extras bound to every aux call, for thinking
+    # controls on OpenAI-compatible endpoints, e.g.
+    #   {"chat_template_kwargs": {"enable_thinking": false}}   (Qwen-style)
+    #   {"reasoning_effort": "low"}                            (OpenAI-style)
+    # Bound only for langchain-openai models; other providers ignore it.
+    memory_aux_extra_body: dict[str, Any] | None = None
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
@@ -828,6 +850,15 @@ class HarnessAgentConfig:
                 seen_ids.add(p.id)
         if self.session_log_max_bytes <= 0:
             raise ValueError("session_log_max_bytes must be positive")
+
+        for name in ("memory_aux_light_timeout_s", "memory_aux_heavy_timeout_s"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive, got {value!r}")
+        if self.memory_aux_max_tokens is not None and self.memory_aux_max_tokens < 1:
+            raise ValueError(f"memory_aux_max_tokens must be >= 1, got {self.memory_aux_max_tokens!r}")
+        if self.memory_aux_extra_body is not None and not isinstance(self.memory_aux_extra_body, dict):
+            raise ValueError("memory_aux_extra_body must be a dict when set")
 
         if self.language not in ("en", "zh"):
             raise ValueError(f"language must be 'en' or 'zh', got {self.language!r}")
@@ -1045,6 +1076,12 @@ class HarnessAgentConfig:
             "memory_extract_trigger_mode": self.memory_extract_trigger_mode,
             "memory_extract_idle_seconds": self.memory_extract_idle_seconds,
             "memory_extract_interval_seconds": self.memory_extract_interval_seconds,
+            "memory_aux_light_timeout_s": self.memory_aux_light_timeout_s,
+            "memory_aux_heavy_timeout_s": self.memory_aux_heavy_timeout_s,
+            "memory_aux_max_tokens": self.memory_aux_max_tokens,
+            "memory_aux_extra_body": (
+                dict(self.memory_aux_extra_body) if self.memory_aux_extra_body is not None else None
+            ),
             "debug": self.debug,
             "language": self.language,
             "default_timezone": self.default_timezone,

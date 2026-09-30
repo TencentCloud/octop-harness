@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal
 
 from octop_memory.ports.llm import LLMClientError, LLMTier
@@ -51,6 +52,13 @@ class HarnessAgentLLMClient:
             first non-empty value wins; both tiers share it.
         default_model: Last-resort model ref when no aux and no live chat
             model have been recorded yet.
+        light_timeout_s / heavy_timeout_s: Read-timeout overrides per tier;
+            ``None`` keeps the class defaults.
+        default_max_tokens: Completion budget applied when a call does not
+            pass its own ``max_tokens``; ``None`` adds no client-side cap.
+        extra_body: Vendor-specific request extras (thinking controls on
+            OpenAI-compatible endpoints) bound to every call; ``None`` or
+            empty adds nothing.
     """
 
     # Default timeouts in seconds. Light covers per-session extraction and alias
@@ -69,6 +77,8 @@ class HarnessAgentLLMClient:
         default_model: str | None = None,
         light_timeout_s: float | None = None,
         heavy_timeout_s: float | None = None,
+        default_max_tokens: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
     ) -> None:
         configured = _first_ref(aux_model, light_model, heavy_model)
         if configured is None and default_model is None:
@@ -80,6 +90,8 @@ class HarnessAgentLLMClient:
         self._default_model = default_model
         self._light_timeout_s = light_timeout_s if light_timeout_s is not None else self.DEFAULT_LIGHT_TIMEOUT_S
         self._heavy_timeout_s = heavy_timeout_s if heavy_timeout_s is not None else self.DEFAULT_HEAVY_TIMEOUT_S
+        self._default_max_tokens = default_max_tokens
+        self._extra_body = dict(extra_body) if extra_body else None
         self._current_lock = threading.Lock()
         self._current_model: str | None = None
 
@@ -111,6 +123,7 @@ class HarnessAgentLLMClient:
         if not refs:
             raise LLMClientError(f"no model configured for tier={tier!r}")
 
+        effective_max_tokens = max_tokens if max_tokens is not None else self._default_max_tokens
         last_exc: BaseException | None = None
         for index, ref in enumerate(refs):
             try:
@@ -119,7 +132,7 @@ class HarnessAgentLLMClient:
                     prompt,
                     tier=tier,
                     system=system,
-                    max_tokens=max_tokens,
+                    max_tokens=effective_max_tokens,
                     temperature=temperature,
                     response_format=response_format,
                 )
@@ -187,6 +200,7 @@ class HarnessAgentLLMClient:
             temperature=temperature,
             response_format=response_format,
             timeout_s=self._light_timeout_s if tier == "light" else self._heavy_timeout_s,
+            extra_body=self._extra_body,
         )
         messages = build_text_messages(prompt, system=system)
 

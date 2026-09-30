@@ -29,6 +29,7 @@ def bind_call_options(
     temperature: float | None = None,
     response_format: Literal["text", "json"] = "text",
     timeout_s: float | None = None,
+    extra_body: dict[str, Any] | None = None,
 ) -> Any:
     kwargs: dict[str, object] = {}
     if max_tokens is not None:
@@ -41,8 +42,13 @@ def bind_call_options(
         kwargs["timeout"] = timeout_s
     # ``response_format={"type": "json_object"}`` is OpenAI-specific;
     # Anthropic's adapter rejects ``json_object`` before sending.
-    if response_format == "json" and _supports_openai_response_format(model):
+    if response_format == "json" and _is_langchain_openai_model(model):
         kwargs["response_format"] = {"type": "json_object"}
+    # ``extra_body`` rides the OpenAI SDK ``create()`` call (thinking
+    # controls, vendor knobs). Only bound for langchain-openai models —
+    # other adapters would choke on the unknown key before sending.
+    if extra_body and _is_langchain_openai_model(model):
+        kwargs["extra_body"] = dict(extra_body)
     if not kwargs:
         return model
     bind = getattr(model, "bind", None)
@@ -72,12 +78,16 @@ def _stringify_block(block: object) -> str:
     return text if isinstance(text, str) else ""
 
 
-def _supports_openai_response_format(model: object) -> bool:
+def _is_langchain_openai_model(model: object) -> bool:
     for cls in type(model).mro():
         module = getattr(cls, "__module__", "")
         if module.startswith("langchain_openai"):
             return True
     return False
+
+
+# Backwards-compatible alias (pre-1360 name).
+_supports_openai_response_format = _is_langchain_openai_model
 
 
 __all__ = [
