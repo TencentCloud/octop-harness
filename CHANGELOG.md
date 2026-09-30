@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Avoid stamping the agent name onto assistant messages so strict OpenAI-compatible
+  gateways can accept replayed conversation history.
 - Streamed content blocks (Anthropic thinking / text, OpenAI Responses) no
   longer crash chunk projection: list-typed ``AIMessageChunk.content`` is
   normalized per block (thinking → reasoning, text → token) instead of raising

@@ -1652,12 +1652,13 @@ class HarnessAgent:
         checkpointer = self._resolve_checkpointer()
         self._checkpointer_instance: Any = checkpointer
 
+        # A graph name is copied onto AIMessage.name and rejected by strict
+        # OpenAI-compatible gateways when that message is replayed next turn.
         kwargs: dict[str, Any] = {
             "model": self._build_seed_model(),
             "tools": tools,
             "middleware": middleware,
             "backend": self._backend,
-            "name": cfg.name,
             "debug": cfg.debug,
         }
         base_prompt = cfg.system_prompt.rstrip() if cfg.system_prompt else ""
