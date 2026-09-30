@@ -226,8 +226,10 @@ class HarnessLocalShellBackend(LocalShellBackend):
         virtual_mode: bool | None = None,
         env: dict[str, str] | None = None,
         inherit_env: bool = True,
+        explicit_virtual_paths: bool = False,
         **kwargs: Any,
     ) -> None:
+        self._explicit_virtual_paths = explicit_virtual_paths
         self._extra_env = {str(k): str(v) for k, v in dict(env or {}).items()}
         self._inherit_live = inherit_env
         expanded_root = _expand_local_path(root_dir) if root_dir is not None else None
@@ -325,6 +327,8 @@ class HarnessLocalShellBackend(LocalShellBackend):
         if not command or not isinstance(command, str):
             return super().execute(command, timeout=timeout)
         self._refresh_execute_env()
+        if self._explicit_virtual_paths:
+            return self._execute_on_host(command, timeout=timeout)
         if self.virtual_mode and not is_host_root(self.cwd):
             command = rewrite_virtual_paths_in_command(
                 command,
