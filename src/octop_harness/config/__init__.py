@@ -594,6 +594,10 @@ class HarnessAgentConfig:
     #   - a dict with a "type" key plus per-type kwargs
     #   - any object that implements ``BackendProtocol``
     backend: Any = None
+    # New Windows subtree experts set this. Shell commands, environment
+    # values, and stdout/stderr are not scanned for paths. Callers convert a
+    # virtual path through the ``virtual_to_native_path`` tool.
+    explicit_virtual_paths: bool = False
 
     # —— Protocol ——
     protocol: str = "langgraph"

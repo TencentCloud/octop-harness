@@ -88,6 +88,7 @@ def resolve_backend(
     workspace_dir: str | Path | None = None,
     system_files_path: str = "",
     _scope_host_artifacts: bool = True,
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     """Turn a user-provided backend spec into a ``BackendProtocol`` instance.
 
@@ -150,6 +151,7 @@ def resolve_backend(
             workspace_dir=workspace_dir,
             system_files_path=system_files_path,
             scope_host_artifacts=_scope_host_artifacts,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
     if backend_type == "filesystem":
         return _build_filesystem(
@@ -157,6 +159,7 @@ def resolve_backend(
             workspace_dir=workspace_dir,
             system_files_path=system_files_path,
             scope_host_artifacts=_scope_host_artifacts,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
     if backend_type == "state":
         return _build_state(kwargs)
@@ -167,6 +170,7 @@ def resolve_backend(
             kwargs,
             workspace_dir=workspace_dir,
             system_files_path=system_files_path,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
     if backend_type == "s3":
         return _build_s3(kwargs)
@@ -209,6 +213,7 @@ def _artifacts_root_for_workspace(
     *,
     root_dir: str | Path | None = None,
     system_files_path: str = "",
+    explicit_virtual_paths: bool = False,
 ) -> str | None:
     """Backend path prefix for deepagents offloads, or ``None`` if unmappable.
 
@@ -224,7 +229,7 @@ def _artifacts_root_for_workspace(
         return str(host_target)
 
     root = Path(root_dir).expanduser().resolve()
-    if root == Path(_HOST_ROOT).resolve():
+    if not explicit_virtual_paths and root == Path(_HOST_ROOT).resolve():
         # Host-rooted backend: offloads must be redirected to the workspace
         # (host '/' is often not writable, e.g. macOS).
         return str(host_target)
@@ -257,6 +262,7 @@ def _maybe_wrap_workspace_artifacts(
     workspace_dir: str | Path | None,
     system_files_path: str = "",
     scope_host_artifacts: bool,
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     """Scope deepagents offloads to the agent workspace (under system_files_path)."""
     if not scope_host_artifacts or workspace_dir is None:
@@ -265,6 +271,7 @@ def _maybe_wrap_workspace_artifacts(
         workspace_dir,
         root_dir=root_dir,
         system_files_path=system_files_path,
+        explicit_virtual_paths=explicit_virtual_paths,
     )
     if artifacts_root is None:
         return backend
@@ -281,6 +288,7 @@ def _build_local_shell(
     workspace_dir: str | Path | None,
     system_files_path: str = "",
     scope_host_artifacts: bool = True,
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     from octop_harness.backends.bwrap_shell import (
         BubbledLocalShellBackend,
@@ -304,10 +312,12 @@ def _build_local_shell(
             workspace_dir if workspace_dir is not None else "<none>",
         )
 
+    from_spec = bool(kwargs.pop("explicit_virtual_paths", False))
     shell_kwargs: dict[str, Any] = {
         "root_dir": str(root_dir),
         "virtual_mode": virtual_mode,
         "workspace_dir": workspace_dir,
+        "explicit_virtual_paths": explicit_virtual_paths or from_spec,
         **kwargs,
     }
     bwrap = resolve_bubbled_bwrap(virtual_mode=bool(virtual_mode), root_dir=root_dir)
@@ -325,6 +335,7 @@ def _build_local_shell(
         workspace_dir=workspace_dir,
         system_files_path=effective_system,
         scope_host_artifacts=scope_host_artifacts,
+        explicit_virtual_paths=bool(shell_kwargs["explicit_virtual_paths"]),
     )
 
 
@@ -334,6 +345,7 @@ def _build_filesystem(
     workspace_dir: str | Path | None,
     system_files_path: str = "",
     scope_host_artifacts: bool = True,
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     from deepagents.backends import FilesystemBackend
 
@@ -343,6 +355,7 @@ def _build_filesystem(
     virtual_mode = kwargs.pop("virtual_mode", True)
     spec_system = kwargs.pop("system_files_path", None)
     effective_system = str(spec_system if spec_system is not None else system_files_path or "")
+    kwargs.pop("explicit_virtual_paths", None)
     backend = FilesystemBackend(root_dir=str(root_dir), virtual_mode=virtual_mode, **kwargs)
     return _maybe_wrap_workspace_artifacts(
         backend,
@@ -350,6 +363,7 @@ def _build_filesystem(
         workspace_dir=workspace_dir,
         system_files_path=effective_system,
         scope_host_artifacts=scope_host_artifacts,
+        explicit_virtual_paths=explicit_virtual_paths,
     )
 
 
@@ -377,6 +391,7 @@ def _build_composite(
     *,
     workspace_dir: str | Path | None,
     system_files_path: str = "",
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     default = kwargs.pop("default", None)
     if default is None:
@@ -392,6 +407,7 @@ def _build_composite(
         workspace_dir=workspace_dir,
         system_files_path=system_files_path,
         _scope_host_artifacts=False,
+        explicit_virtual_paths=explicit_virtual_paths,
     )
     resolved_routes = {
         prefix: resolve_backend(
@@ -399,6 +415,7 @@ def _build_composite(
             workspace_dir=workspace_dir,
             system_files_path=system_files_path,
             _scope_host_artifacts=False,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
         for prefix, sub in routes.items()
     }
@@ -408,6 +425,7 @@ def _build_composite(
             workspace_dir,
             root_dir=default_root,
             system_files_path=system_files_path,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
         if artifacts_root is not None:
             kwargs["artifacts_root"] = artifacts_root

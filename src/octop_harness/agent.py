@@ -1317,6 +1317,7 @@ class HarnessAgent:
                 spec,
                 workspace_dir=self._workspace_path,
                 system_files_path=self._config.system_files_path,
+                explicit_virtual_paths=self._config.explicit_virtual_paths,
             )
 
     def _wire_workspace_dotenv_for_execute(self) -> None:
@@ -1354,6 +1355,12 @@ class HarnessAgent:
         if cfg.media_generation is not None and cfg.media_generation.has_api_key():
             tools.extend(build_media_generation_tools(self._workspace, cfg.media_generation))
         tools.extend(self._memory_runtime.build_tools())
+        if cfg.explicit_virtual_paths:
+            from octop_harness.backends.explicit_virtual_path import (
+                build_virtual_to_native_tool,
+            )
+
+            tools.append(build_virtual_to_native_tool(self._backend))
         if cfg.tools:
             tools.extend(cfg.tools)
         if cfg.acp_delegate_enabled:
