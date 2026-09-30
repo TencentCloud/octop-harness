@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Postgres backends accept a full libpq URI under ``connection_string`` /
+  ``dsn``; this previously raised ``TypeError``, so a dashboard-configured
+  Postgres backend never started. Keys outside ``PostgresConfig``'s fields are
+  now dropped on the split-field path too, so an empty ``connection_string`` or
+  a UI-only key no longer reaches the dataclass.
 - Streamed content blocks (Anthropic thinking / text, OpenAI Responses) no
   longer crash chunk projection: list-typed ``AIMessageChunk.content`` is
   normalized per block (thinking → reasoning, text → token) instead of raising

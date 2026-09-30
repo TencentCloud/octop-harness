@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from deepagents.middleware.filesystem import supports_execution
 from octop_harness.backends import (
     DEFAULT_BACKEND_SPEC,
     MountedCompositeBackend,
+    _postgres_config_kwargs,
     resolve_backend,
     spec_supports_execution,
 )
@@ -336,3 +338,139 @@ class TestRemoteBackendsImportError:
         monkeypatch.setitem(sys.modules, "deepagents_backends", None)
         with pytest.raises(ImportError, match="octop-harness\\[remote-backends\\]"):
             resolve_backend({"type": "postgres", "dsn": "postgresql://x"})
+
+
+class TestPostgresConfigKwargs:
+    """``_postgres_config_kwargs`` accepts a whole libpq URI as well as split fields.
+
+    Exercised against a stub dataclass so the mapping is covered even where
+    ``deepagents-backends`` (the optional extra) is not installed. URI parsing
+    itself needs ``psycopg``, which ships with that extra.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_psycopg(self) -> None:
+        pytest.importorskip(
+            "psycopg",
+            reason="psycopg not installed; skipping libpq connection-string mapping test",
+        )
+
+    @dataclass
+    class _StubConfig:
+        host: str = "localhost"
+        port: int = 5432
+        database: str = "deepagents"
+        user: str = "postgres"
+        password: str = ""
+        table: str = "files"
+        schema: str = "public"
+        min_pool_size: int = 5
+        max_pool_size: int = 20
+        max_idle_seconds: float = 300.0
+        connection_timeout: float = 30.0
+        sslmode: str = "prefer"
+
+    def test_connection_string_uri_is_parsed(self) -> None:
+        """dbname → database, port as int, and query params the config models."""
+        resolved = _postgres_config_kwargs(
+            {"connection_string": "postgresql://alice:s3cr3t@db.example.com:5433/mydb?sslmode=require"},
+            self._StubConfig,
+        )
+        assert resolved["host"] == "db.example.com"
+        assert resolved["port"] == 5433
+        assert resolved["database"] == "mydb"
+        assert resolved["user"] == "alice"
+        assert resolved["password"] == "s3cr3t"
+        assert resolved["sslmode"] == "require"
+
+    def test_dsn_alias_is_accepted(self) -> None:
+        resolved = _postgres_config_kwargs(
+            {"dsn": "postgresql://bob:pw@localhost/reports"},
+            self._StubConfig,
+        )
+        assert resolved["user"] == "bob"
+        assert resolved["database"] == "reports"
+
+    def test_non_uri_fields_survive_alongside_connection_string(self) -> None:
+        """Knobs the URI cannot express (table / schema / pool sizing) are kept.
+
+        Octop's adapter sets ``schema`` when the row's region is not ``public``.
+        """
+        resolved = _postgres_config_kwargs(
+            {
+                "connection_string": "postgresql://u:p@h/d",
+                "schema": "harness",
+                "max_pool_size": 42,
+            },
+            self._StubConfig,
+        )
+        assert resolved["schema"] == "harness"
+        assert resolved["max_pool_size"] == 42
+        assert resolved["host"] == "h"
+
+    def test_empty_connection_string_does_not_leak_the_key(self) -> None:
+        """A falsy URI must still be filtered, not passed through as a kwarg.
+
+        ``""`` took the early return and handed ``kwargs`` over untouched, so
+        ``PostgresConfig(connection_string="")`` raised the same TypeError this
+        helper exists to prevent — reachable whenever a caller stores an empty
+        string instead of omitting the field.
+        """
+        resolved = _postgres_config_kwargs(
+            {"connection_string": "", "host": "h", "user": "u"},
+            self._StubConfig,
+        )
+        assert "connection_string" not in resolved
+        self._StubConfig(**resolved)
+
+    def test_keys_without_a_slot_are_dropped_without_a_uri(self) -> None:
+        """Unslotted keys are dropped on the split-field path too.
+
+        The docstring promises this unconditionally, but only the URI branch
+        filtered; a spec carrying e.g. ``previewable`` raised ``TypeError``
+        inside ``PostgresConfig``.
+        """
+        resolved = _postgres_config_kwargs(
+            {"host": "h", "previewable": True},
+            self._StubConfig,
+        )
+        assert resolved == {"host": "h"}
+
+    def test_invalid_uri_error_does_not_leak_password(self) -> None:
+        """libpq echoes the offending token; the password must not reach the error."""
+        with pytest.raises(ValueError) as excinfo:
+            _postgres_config_kwargs(
+                {"connection_string": "mysql://alice:s3cr3t@db.example.com/mydb"},
+                self._StubConfig,
+            )
+        exc = excinfo.value
+        assert "s3cr3t" not in str(exc)
+        # With ``from exc`` the libpq error would sit on __cause__ and put the URI
+        # back into any traceback dump, so assert on the chain, not just the message.
+        assert exc.__cause__ is None
+        assert exc.__suppress_context__ is True
+
+
+class TestPostgresConnectionStringEndToEnd:
+    """``resolve_backend`` wires the mapping into a real ``PostgresBackend``."""
+
+    @pytest.fixture(autouse=True)
+    def _require_extra(self) -> None:
+        pytest.importorskip(
+            "deepagents_backends",
+            reason="deepagents-backends not installed; skipping postgres backend test",
+        )
+
+    def test_resolve_backend_accepts_connection_string(self) -> None:
+        backend = resolve_backend(
+            {
+                "type": "postgres",
+                "connection_string": "postgresql://alice:s3cr3t@db.example.com:5433/mydb",
+                "schema": "harness",
+            }
+        )
+        config = backend._config  # type: ignore[attr-defined]
+        assert config.host == "db.example.com"
+        assert config.port == 5433
+        assert config.database == "mydb"
+        assert config.schema == "harness"

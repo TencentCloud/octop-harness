@@ -492,8 +492,46 @@ def _build_postgres(kwargs: dict[str, Any]) -> BackendProtocol:
             "(Python >=3.12 required).",
         ) from exc
 
-    config = PostgresConfig(**kwargs)
+    config = PostgresConfig(**_postgres_config_kwargs(kwargs, PostgresConfig))
     return cast("BackendProtocol", PostgresBackend(config))
+
+
+def _postgres_config_kwargs(kwargs: dict[str, Any], config_cls: type[Any]) -> dict[str, Any]:
+    """Translate a postgres spec into ``PostgresConfig`` keyword arguments.
+
+    Accepts split libpq fields or a whole URI under ``connection_string`` /
+    ``dsn``. Keys the config has no slot for are dropped.
+    """
+    # Filter before either branch: a key the dataclass has no slot for would
+    # otherwise reach ``PostgresConfig(**kwargs)`` whenever no URI is present.
+    allowed = config_cls.__dataclass_fields__
+    resolved = {k: v for k, v in kwargs.items() if k in allowed}
+
+    uri = kwargs.get("connection_string") or kwargs.get("dsn")
+    if not uri:
+        return resolved
+
+    from psycopg import ProgrammingError
+    from psycopg.conninfo import conninfo_to_dict
+
+    try:
+        parsed: dict[str, Any] = conninfo_to_dict(str(uri))
+        # libpq calls the database ``dbname``, and reports the port as a string.
+        if "dbname" in parsed:
+            parsed["database"] = parsed.pop("dbname")
+        if "port" in parsed:
+            parsed["port"] = int(parsed["port"])
+    except (ProgrammingError, ValueError):
+        # libpq echoes the offending token — often the whole URI, password included.
+        # ``from None`` keeps it out of ``__cause__`` and any traceback dump.
+        raise ValueError(
+            "postgres connection string is not a valid libpq URI or key=value string",
+        ) from None
+
+    # The URI wins for the keys it covers; split-field extras (``table`` / pool
+    # sizing) survive; libpq keys the config lacks are dropped.
+    resolved.update({k: v for k, v in parsed.items() if k in allowed})
+    return resolved
 
 
 def _build_cos(kwargs: dict[str, Any]) -> BackendProtocol:
