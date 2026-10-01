@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Workspace subagent loading no longer logs a spurious ``Duplicate subagent
+  name`` warning when the same ``.octop/agents/*.md`` definition is discovered
+  through both the legacy ``agents/`` root and the canonical
+  ``system_files_path`` root; the warning now only fires for genuine name
+  collisions between different files.
 - Leftover Windows absolute paths in filesystem tool calls (``D:\\octop-data\\…``)
   are rewritten onto the current storage root when the same suffix exists, and
   still soft-fail to the model when they do not — they no longer abort the turn
