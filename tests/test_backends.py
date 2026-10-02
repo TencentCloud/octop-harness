@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import sys
+import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 from deepagents.backends import CompositeBackend, LocalShellBackend
@@ -336,3 +338,131 @@ class TestRemoteBackendsImportError:
         monkeypatch.setitem(sys.modules, "deepagents_backends", None)
         with pytest.raises(ImportError, match="octop-harness\\[remote-backends\\]"):
             resolve_backend({"type": "postgres", "dsn": "postgresql://x"})
+
+
+class _StrictS3Backend:
+    """Test double for ``deepagents_backends.S3Backend`` with a strict config.
+
+    ``_StrictS3Config.__init__`` accepts only its declared kwargs, so any
+    unknown spec key raises ``TypeError`` — exactly like the real third-party
+    dataclass. The backend instance records the config it was built with.
+    """
+
+    class _Config:
+        def __init__(
+            self,
+            *,
+            bucket: str,
+            access_key_id: str | None = None,
+            secret_access_key: str | None = None,
+        ) -> None:
+            self.bucket = bucket
+            self.access_key_id = access_key_id
+            self.secret_access_key = secret_access_key
+
+    def __init__(self, config: Any) -> None:
+        self._config = config
+        type(self).last_config = config
+
+
+def _install_strict_deepagents_backends(monkeypatch: pytest.MonkeyPatch) -> type[_StrictS3Backend]:
+    module = types.ModuleType("deepagents_backends")
+    module.S3Config = _StrictS3Backend._Config  # type: ignore[attr-defined]
+    module.S3Backend = _StrictS3Backend  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepagents_backends", module)
+    return _StrictS3Backend
+
+
+class TestS3SpecKeyTolerance:
+    """Free-form spec keys (Octop storage ``config_json``) must not tear down
+    S3 backend resolution, and community path-style booleans should reach the
+    bundled config's ``addressing_style`` knob."""
+
+    @staticmethod
+    def _base_kwargs() -> dict[str, Any]:
+        return {
+            "type": "s3",
+            "bucket": "test-bucket",
+            "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+            "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        }
+
+    def test_normalize_translates_path_style_aliases(self) -> None:
+        from octop_harness.backends import _s3_normalize_spec_kwargs
+
+        assert _s3_normalize_spec_kwargs({"s3_force_path_style": True}) == {
+            "addressing_style": "path"
+        }
+        assert _s3_normalize_spec_kwargs({"force_path_style": True, "prefix": "x/"}) == {
+            "addressing_style": "path",
+            "prefix": "x/",
+        }
+        # All alias spellings are consumed, not just the first truthy one.
+        out = _s3_normalize_spec_kwargs({"path_style": True, "s3_force_path_style": False})
+        assert out == {"addressing_style": "path"}
+        # An explicit false expresses no preference: default addressing wins.
+        assert _s3_normalize_spec_kwargs({"path_style": False}) == {}
+        # An explicit addressing_style is never clobbered by an alias.
+        assert _s3_normalize_spec_kwargs(
+            {"s3_force_path_style": True, "addressing_style": "virtual"}
+        ) == {"addressing_style": "virtual"}
+        # No aliases: kwargs pass through unchanged.
+        assert _s3_normalize_spec_kwargs({"prefix": "p/"}) == {"prefix": "p/"}
+
+    def test_strict_third_party_config_tolerates_unknown_keys(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Unknown keys are dropped with a warning instead of raising
+        ``TypeError`` from the strict third-party dataclass constructor."""
+        backend_cls = _install_strict_deepagents_backends(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="octop_harness.backends"):
+            backend = resolve_backend({**self._base_kwargs(), "some_unknown_option": 123})
+
+        assert isinstance(backend, backend_cls)
+        assert backend._config.bucket == "test-bucket"
+        assert any("some_unknown_option" in record.message for record in caplog.records)
+
+    def test_third_party_config_hints_at_missing_addressing_support(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A requested addressing_style the third-party config cannot honour
+        surfaces as a targeted warning pointing at the bundled backend."""
+        backend_cls = _install_strict_deepagents_backends(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="octop_harness.backends"):
+            backend = resolve_backend({**self._base_kwargs(), "addressing_style": "path"})
+
+        assert isinstance(backend, backend_cls)
+        assert any(
+            "addressing_style" in record.message and "bundled" in record.message
+            for record in caplog.records
+        )
+
+    def test_bundled_backend_honours_translated_path_style(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``s3_force_path_style`` reaches the bundled config as
+        ``addressing_style="path"`` (the knob MinIO-style stores need)."""
+        pytest.importorskip("boto3", reason="boto3 not installed; skipping bundled S3 test")
+        from octop_harness.backends.s3_backend import S3CompatBackend
+
+        monkeypatch.setitem(sys.modules, "deepagents_backends", None)
+        backend = resolve_backend({**self._base_kwargs(), "s3_force_path_style": True})
+
+        assert isinstance(backend, S3CompatBackend)
+        assert backend._config.addressing_style == "path"
+
+    def test_known_keys_still_reach_the_third_party_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Filtering only removes unknown keys; recognised ones pass through."""
+        backend_cls = _install_strict_deepagents_backends(monkeypatch)
+
+        backend = resolve_backend(
+            {**self._base_kwargs(), "endpoint_url": "http://127.0.0.1:9000", "prefix": "octop/"}
+        )
+
+        assert isinstance(backend, backend_cls)
+        assert backend._config.bucket == "test-bucket"
+        assert backend._config.access_key_id == "AKIAIOSFODNN7EXAMPLE"

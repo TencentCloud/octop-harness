@@ -38,6 +38,8 @@ this backend uses (put/get/list/delete/head/multipart).
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -449,6 +451,55 @@ def _looks_like_backend_instance(obj: Any) -> bool:
     return all(hasattr(obj, m) for m in ("read", "write", "ls", "edit", "glob", "grep"))
 
 
+# Community spellings of "use path-style addressing" seen across S3 tooling
+# (AWS SDKs, MinIO docs, rclone, ...). The bundled ``S3Config`` models the
+# same knob as ``addressing_style="path"``.
+_S3_PATH_STYLE_ALIASES: frozenset[str] = frozenset(
+    {"s3_force_path_style", "force_path_style", "path_style"}
+)
+
+
+def _s3_normalize_spec_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Translate community path-style booleans into ``addressing_style``.
+
+    Free-form storage configs (e.g. Octop ``config_json``) commonly carry
+    ``s3_force_path_style: true``; map it onto the one knob the bundled
+    ``S3Config`` understands instead of silently ignoring it. An explicit
+    ``addressing_style`` in the spec always wins.
+    """
+    aliases_present = [alias for alias in _S3_PATH_STYLE_ALIASES if alias in kwargs]
+    if not aliases_present:
+        return kwargs
+    out = dict(kwargs)
+    values = [out.pop(alias) for alias in aliases_present]
+    if any(values) and "addressing_style" not in out:
+        out["addressing_style"] = "path"
+    return out
+
+
+def _filter_unknown_config_kwargs(config_cls: type, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys *config_cls* cannot accept, with a warning naming each.
+
+    Specs reaching :func:`resolve_backend` may carry free-form keys (Octop
+    merges storage-backend ``config_json`` verbatim). Strict constructors
+    raise ``TypeError`` on unknown keys, which would tear down backend
+    resolution for the whole backend over one surplus option; tolerate and
+    log instead.
+    """
+    try:
+        known = {f.name for f in dataclasses.fields(config_cls)}
+    except TypeError:  # not a dataclass
+        known = set(inspect.signature(config_cls.__init__).parameters) - {"self"}
+    dropped = sorted(set(kwargs) - known)
+    if dropped:
+        logger.warning(
+            "Ignoring unsupported %s spec keys: %s",
+            config_cls.__name__,
+            ", ".join(dropped),
+        )
+    return {k: v for k, v in kwargs.items() if k in known}
+
+
 def _build_s3(kwargs: dict[str, Any]) -> BackendProtocol:
     """S3-compatible backend (AWS S3, MinIO, custom S3-compatible stores).
 
@@ -457,13 +508,26 @@ def _build_s3(kwargs: dict[str, Any]) -> BackendProtocol:
     bundled :class:`~octop_harness.backends.s3_backend.S3Backend` (boto3)
     so that S3-compatible stores work without that optional dependency.
 
+    Unknown spec keys never abort resolution: whichever config class is
+    constructed, they are dropped with a warning first, and the community
+    path-style booleans (``s3_force_path_style`` & variants) are translated
+    to ``addressing_style``. The third-party config has no addressing knob,
+    so a requested ``addressing_style`` surfaces as a targeted warning there.
+
     For Alibaba Cloud OSS use ``type="oss"`` and for Huawei Cloud OBS use
     ``type="obs"`` — both have dedicated backends that use the official SDKs.
     """
+    kwargs = _s3_normalize_spec_kwargs(kwargs)
     try:
         from deepagents_backends import S3Backend, S3Config
 
-        config = S3Config(**kwargs)
+        filtered = _filter_unknown_config_kwargs(S3Config, kwargs)
+        if "addressing_style" in kwargs and "addressing_style" not in filtered:
+            logger.warning(
+                "deepagents_backends.S3Config has no addressing_style support; "
+                "path-style addressing is only provided by the bundled boto3 S3 backend"
+            )
+        config = S3Config(**filtered)
         return cast("BackendProtocol", S3Backend(config))
     except ImportError:
         logger.info("deepagents-backends unavailable, falling back to S3Backend (boto3)")

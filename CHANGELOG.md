@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer crash chunk projection: list-typed ``AIMessageChunk.content`` is
   normalized per block (thinking → reasoning, text → token) instead of raising
   ``TypeError`` in ``ThinkSplitter.feed``. Plain ``str`` content is unchanged.
+- S3 backend resolution no longer aborts on unknown spec keys coming from
+  free-form storage configs (Octop ``config_json``, e.g. ``s3_force_path_style``):
+  unsupported keys are dropped with a warning whichever ``S3Config`` variant is
+  constructed, and the community path-style booleans (``s3_force_path_style`` /
+  ``force_path_style`` / ``path_style``) translate to ``addressing_style="path"``
+  on the bundled boto3 backend. A requested ``addressing_style`` the third-party
+  config cannot honour logs a targeted warning.
 
 ## [1.0.0] - 2026-09-24
 
