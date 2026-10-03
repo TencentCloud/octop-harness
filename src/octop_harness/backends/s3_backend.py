@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from deepagents.backends.protocol import FileData, FileInfo
 
@@ -273,7 +273,7 @@ class S3Backend(CloudStorageBackend):
         from botocore.exceptions import ClientError
 
         try:
-            return client.list_objects_v2(**kwargs)
+            return cast("dict[str, Any]", client.list_objects_v2(**kwargs))
         except ClientError as exc:
             if not (_is_s3_not_implemented(exc) or _is_s3_signature_mismatch(exc)):
                 raise
@@ -301,7 +301,7 @@ class S3Backend(CloudStorageBackend):
                 if code in {"NoSuchKey", "404", "NotFound"} or http_status == 404:
                     return None
                 raise
-            return resp["Body"].read()
+            return cast("bytes", resp["Body"].read())
 
         try:
             return _load(self._client)

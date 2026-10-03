@@ -239,10 +239,10 @@ def _present_workspace_path(
             except OSError:
                 candidate = Path(text)
         try:
-            rel = candidate.relative_to(ws)
+            rel_path = candidate.relative_to(ws)
         except ValueError:
             continue
-        posix = rel.as_posix()
+        posix = rel_path.as_posix()
         return posix if posix else "."
     if raw.startswith("/"):
         return raw.lstrip("/") or "."

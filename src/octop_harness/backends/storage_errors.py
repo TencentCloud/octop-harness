@@ -178,12 +178,10 @@ def classify_storage_error(
         return ClassifiedStorageError(message=_FRIENDLY[key], message_key=key)
 
     code = extract_storage_error_code(raw)
-    key = _CODE_KEYS.get(code or "")
     detail = _clean_error_text(raw)
-    if key is None:
-        key = _key_from_phrases(f"{code or ''} {detail}")
-    if key:
-        return ClassifiedStorageError(message=_FRIENDLY[key], message_key=key, code=code)
+    mapped = _CODE_KEYS.get(code or "") or _key_from_phrases(f"{code or ''} {detail}")
+    if mapped:
+        return ClassifiedStorageError(message=_FRIENDLY[mapped], message_key=mapped, code=code)
 
     op_key = _OP_KEYS.get(op or "")
     if op_key:

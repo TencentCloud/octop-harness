@@ -193,14 +193,16 @@ class PostgresConfig:
         from psycopg.conninfo import make_conninfo
 
         timeout = max(1, int(self.connection_timeout))
-        return make_conninfo(
-            host=self.host,
-            port=int(self.port),
-            dbname=self.database,
-            user=self.user,
-            password=self.password,
-            sslmode=self.sslmode,
-            connect_timeout=timeout,
+        return str(
+            make_conninfo(
+                host=self.host,
+                port=int(self.port),
+                dbname=self.database,
+                user=self.user,
+                password=self.password,
+                sslmode=self.sslmode,
+                connect_timeout=timeout,
+            )
         )
 
 

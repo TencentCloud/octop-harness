@@ -237,6 +237,8 @@ module = [
     "prompt_toolkit.*",
     "boto3.*",
     "botocore.*",
+    "psycopg",
+    "psycopg.*",
     "psutil.*",
     "fastmcp.*",
     "acp.*",
