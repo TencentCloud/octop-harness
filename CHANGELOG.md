@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- PII protection detects mainland China mobile numbers (common 13-19
+  prefixes, optional ``+86`` / ``0086``) and 18-character resident IDs with
+  a known province code, 1900-2099 birth date, and a valid checksum.
+  Existing ``pii_strategy`` / ``pii_surfaces`` apply; 15-digit IDs and other
+  countries’ numbers are out of scope.
 - Optional ``explicit_virtual_paths`` for subtree experts: shell command,
   environment, and stdout are left unparsed; callers convert one virtual
   absolute path through ``virtual_to_native_path``. Default stays off.
