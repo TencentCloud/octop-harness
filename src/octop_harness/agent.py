@@ -1146,6 +1146,14 @@ class HarnessAgent:
         ws = self._workspace_path.expanduser().resolve()
         root, virtual = self._peek_backend_mount()
         if not virtual or root is None:
+            from octop_harness.backends.workspace import (
+                is_cloud_storage_backend,
+                remote_workspace_virtual_root,
+            )
+
+            backend = getattr(self, "_backend", None)
+            if backend is not None and is_cloud_storage_backend(backend):
+                ws = Path(remote_workspace_virtual_root(ws))
             return ws
         try:
             if root == Path("/").resolve():
@@ -1154,9 +1162,7 @@ class HarnessAgent:
         except (OSError, ValueError):
             return ws
         posix = rel.as_posix()
-        if not posix or posix == ".":
-            return Path("/")
-        return Path("/" + posix)
+        return Path("/") if not posix or posix == "." else Path("/" + posix)
 
     def _host_system_dir(self) -> Path:
         """Host directory for sessions / sqlite — under the on-disk workspace."""

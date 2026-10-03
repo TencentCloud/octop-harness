@@ -162,7 +162,7 @@ pip install 'octop-harness[cli,all]'
 | `object-storage`  | 腾讯云 COS + 阿里云 OSS + 华为云 OBS SDK                          |
 | `desktop`         | 桌面截图 / 键鼠（`mss`、`pynput`、`pillow`）                       |
 | `web-search-all`  | 全部网页搜索后端（Tavily / Brave / Google）                        |
-| `remote-backends` | 经 `deepagents-backends` 的 Postgres / 上游 S3（Python ≥3.12） |
+| `remote-backends` | Postgres 工作区后端（`psycopg`）。S3 使用内置 boto3 后端。 |
 | `observability`   | Langfuse                                                 |
 | `acp`             | ACP agent runner                                         |
 | `all`             | 上面全部**库功能** extras（**不含** `cli`；两者都要则用 `[cli,all]`）      |

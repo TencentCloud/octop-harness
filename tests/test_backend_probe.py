@@ -20,3 +20,8 @@ def test_probe_filesystem_roundtrip(tmp_path: Path) -> None:
 def test_probe_incomplete_cos() -> None:
     result = probe_backend({"type": "cos", "bucket": "only-bucket"})
     assert result["ok"] is False
+
+
+def test_probe_postgres_missing_host() -> None:
+    result = probe_backend({"type": "postgres"})
+    assert result["ok"] is False

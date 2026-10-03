@@ -50,6 +50,7 @@ from .utils import (
     materialize_storage_path,
     mkdir_local_path,
     move_local_path,
+    relative_virtual_path,
 )
 
 if TYPE_CHECKING:
@@ -220,6 +221,11 @@ def _present_workspace_path(
     raw = storage_path.strip().replace("\\", "/")
     if not raw:
         return "."
+    if backend is not None and is_cloud_storage_backend(backend):
+        virt = remote_workspace_virtual_root(workspace_dir)
+        rel = relative_virtual_path(raw, virt)
+        if rel is not None:
+            return rel if rel else "."
     ws = workspace_dir.resolve()
     for text in (_unmap_virtual_key(raw, backend), raw):
         if text is None:
@@ -315,6 +321,30 @@ def _has_backend_mount(backend: object) -> bool:
     if getattr(backend, "sandbox_fs", False):
         return False
     return materialize_storage_path("/", backend=backend, must_exist=False) is not None
+
+
+def is_cloud_storage_backend(backend: object) -> bool:
+    """True for COS/S3/OSS/OBS/Postgres — object stores with a shared virtual ``/``."""
+    try:
+        from octop_harness.backends.cloud_storage_base import CloudStorageBackend
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(backend, CloudStorageBackend)
+
+
+def remote_workspace_virtual_root(workspace_dir: Path) -> str:
+    """Stable folder under a remote backend's ``/`` for one agent workspace.
+
+    Host paths such as ``~/.octop/agents/<id>`` must not leak into object
+    keys. Agent-facing ``/.octop/workspaces/<id>`` is kept as-is. Listing
+    the storage root then shows workspace folders instead of a flat dump
+    of ``SOUL.md`` / ``skills`` mixed with host-home prefixes.
+    """
+    text = workspace_dir.as_posix().replace("\\", "/").rstrip("/")
+    if text.startswith("/.octop/"):
+        return text or "/"
+    name = workspace_dir.name.strip() or "workspace"
+    return f"/.octop/workspaces/{name}"
 
 
 def _local_workspace_path(fragment: str, workspace_dir: Path) -> Path:
@@ -482,9 +512,11 @@ class BackendWorkspace:
         """Return a backend protocol key, or ``None`` for local workspace I/O.
 
         Relative paths are always resolved against this workspace's
-        ``workspace_dir`` (the path persisted on the agent). Backends with no
-        host mount (COS/S3/OSS/OBS, Docker sandbox) store that relative path as
-        a virtual ``/…`` key. Host-mounted backends keep mapping through
+        ``workspace_dir`` (the path persisted on the agent). Docker /
+        OpenSandbox flatten to a virtual ``/…`` key (the sandbox *is* the
+        workspace). COS/S3/OSS/OBS/Postgres nest under
+        ``/.octop/workspaces/<id>`` so listing the storage root shows
+        workspace folders. Host-mounted backends keep mapping through
         ``root_dir`` / ``cwd``.
         """
         if path is None:
@@ -494,9 +526,11 @@ class BackendWorkspace:
             path = default
         s = str(path).strip()
         if s.startswith("~"):
-            return str(Path(s).expanduser().resolve())
+            expanded = str(Path(s).expanduser().resolve())
+            return self._remap_cloud_absolute(expanded) if is_cloud_storage_backend(self._backend) else expanded
         if s.startswith("/"):
-            return apply_system_files_prefix(s.replace("\\", "/"), self._system_files_path)
+            mapped = apply_system_files_prefix(s.replace("\\", "/"), self._system_files_path)
+            return self._remap_cloud_absolute(mapped) if is_cloud_storage_backend(self._backend) else mapped
 
         fragment = self._stored_relative(s) if map_system_paths else _strip_relative_prefix(s.replace("\\", "/"))
         workspace = self._workspace_dir.resolve()
@@ -514,9 +548,55 @@ class BackendWorkspace:
                 rel_posix = ""
 
         if not _has_backend_mount(self._backend):
+            if is_cloud_storage_backend(self._backend):
+                root = remote_workspace_virtual_root(workspace)
+                return root if not rel_posix else f"{root}/{rel_posix}"
             return "/" if not rel_posix else f"/{rel_posix}"
 
         return _virtual_key_under_mount(local, self._backend)
+
+    def _remap_cloud_absolute(self, mapped: str) -> str:
+        """Map a host or virtual absolute onto the remote workspace folder."""
+        virt = remote_workspace_virtual_root(self._workspace_dir)
+        raw = str(mapped).replace("\\", "/").rstrip("/") or "/"
+        try:
+            rel = Path(mapped).resolve().relative_to(self._workspace_dir)
+        except (ValueError, OSError):
+            rel = None
+        if rel is not None:
+            posix = rel.as_posix()
+            return virt if not posix or posix == "." else f"{virt}/{posix}"
+        if raw == virt or raw.startswith(f"{virt}/"):
+            return raw
+        return mapped if str(mapped).startswith("/") else f"/{mapped}"
+
+    def _legacy_flattened_key(self, fragment: str, *, map_system_paths: bool) -> str | None:
+        """Pre-nesting remote key (``/SOUL.md``) for read failback."""
+        if not is_cloud_storage_backend(self._backend):
+            return None
+        text = str(fragment).strip().replace("\\", "/")
+        if text.startswith("~") or text.startswith("/"):
+            return None
+        stored = self._stored_relative(text) if map_system_paths else _strip_relative_prefix(text)
+        if not stored or stored == ".":
+            return None
+        return f"/{stored}"
+
+    def _candidate_storage_keys(
+        self,
+        path: str,
+        *,
+        map_system_paths: bool = True,
+    ) -> list[str]:
+        """Ordered backend keys to probe: nested workspace first, then legacy flatten."""
+        keys: list[str] = []
+        key = self._backend_storage_key(path, map_system_paths=map_system_paths)
+        if key is not None:
+            keys.append(key)
+        legacy = self._legacy_flattened_key(path, map_system_paths=map_system_paths)
+        if legacy is not None and legacy not in keys:
+            keys.append(legacy)
+        return keys
 
     def _local_path_for_relative(self, path: str) -> Path:
         return Path(self.resolve_path(path))
@@ -524,7 +604,7 @@ class BackendWorkspace:
     def _mutation_storage_key(self, path: str) -> str | None:
         """Return the backend key used by mkdir/delete/move protocol helpers."""
         key = self._backend_storage_key(path)
-        if key is None or _backend_virtual_mode(self._backend):
+        if key is None or _backend_virtual_mode(self._backend) or is_cloud_storage_backend(self._backend):
             return key
         return f"/{self._stored_relative(_normalize_workspace_fragment(path))}"
 
@@ -630,9 +710,9 @@ class BackendWorkspace:
             for candidate in self._iter_materialize_candidates(fragment, map_system_paths=False):
                 if candidate.exists():
                     return True
-            key = self._backend_storage_key(fragment, map_system_paths=False)
-            if key is not None and backend_file_exists(self._backend, key):
-                return True
+            for key in self._candidate_storage_keys(fragment, map_system_paths=False):
+                if backend_file_exists(self._backend, key):
+                    return True
         return False
 
     def read_text(self, path: str, *, limit: int = 10_000_000) -> str | None:
@@ -653,18 +733,16 @@ class BackendWorkspace:
                 else:
                     return text if len(text) <= limit else text[:limit]
 
-            key = self._backend_storage_key(fragment, map_system_paths=False)
-            if key is None:
-                continue
-            try:
-                result = self._backend.read(key, offset=0, limit=limit)
-            except BACKEND_CALL_ERRORS:
-                logger.warning("BackendWorkspace.read_text failed for %s", key, exc_info=True)
-                continue
-            if result.error is not None or result.file_data is None:
-                continue
-            content = result.file_data.get("content", "")
-            return content if isinstance(content, str) else None
+            for key in self._candidate_storage_keys(fragment, map_system_paths=False):
+                try:
+                    result = self._backend.read(key, offset=0, limit=limit)
+                except BACKEND_CALL_ERRORS:
+                    logger.warning("BackendWorkspace.read_text failed for %s", key, exc_info=True)
+                    continue
+                if result.error is not None or result.file_data is None:
+                    continue
+                content = result.file_data.get("content", "")
+                return content if isinstance(content, str) else None
         return None
 
     def write_text(self, path: str, content: str, *, force: bool = False) -> None:
@@ -709,22 +787,20 @@ class BackendWorkspace:
                         exc_info=True,
                     )
 
-            key = self._backend_storage_key(fragment, map_system_paths=False)
-            if key is None:
-                continue
             download = getattr(self._backend, "download_files", None)
             if download is None:
                 continue
-            try:
-                results = download([key])
-            except BACKEND_CALL_ERRORS:
-                logger.warning("BackendWorkspace.download_bytes failed for %s", key, exc_info=True)
-                continue
-            if not results:
-                continue
-            data = _download_row_bytes(results[0])
-            if data is not None:
-                return data
+            for key in self._candidate_storage_keys(fragment, map_system_paths=False):
+                try:
+                    results = download([key])
+                except BACKEND_CALL_ERRORS:
+                    logger.warning("BackendWorkspace.download_bytes failed for %s", key, exc_info=True)
+                    continue
+                if not results:
+                    continue
+                data = _download_row_bytes(results[0])
+                if data is not None:
+                    return data
         return None
 
     def list_dir(self, path: str = ".") -> list[Any] | None:
@@ -1229,5 +1305,7 @@ __all__ = [
     "USER_FILENAME",
     "BackendWorkspace",
     "apply_system_files_prefix",
+    "is_cloud_storage_backend",
     "normalize_system_files_path",
+    "remote_workspace_virtual_root",
 ]

@@ -209,6 +209,57 @@ class TestBackendWorkspaceAsync:
         assert ws._backend_storage_key(".octop/avatar.png") == "/.octop/avatar.png"
         assert str(workspace_dir) not in (ws._backend_storage_key("SOUL.md") or "")
 
+    def test_cloud_storage_nests_under_virtual_workspace_folder(self, tmp_path: Path) -> None:
+        from octop_harness.backends.cloud_storage_base import CloudStorageBackend
+        from octop_harness.backends.workspace import remote_workspace_virtual_root
+
+        class _StubCloud(CloudStorageBackend):
+            def _prefix(self) -> str:
+                return ""
+
+            def _get_file_data(self, path: str) -> Any:
+                return None
+
+            def _put_file_data(self, path: str, file_data: Any) -> None:
+                return None
+
+            def _ls_entries(self, path: str) -> list[Any]:
+                return []
+
+            def _collect_recursive(self, path: str) -> dict[str, Any]:
+                return {}
+
+            def _iter_prefix_object_keys(self, path: str) -> Any:
+                return iter(())
+
+            def _prefix_has_objects(self, path: str) -> bool:
+                return False
+
+            def _copy_object(self, src: str, dest: str) -> None:
+                return None
+
+            def _put_dir_marker(self, virtual_dir: str) -> None:
+                return None
+
+            def delete_object(self, path: str) -> None:
+                return None
+
+            def delete_prefix(self, path: str) -> int:
+                return 0
+
+        workspace_dir = tmp_path / "AGT1B2"
+        workspace_dir.mkdir()
+        ws = BackendWorkspace(_StubCloud(), workspace_dir)
+        virt = remote_workspace_virtual_root(workspace_dir)
+        assert virt == "/.octop/workspaces/AGT1B2"
+        assert ws._backend_storage_key("SOUL.md") == f"{virt}/SOUL.md"
+        assert ws._backend_storage_key(".") == virt
+        assert ws._backend_storage_key("skills/demo/SKILL.md") == f"{virt}/skills/demo/SKILL.md"
+        assert str(workspace_dir) not in (ws._backend_storage_key("SOUL.md") or "")
+        assert ws._backend_storage_key(str(workspace_dir / "SOUL.md")) == f"{virt}/SOUL.md"
+        assert ws._mutation_storage_key("skills") == f"{virt}/skills"
+        assert ws.present_path(f"{virt}/SOUL.md") == "SOUL.md"
+
     async def test_aupload_many_sync_fallback_reports_upload_files(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock
 

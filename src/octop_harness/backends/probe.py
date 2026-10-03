@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from octop_harness.backends.s3_backend import cos_spec_to_s3_compat
+from octop_harness.backends.storage_errors import (
+    classify_probe_exception,
+    classify_storage_error,
+)
 
 from .utils import materialize_storage_path
 
@@ -45,15 +49,6 @@ def probe_backend(
     Returns a JSON-friendly dict: ``{ok, message?}`` or ``{ok, message_key?}``.
     """
     backend_type = str(spec.get("type") or "")
-    if backend_type == "postgres":
-        configured = bool(spec.get("connection_string") or spec.get("dsn"))
-        message = (
-            "postgres configuration present (no file round-trip)"
-            if configured
-            else "postgres connection not configured"
-        )
-        return ProbeResult(ok=configured, message=message).as_dict()
-
     workspace = tempfile.mkdtemp(prefix="harness-probe-")
     test_name = f"{_PROBE_PREFIX}{uuid.uuid4().hex}.txt"
     test_path = f"/{test_name}"
@@ -65,7 +60,8 @@ def probe_backend(
         result = _run_probe_roundtrip(spec, backend, test_path, workspace)
     except (ImportError, ModuleNotFoundError, OSError, PermissionError, RuntimeError, TypeError, ValueError) as exc:
         logger.info("backend probe failed for type=%s: %s", backend_type, exc)
-        result = ProbeResult(ok=False, message=str(exc))
+        classified = classify_probe_exception(exc)
+        result = ProbeResult(ok=False, message=classified.message, message_key=classified.message_key)
     finally:
         if backend is not None:
             close = getattr(backend, "close", None)
@@ -85,22 +81,31 @@ def _run_probe_roundtrip(
 ) -> ProbeResult:
     write_result = backend.write(test_path, _PROBE_CONTENT)
     if getattr(write_result, "error", None):
-        return ProbeResult(ok=False, message=f"write failed: {write_result.error}")
+        return _probe_io_failure("write", write_result.error)
 
     read_result = backend.read(test_path)
     if getattr(read_result, "error", None):
-        return ProbeResult(ok=False, message=f"read failed: {read_result.error}")
+        return _probe_io_failure("read", read_result.error)
 
     file_data = getattr(read_result, "file_data", None) or {}
     content = file_data.get("content") if isinstance(file_data, dict) else None
     if content != _PROBE_CONTENT:
-        return ProbeResult(ok=False, message="read content mismatch")
+        return ProbeResult(
+            ok=False,
+            message="Read-back content did not match what was written.",
+            message_key="probe_content_mismatch",
+        )
 
     deleted, delete_err = _delete_probe_object(spec, backend, test_path, workspace)
     if not deleted:
-        return ProbeResult(ok=False, message=delete_err or "delete failed")
+        return _probe_io_failure("delete", delete_err or "delete failed")
 
     return ProbeResult(ok=True, message_key="probe_roundtrip_ok")
+
+
+def _probe_io_failure(op: str, raw: str | BaseException | None) -> ProbeResult:
+    classified = classify_storage_error(raw, op=op)
+    return ProbeResult(ok=False, message=classified.message, message_key=classified.message_key)
 
 
 def _cleanup_probe_workspace(workspace: str, test_name: str) -> None:
@@ -135,7 +140,7 @@ def _delete_probe_object(
 ) -> tuple[bool, str | None]:
     backend_type = str(spec.get("type") or "")
 
-    if backend_type in {"cos", "s3", "oss", "obs"}:
+    if backend_type in {"cos", "s3", "oss", "obs", "postgres"}:
         # All cloud backends inherit CloudStorageBackend and expose delete_object().
         # When the native COS SDK is unavailable, _resolve_probe_backend already
         # falls back to S3Backend, so backend is always one of these concrete types.

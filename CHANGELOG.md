@@ -15,8 +15,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- S3 backend resolution always uses the bundled boto3 implementation, which
+  speaks deepagents 0.7 (`WriteResult` / `ReadResult` / `ls` / `glob` /
+  `grep`). The `deepagents-backends` 0.2 S3 client is no longer preferred —
+  it still passes the removed `files_update` keyword and cannot list or read
+  under 0.7. Community path-style aliases (`s3_force_path_style` /
+  `force_path_style` / `path_style`) map to `addressing_style="path"`.
+  Custom endpoints default to SigV4 + path-style, disable optional CRC
+  checksums, and fall back ListObjectsV2 → ListObjects / GetObject when the
+  store rejects a header or signature flavour.
+- Postgres backend specs accept a libpq `connection_string` / `dsn` and drop
+  unknown keys instead of raising `TypeError` on `PostgresConfig`.
+- Postgres workspace I/O uses a bundled `psycopg` backend that speaks
+  deepagents 0.7 (`WriteResult` / `ReadResult` / `ls` / `glob` / `grep`).
+  Probe performs a real write→read→delete round-trip; the table is created
+  on first use.
+- COS / S3 / OSS / OBS / Postgres workspaces no longer flatten files onto
+  the storage root. Agent files live under `/.octop/workspaces/<id>/` so
+  listing `/` shows workspace folders, then the workspace tree. Host
+  paths such as `~/.octop/agents/<id>` are remapped onto that virtual
+  folder and are not stored as object keys.
 - Docker execution reloads the global environment file even when a same-size edit or atomic replacement preserves its modification timestamp, avoiding stale injected values.
-
 - Streamed content blocks (Anthropic thinking / text, OpenAI Responses) no
   longer crash chunk projection: list-typed ``AIMessageChunk.content`` is
   normalized per block (thinking → reasoning, text → token) instead of raising

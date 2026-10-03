@@ -26,7 +26,7 @@ Per design discussion (round 3):
       onto ``root_dir`` and executes from the host workspace.
     - Remote backends (``s3`` / ``postgres`` / ``cos``) ignore ``root_dir``
       entirely; they have their own addressing scheme (``bucket`` /
-      ``prefix`` / ``connection_string``).
+      ``prefix`` / host + table).
     - Pre-constructed backend instances (anything that quacks like
       ``BackendProtocol``) bypass the factory entirely.
 
@@ -114,8 +114,7 @@ def resolve_backend(
 
     Raises:
         ValueError: For unknown types or malformed specs.
-        ImportError: For ``s3`` / ``postgres`` when the
-            ``[remote-backends]`` extra isn't installed.
+        ImportError: For ``postgres`` when ``psycopg`` is not installed.
     """
     if spec is None:
         spec = DEFAULT_BACKEND_SPEC
@@ -452,48 +451,35 @@ def _looks_like_backend_instance(obj: Any) -> bool:
 def _build_s3(kwargs: dict[str, Any]) -> BackendProtocol:
     """S3-compatible backend (AWS S3, MinIO, custom S3-compatible stores).
 
-    Prefers ``deepagents_backends.S3Backend`` when available (installed via the
-    ``octop-harness[remote-backends]`` extra).  Falls back to the
-    bundled :class:`~octop_harness.backends.s3_backend.S3Backend` (boto3)
-    so that S3-compatible stores work without that optional dependency.
+    Always uses the bundled :class:`~octop_harness.backends.s3_backend.S3Backend`
+    (boto3). That implementation speaks the deepagents 0.7 ``BackendProtocol``
+    (``WriteResult`` / ``ReadResult`` / ``ls`` / ``glob`` / ``grep``). The
+    third-party ``deepagents-backends`` S3 client stays on the 0.5/0.6 protocol
+    and must not be selected here.
+
+    Community path-style aliases (``s3_force_path_style`` / ``path_style``)
+    are translated by :meth:`S3Config.from_kwargs`. Unknown keys go into
+    ``extra`` instead of raising.
 
     For Alibaba Cloud OSS use ``type="oss"`` and for Huawei Cloud OBS use
     ``type="obs"`` — both have dedicated backends that use the official SDKs.
     """
-    try:
-        from deepagents_backends import S3Backend, S3Config
+    from octop_harness.backends.s3_backend import S3Backend as _S3Backend
+    from octop_harness.backends.s3_backend import S3Config as _S3Config
 
-        config = S3Config(**kwargs)
-        return cast("BackendProtocol", S3Backend(config))
-    except ImportError:
-        logger.info("deepagents-backends unavailable, falling back to S3Backend (boto3)")
-        from octop_harness.backends.s3_backend import S3Backend as _S3Backend
-        from octop_harness.backends.s3_backend import S3Config as _S3Config
-
-        return _S3Backend(_S3Config.from_kwargs(**kwargs))
+    return _S3Backend(_S3Config.from_kwargs(**kwargs))
 
 
 def _build_postgres(kwargs: dict[str, Any]) -> BackendProtocol:
-    """Postgres backend.
+    """Postgres workspace backend (bundled, deepagents 0.7).
 
-    Uses the third-party ``deepagents-backends`` package, available via the
-    ``octop-harness[remote-backends]`` extra (Python >=3.12 required).
-
-    Note: the underlying backend exposes ``initialize()`` / ``close()`` —
-    HarnessAgent does not call these automatically; if you use a Postgres
-    backend, manage its lifecycle alongside the agent.
+    Specs may use a libpq ``connection_string`` / ``dsn`` or split fields.
+    Unknown keys are dropped. The table is created on first use (``psycopg``
+    required; install ``octop-harness[remote-backends]``).
     """
-    try:
-        from deepagents_backends import PostgresBackend, PostgresConfig
-    except ImportError as exc:
-        raise ImportError(
-            "Postgres backend requires the optional dependency 'deepagents-backends'. "
-            "Install with: pip install 'octop-harness[remote-backends]' "
-            "(Python >=3.12 required).",
-        ) from exc
+    from octop_harness.backends.postgres import PostgresBackend, PostgresConfig
 
-    config = PostgresConfig(**kwargs)
-    return cast("BackendProtocol", PostgresBackend(config))
+    return PostgresBackend(PostgresConfig.from_kwargs(**kwargs))
 
 
 def _build_cos(kwargs: dict[str, Any]) -> BackendProtocol:

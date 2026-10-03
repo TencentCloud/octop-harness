@@ -184,7 +184,7 @@ Optional dependency extras (install only what you need; missing extras fail at u
 | `object-storage` | Tencent COS + Alibaba OSS + Huawei OBS SDKs |
 | `desktop` | Desktop screenshot / input (`mss`, `pynput`, `pillow`) |
 | `web-search-all` | All web-search backends (Tavily / Brave / Google) |
-| `remote-backends` | Postgres / upstream S3 via `deepagents-backends` (Python ≥3.12) |
+| `remote-backends` | Postgres workspace backend (`psycopg`). S3 uses the bundled boto3 backend. |
 | `observability` | Langfuse |
 | `acp` | ACP agent runner |
 | `all` | All library feature extras above (**excludes** `cli`; use `[cli,all]` for both) |
