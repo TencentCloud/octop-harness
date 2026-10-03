@@ -1709,6 +1709,9 @@ class HarnessAgent:
                 "credentials are missing. If the user asks for generated media, ask them to "
                 "configure credentials in the host application; do not retry or claim success."
             )
+        from octop_harness.backends.explicit_virtual_path import EXPLICIT_VIRTUAL_PATH_PROMPT
+
+        directive += f" {EXPLICIT_VIRTUAL_PATH_PROMPT}" if cfg.explicit_virtual_paths else ""
         kwargs["system_prompt"] = (
             base_prompt + "\n\n" + directive + "\n\n" + render_slash_skill_prompt(language=cfg.language)
         ).strip()

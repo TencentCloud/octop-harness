@@ -1675,9 +1675,14 @@ class TestExplicitVirtualPathTool:
             }
             with pytest.raises(ValueError, match="explicit virtual"):
                 tool.invoke({"path": "C:/work/data/a.txt"})
+            prompt = create.call_args.kwargs["system_prompt"]
+            assert "virtual_to_native_path" in prompt
+            assert "execute/shell is not rewritten" in prompt
 
         with mock_model_factory(), stub_create_deep_agent as create, HarnessAgent(cfg) as agent:
             names = [getattr(tool, "name", None) for tool in create.call_args.kwargs["tools"]]
             built_names = [getattr(tool, "name", None) for tool in agent._build_tools()]
             assert "virtual_to_native_path" not in names
             assert "virtual_to_native_path" not in built_names
+            prompt = create.call_args.kwargs["system_prompt"]
+            assert "execute/shell is not rewritten" not in prompt

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional ``explicit_virtual_paths`` for subtree experts: shell command,
+  environment, and stdout are left unparsed; callers convert one virtual
+  absolute path through ``virtual_to_native_path``. Default stays off.
 - Bundled provider templates: iFlytek Astron MaaS Token Plan preset
   `iflytek-astron-token-plan` (Spark-X2.5 first; Kimi-K2.6 and Qwen3.5/3.6 marked
   image-capable), with an `iflytek.svg` logo.

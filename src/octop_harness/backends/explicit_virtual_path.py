@@ -15,18 +15,22 @@ from langchain_core.tools import StructuredTool
 
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 
+# Soft policy for the model only. Shell still does not rewrite commands.
+EXPLICIT_VIRTUAL_PATH_PROMPT = (
+    "This expert uses explicit virtual paths: `/` is the selected storage root, "
+    "not a host drive letter. Filesystem tools already accept virtual paths such "
+    "as `/data/a.txt`. execute/shell is not rewritten — first call "
+    "`virtual_to_native_path` and pass only the returned native path to the "
+    "command. Never give filesystem tools a drive-letter path."
+)
+
 
 def require_explicit_virtual_absolute(path: str) -> str:
     """Reject anything that is not already a virtual absolute path."""
     if not isinstance(path, str):
         raise ValueError("virtual path must be a string")
     text = path.strip()
-    if (
-        not text.startswith("/")
-        or text.startswith("//")
-        or "\\" in text
-        or _DRIVE_PREFIX.match(text) is not None
-    ):
+    if not text.startswith("/") or text.startswith("//") or "\\" in text or _DRIVE_PREFIX.match(text) is not None:
         raise ValueError("path must be an explicit virtual absolute path such as /data/a.txt")
     return text
 
@@ -66,8 +70,9 @@ def build_virtual_to_native_tool(backend: Any) -> StructuredTool:
         name="virtual_to_native_path",
         description=(
             "Convert one explicit virtual absolute path, such as /data/a.txt, "
-            "to the native path inside this expert's root. "
-            "Pass only the virtual path. "
-            "The result is a path value; quote it yourself if a shell command needs it."
+            "to the native host path inside this expert's root. "
+            "Use this before execute/shell. Pass only the virtual path — not a "
+            "drive letter, backslash, or relative path. "
+            "The result is {kind: native_path, path}; quote path yourself in the command."
         ),
     )
