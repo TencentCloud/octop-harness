@@ -12,6 +12,7 @@ from octop_harness.middleware.filesystem_guard import (
     FilesystemGuardMiddleware,
     is_path_outside_root_error,
     path_outside_root_tool_message,
+    rewrite_legacy_windows_fs_path,
 )
 
 
@@ -98,3 +99,40 @@ def test_sync_wrap_softens_outside_root() -> None:
     assert isinstance(out, ToolMessage)
     assert out.status == "error"
     assert out.name == "write_file"
+
+
+def test_rewrite_legacy_windows_path_suffix_under_root(tmp_path) -> None:
+    target = tmp_path / "data" / "文章存稿" / "x.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("ok", encoding="utf-8")
+    leftover = r"D:\octop-data\data\文章存稿\x.md"
+    assert rewrite_legacy_windows_fs_path(leftover, root_dir=tmp_path) == "/data/文章存稿/x.md"
+
+
+def test_rewrite_legacy_windows_path_ignores_posix_and_relative() -> None:
+    assert rewrite_legacy_windows_fs_path("/data/x.md", root_dir="/tmp") == "/data/x.md"
+    assert rewrite_legacy_windows_fs_path("relative/x.md", root_dir="/tmp") == "relative/x.md"
+
+
+@pytest.mark.asyncio
+async def test_middleware_rewrites_leftover_windows_path_before_tool(tmp_path) -> None:
+    target = tmp_path / "data" / "文章存稿" / "_核验与备选标题.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("ok", encoding="utf-8")
+    mw = FilesystemGuardMiddleware(root_dir=tmp_path)
+    request = MagicMock()
+    request.tool_call = {
+        "name": "read_file",
+        "id": "call_1",
+        "args": {"file_path": r"D:\octop-data\data\文章存稿\_核验与备选标题.md"},
+    }
+    request.override = None
+    seen: dict[str, str] = {}
+
+    async def handler(req: Any) -> ToolMessage:
+        seen["path"] = req.tool_call["args"]["file_path"]
+        return ToolMessage(content="ok", name="read_file", tool_call_id="call_1")
+
+    out = await mw.awrap_tool_call(request, handler)
+    assert isinstance(out, ToolMessage)
+    assert seen["path"] == "/data/文章存稿/_核验与备选标题.md"

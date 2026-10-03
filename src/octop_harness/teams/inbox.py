@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from octop_harness.backends.utils import ASYNC_DEFENSIVE_OP_ERRORS
-from octop_harness.messages import extract_call_response
+from octop_harness.messages import extract_call_response, is_model_retry_failure_text
 from octop_harness.request import ChatRequest
 from octop_harness.teams.processor import ReplyEvent, TeamProcessor
 from octop_harness.teams.util import build_one_shot_request, derive_peer_thread_id
@@ -287,6 +287,10 @@ class HarnessAgentInboxManager:
                         )
                         result = await self._call_agent(msg.target_agent_id, target_req)
                     result_text = extract_call_response(result) if isinstance(result, dict) else ""
+                    if is_model_retry_failure_text(result_text):
+                        status = "failed"
+                        error_text = result_text
+                        result_text = None
                 except ASYNC_DEFENSIVE_OP_ERRORS as exc:
                     error_text = str(exc)
                     status = "failed"

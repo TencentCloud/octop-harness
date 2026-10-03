@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Leftover Windows absolute paths in filesystem tool calls (``D:\\octop-data\\…``)
+  are rewritten onto the current storage root when the same suffix exists, and
+  still soft-fail to the model when they do not — they no longer abort the turn
+  as a generic model-call failure.
 - S3 backend resolution always uses the bundled boto3 implementation, which
   speaks deepagents 0.7 (`WriteResult` / `ReadResult` / `ls` / `glob` /
   `grep`). The `deepagents-backends` 0.2 S3 client is no longer preferred —

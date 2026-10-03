@@ -1452,7 +1452,14 @@ class HarnessAgent:
         from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
 
         fs_permissions = list(cfg.permissions) if cfg.permissions and spec_supports_execution(cfg.backend) else []
-        chain.append(FilesystemGuardMiddleware(fs_permissions))
+        root_dir, _virtual = self._peek_backend_mount()
+        chain.append(
+            FilesystemGuardMiddleware(
+                fs_permissions,
+                root_dir=root_dir,
+                workspace_dir=cfg.workspace_dir,
+            )
+        )
 
         if cfg.mcp_server_configs:
             chain.append(
