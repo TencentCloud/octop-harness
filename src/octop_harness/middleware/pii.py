@@ -1,4 +1,4 @@
-"""Custom PII detector for ``PIIMiddleware`` (catches LLM provider API keys).
+"""Custom PII detector for provider API keys and Chinese personal information.
 
 Why this exists
 ---------------
@@ -25,25 +25,27 @@ Detected formats
 - Google Cloud / Gemini: ``AIzaSy...`` (39 chars)
 - HuggingFace: ``hf_...``
 - Tencent / Aliyun-style hex secrets after explicit assignment (``api_key=...``)
+- Mainland China mobile numbers (11 digits, optional ``+86`` / ``0086`` prefix)
+- 18-character Chinese resident IDs with a valid date and checksum
 
 The pattern intentionally stays conservative: aggressive matching produces
 false positives that censor benign hex-y strings (commit hashes, UUIDs).
 
-Future detectors (phone numbers, government IDs, etc.) can be added to
-``_PATTERNS`` below — that's why the module is named ``pii`` rather than
-``api_key_detector``.
+Personal-number detection is limited to these formats; it does not verify
+identity, allocation, or ownership. Legacy 15-digit IDs are not detected.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.pii import PIIMatch
 
-# Each entry is ``(label, compiled_pattern)``. Order matters only for nicer
-# ``type`` labels in matches when multiple patterns collide.
+# Each entry is ``(label, compiled_pattern)``. Existing key patterns take
+# precedence over personal-number matches inside their spans.
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # OpenAI project keys: ``sk-proj-XXXX...``
     ("openai_project", re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}")),
@@ -73,20 +75,42 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.IGNORECASE | re.VERBOSE,
         ),
     ),
+    (
+        "cn_mobile_phone",
+        re.compile(r"(?<![A-Za-z\d_])(?:(?:\+86|0086)[ -]?)?1[3-9][0-9]{9}(?![A-Za-z\d_])"),
+    ),
+    (
+        "cn_resident_id",
+        re.compile(r"(?<![A-Za-z\d_])[1-9][0-9]{5}[12][0-9]{10}[0-9Xx](?![A-Za-z\d_])"),
+    ),
 )
+
+
+def _valid_resident_id(value: str) -> bool:
+    """Validate the date, sequence and MOD 11-2 check digit of an 18-digit ID."""
+    try:
+        date(int(value[6:10]), int(value[10:12]), int(value[12:14]))
+    except ValueError:
+        return False
+    if value[14:17] == "000":
+        return False
+    weights = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
+    checksum = sum(int(digit) * weight for digit, weight in zip(value[:17], weights, strict=True))
+    return value[-1].upper() == "10X98765432"[checksum % 11]
 
 
 def detect_pii(text: str) -> list[PIIMatch]:
     """Return all suspected PII spans inside ``text``.
 
-    Currently detects LLM provider API keys (see module docstring for the
-    list of formats). The output shape matches what ``PIIMiddleware``
+    Detects provider API keys, mainland mobile numbers and resident IDs
+    (see module docstring for supported formats). The output shape matches what ``PIIMiddleware``
     expects from a custom detector:
     ``[{"type": str, "value": str, "start": int, "end": int}, ...]``.
     Spans are returned in left-to-right order; overlapping matches from
-    different patterns are de-duplicated by start position (first label wins).
+    key patterns with the same start are de-duplicated (first label wins).
+    Personal-number matches overlapping an API key are omitted.
     """
-    seen_starts: set[int] = set()
+    seen_spans: list[tuple[int, int]] = []
     matches: list[dict[str, object]] = []
     for label, pattern in _PATTERNS:
         for m in pattern.finditer(text):
@@ -98,9 +122,15 @@ def detect_pii(text: str) -> list[PIIMatch]:
             else:
                 start, end = m.span()
                 value = m.group(0)
-            if start in seen_starts:
+            if label == "cn_resident_id" and not _valid_resident_id(value):
                 continue
-            seen_starts.add(start)
+            if any(
+                start == previous_start
+                or (label in ("cn_mobile_phone", "cn_resident_id") and start < previous_end and end > previous_start)
+                for previous_start, previous_end in seen_spans
+            ):
+                continue
+            seen_spans.append((start, end))
             matches.append({"type": label, "value": value, "start": start, "end": end})
 
     matches.sort(key=lambda m: m["start"])  # type: ignore[arg-type, return-value]

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- PII protection detects mainland China mobile numbers and checksum-valid
+  18-character resident IDs through the existing strategies and message surfaces.
+
 ### Fixed
 
 - Streamed content blocks (Anthropic thinking / text, OpenAI Responses) no

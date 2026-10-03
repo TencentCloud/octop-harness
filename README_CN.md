@@ -120,6 +120,7 @@
 #### 安全
 
 - `SecurityPolicy` 提供工具护栏、文件系统权限（`FilesystemPermission`）与敏感信息脱敏中间件。
+- 敏感信息检测覆盖 API Key、中国大陆手机号（可带 `+86` 或 `0086` 前缀）及日期和校验位有效的 18 位居民身份证号，沿用 `pii_strategy` 与 `pii_surfaces` 配置；不识别旧版 15 位身份证号或其他国家的号码。
 
 
 
