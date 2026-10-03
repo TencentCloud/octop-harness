@@ -156,6 +156,39 @@ class TestConstruction:
         assert agent.workspace is not None
         assert agent.workspace.backend is agent.backend
 
+    def test_named_agent_history_does_not_send_message_name_to_strict_model(
+        self,
+        cfg: HarnessAgentConfig,
+        mock_model_factory: Callable[[], Any],
+    ) -> None:
+        from deepagents.backends import StateBackend
+        from deepagents.graph import create_deep_agent as create_graph
+        from langchain_core.language_models.fake_chat_models import FakeListChatModel
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        class StrictModel(FakeListChatModel):
+            def bind_tools(self, tools: Any, **kwargs: Any) -> StrictModel:
+                return self
+
+            def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+                if isinstance(input, list) and any(
+                    isinstance(message, AIMessage) and message.name for message in input
+                ):
+                    raise ValueError('"name" is not supported')
+                return super().invoke(input, config=config, **kwargs)
+
+        model = StrictModel(responses=["first reply", "second reply"])
+
+        def fake_create(**kwargs: Any) -> Any:
+            return create_graph(model=model, tools=[], backend=StateBackend(), name=kwargs.get("name"))
+
+        with mock_model_factory(), patch("deepagents.create_deep_agent", side_effect=fake_create):
+            agent = HarnessAgent(cfg)
+
+        first = agent.graph.invoke({"messages": [HumanMessage(content="first question")]})
+        second = agent.graph.invoke({"messages": [*first["messages"], HumanMessage(content="second question")]})
+        assert second["messages"][-1].content == "second reply"
+
     def test_middleware_includes_router_and_memory(
         self,
         cfg: HarnessAgentConfig,
