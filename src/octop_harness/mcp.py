@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import inspect
 import logging
 import re
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LLM_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+_LLM_TOOL_NAME_MAX_LENGTH = 64
+_MCP_SERVER_METADATA_KEY = "octop_harness_mcp_server"
 _MCP_SPEC_META_KEYS = frozenset({"allowed_tools", "tool_arg_aliases"})
 _RESERVED_PYDANTIC_FIELD_NAMES = frozenset(name for name in dir(BaseModel) if not name.startswith("_"))
 
@@ -53,10 +56,12 @@ def validate_mcp_default_servers(
 
 
 def sanitize_llm_tool_name(name: str) -> str:
-    """Return a tool name accepted by strict LLM APIs (``^[a-zA-Z0-9_-]+$``)."""
-    if _LLM_TOOL_NAME_RE.match(name):
-        return name
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    """Return a stable tool name accepted by strict LLM APIs (1-64 characters)."""
+    sanitized = name if _LLM_TOOL_NAME_RE.fullmatch(name) else re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    if len(sanitized) <= _LLM_TOOL_NAME_MAX_LENGTH:
+        return sanitized or "tool"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    return f"{sanitized[: _LLM_TOOL_NAME_MAX_LENGTH - len(digest) - 1]}_{digest}"
 
 
 def _pydantic_field_name(key: str, used: set[str]) -> str:
@@ -288,7 +293,7 @@ def prioritize_active_mcp_tools(
             continue
         matched = False
         for server in active_servers:
-            if name.startswith(f"{server}_"):
+            if _tool_matches_server(tool, server):
                 active_by_server[server].append(tool)
                 matched = True
                 break
@@ -323,14 +328,13 @@ def filter_tools_for_mcp_servers(
     if not active_servers:
         return [t for t in tools if _tool_name(t) not in mcp_tool_names]
 
-    allowed_prefixes = tuple(f"{server}_" for server in active_servers)
     filtered: list[Any] = []
     for tool in tools:
         name = _tool_name(tool)
         if name not in mcp_tool_names:
             filtered.append(tool)
             continue
-        if any(name.startswith(prefix) for prefix in allowed_prefixes):
+        if any(_tool_matches_server(tool, server) for server in active_servers):
             filtered.append(tool)
     return filtered
 
@@ -362,6 +366,13 @@ def _tool_name(tool: Any) -> str:
     return str(getattr(tool, "name", ""))
 
 
+def _tool_matches_server(tool: Any, server_name: str) -> bool:
+    metadata = tool.get("metadata") if isinstance(tool, dict) else getattr(tool, "metadata", None)
+    if isinstance(metadata, dict) and _MCP_SERVER_METADATA_KEY in metadata:
+        return bool(metadata[_MCP_SERVER_METADATA_KEY] == server_name)
+    return _tool_name(tool).startswith(f"{server_name}_")
+
+
 def _postprocess_mcp_tools(
     tools: list[Any],
     *,
@@ -378,14 +389,14 @@ def _postprocess_mcp_tools(
         # One wrap: optional aliases, then drop None before the MCP call.
         _wrap_tool_arguments(tool, aliases=aliases)
         _coerce_tool_args_schema(tool)
+        metadata = getattr(tool, "metadata", None)
+        tool.metadata = {**(metadata if isinstance(metadata, dict) else {}), _MCP_SERVER_METADATA_KEY: server_name}
         sanitized = sanitize_llm_tool_name(name)
-        if sanitized == name:
-            used_names.add(name)
-            continue
         candidate = sanitized
         suffix = 2
         while candidate in used_names:
-            candidate = f"{sanitized}_{suffix}"
+            tail = f"_{suffix}"
+            candidate = f"{sanitized[: _LLM_TOOL_NAME_MAX_LENGTH - len(tail)]}{tail}"
             suffix += 1
         used_names.add(candidate)
         tool.name = candidate
