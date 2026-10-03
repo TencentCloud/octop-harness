@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import MagicMock
@@ -9,6 +10,8 @@ from unittest.mock import MagicMock
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.runnables.config import var_child_runnable_config
+from langchain_core.tools import StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ValidationError
 
 from octop_harness.mcp import (
@@ -110,8 +113,105 @@ class TestSanitizeLlmToolName:
             "tencent-docs__abc_manage_search_file"
         )
 
+    @pytest.mark.parametrize("name", ["x" * 65, "docs_" + "x" * 100, "", "valid\n"])
+    def test_names_meet_strict_api_constraints(self, name: str) -> None:
+        result = sanitize_llm_tool_name(name)
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", result)
+        assert sanitize_llm_tool_name(name) == result
+
+    def test_long_names_with_the_same_head_remain_distinct(self) -> None:
+        first = "docs_" + "x" * 100 + "first"
+        second = "docs_" + "x" * 100 + "second"
+        assert sanitize_llm_tool_name(first) != sanitize_llm_tool_name(second)
+
+    @pytest.mark.parametrize("length", [63, 64])
+    def test_boundary_names_are_unchanged(self, length: int) -> None:
+        name = "x" * length
+        assert sanitize_llm_tool_name(name) == name
+
 
 class TestAloadMcpToolPostprocess:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("server", ["tencent-docs__" + "A" * 26, "server_" + "x" * 70])
+    async def test_long_names_preserve_call_routing_and_server_selection(
+        self, monkeypatch: pytest.MonkeyPatch, server: str
+    ) -> None:
+        prefix = f"{server}_"
+        base_names = ["create_smartcanvas_by_mdx", "x" * 90 + "a", "x" * 90 + "b", "search.file", "search_file"]
+        base_names += ["z" * max(1, 64 - len(prefix))] * 12
+
+        def tool_for(base_name: str) -> StructuredTool:
+            async def run(**arguments: object) -> dict[str, object]:
+                return {"target": base_name, **arguments}
+
+            name = prefix + base_name
+            return StructuredTool.from_function(
+                coroutine=run,
+                name=name,
+                description="MCP test tool",
+                metadata={"vendor": "kept", "octop_harness_mcp_server": "other"},
+                args_schema=mcp_args_model(
+                    name,
+                    {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                ),
+            )
+
+        class Client:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            async def get_tools(self) -> list[StructuredTool]:
+                return [tool_for(name) for name in base_names]
+
+        monkeypatch.setattr("octop_harness.mcp.MultiServerMCPClient", Client)
+        tools = await aload_mcp_tools(
+            {
+                server: {
+                    "transport": "http",
+                    "url": "https://example.invalid/mcp",
+                    "tool_arg_aliases": {base_names[0]: {"query": "search_key"}},
+                }
+            }
+        )
+        names = [tool.name for tool in tools]
+        assert len(names) == len(set(names))
+        for tool in tools:
+            assert tool.metadata is not None and tool.metadata["vendor"] == "kept"
+            exported = convert_to_openai_tool(tool)
+            assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", exported["function"]["name"])
+        assert await tools[0].ainvoke({"query": "budget"}) == {"target": base_names[0], "search_key": "budget"}
+        assert await tools[1].ainvoke({"query": "budget"}) == {"target": base_names[1], "query": "budget"}
+        mcp_names = frozenset(names)
+        assert (
+            filter_tools_for_mcp_servers(
+                tools,
+                mcp_tool_names=mcp_names,
+                server_names=frozenset({server}),
+                active_servers=[server],
+            )
+            == tools
+        )
+        assert (
+            filter_tools_for_mcp_servers(
+                tools,
+                mcp_tool_names=mcp_names,
+                server_names=frozenset({server}),
+                active_servers=["other"],
+            )
+            == []
+        )
+        builtin = _named_tool("builtin")
+        other = _named_tool("other_lookup")
+        assert prioritize_active_mcp_tools(
+            [builtin, other, *tools],
+            mcp_tool_names=mcp_names | {"other_lookup"},
+            active_servers=[server],
+        ) == [builtin, *tools, other]
+
     @pytest.mark.asyncio
     async def test_sanitizes_dotted_tool_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class _Client:

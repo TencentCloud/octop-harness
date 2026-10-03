@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP tool names are bounded to 64 characters with stable shortening and bounded collision suffixes; server selection and original tool calls are retained after renaming (TencentCloud/Octop#1527).
+
+- Docker execution reloads the global environment file even when a same-size edit or atomic replacement preserves its modification timestamp, avoiding stale injected values.
+
 - Streamed content blocks (Anthropic thinking / text, OpenAI Responses) no
   longer crash chunk projection: list-typed ``AIMessageChunk.content`` is
   normalized per block (thinking → reasoning, text → token) instead of raising
