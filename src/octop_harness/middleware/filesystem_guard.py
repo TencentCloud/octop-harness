@@ -23,6 +23,7 @@ from deepagents.backends.utils import validate_path
 from deepagents.middleware.filesystem import FilesystemPermission
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
+from langchain_core.messages.tool import ToolCall
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from wcmatch import glob as wcglob
@@ -293,16 +294,24 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         )
         if not path or rewritten is None or rewritten == path:
             return request
-        new_args = dict(raw_args)
+        new_args: dict[str, Any] = dict(raw_args)
         key = next((name for name in ("file_path", "path") if new_args.get(name) == path), None)
         if key is None:
             return request
         new_args[key] = rewritten
         logger.info("FilesystemGuard rewrote leftover Windows path %s -> %s", path, rewritten)
-        new_call = {**request.tool_call, "args": new_args}
+        new_call: ToolCall = {
+            "name": str(request.tool_call.get("name") or ""),
+            "args": new_args,
+            "id": request.tool_call.get("id"),
+        }
+        if request.tool_call.get("type") == "tool_call":
+            new_call["type"] = "tool_call"
         override = getattr(request, "override", None)
         if callable(override):
-            return override(tool_call=new_call)
+            updated = override(tool_call=new_call)
+            if isinstance(updated, ToolCallRequest):
+                return updated
         request.tool_call = new_call
         return request
 

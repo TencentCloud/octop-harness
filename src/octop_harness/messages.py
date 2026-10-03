@@ -64,7 +64,7 @@ def extract_call_response(result: dict[str, Any]) -> str:
 
 def is_model_retry_failure_text(text: str | None) -> bool:
     """True when assistant text is a model-retry exhaustion prompt, not a real answer."""
-    return bool(text) and MODEL_RETRY_FAILURE_MARK in text
+    return text is not None and MODEL_RETRY_FAILURE_MARK in text
 
 
 __all__ = [
