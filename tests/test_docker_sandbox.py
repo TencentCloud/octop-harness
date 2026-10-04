@@ -339,6 +339,74 @@ class TestPathMapping:
         assert client.containers.run.call_args.kwargs["working_dir"] == "/workspace"
         sandbox.close()
 
+    def test_relative_dotfile_paths_preserve_leading_dots(
+        self,
+        tmp_path: Path,
+        mock_docker: Any,
+    ) -> None:
+        from octop_harness.backends.docker_sandbox import DockerSandbox
+
+        _docker_mod, _client, _container = mock_docker
+        sandbox = DockerSandbox(
+            workspace_dir=tmp_path,
+            workspace_path="/workspace",
+            image="python:3.12-slim",
+        )
+        assert sandbox._map_path(".env") == "/workspace/.env"
+        assert sandbox._map_path("./.env") == "/workspace/.env"
+        assert sandbox._map_path(".octop/.env") == "/workspace/.octop/.env"
+        # Ordinary relative paths keep mapping into the workspace.
+        assert sandbox._map_path("rel.txt") == "/workspace/rel.txt"
+        assert sandbox._map_path("./rel.txt") == "/workspace/rel.txt"
+        sandbox.close()
+
+    def test_to_virtual_path_preserves_leading_dots(
+        self,
+        tmp_path: Path,
+        mock_docker: Any,
+    ) -> None:
+        from octop_harness.backends.docker_sandbox import DockerSandbox
+
+        _docker_mod, _client, _container = mock_docker
+        sandbox = DockerSandbox(
+            workspace_dir=tmp_path,
+            workspace_path="/workspace",
+            image="python:3.12-slim",
+        )
+        assert sandbox._to_virtual_path("/workspace/.env") == "/.env"
+        assert sandbox._to_virtual_path(".env") == "/.env"
+        assert sandbox._to_virtual_path("rel.txt") == "/rel.txt"
+        sandbox.close()
+
+    def test_workspace_dotenv_loaded_through_path_mapping(
+        self,
+        tmp_path: Path,
+        mock_docker: Any,
+    ) -> None:
+        from octop_harness.backends.docker_sandbox import DockerSandbox
+
+        _docker_mod, _client, container = mock_docker
+        fs = {
+            "/workspace/.env": b"BUG1_MARKER=workspace_env\n",
+        }
+
+        def _serve(path: str, *_args: Any, **_kwargs: Any) -> Any:
+            if path not in fs:
+                raise _docker_mod.errors.NotFound(path)
+            return (iter([_tar_bytes(Path(path).name, fs[path])]), {"name": Path(path).name})
+
+        container.get_archive.side_effect = _serve
+        sandbox = DockerSandbox(
+            workspace_dir=tmp_path,
+            workspace_path="/workspace",
+            image="python:3.12-slim",
+            system_files_path=".octop",
+        )
+        # ``.octop/.env`` is absent, so the loader must fall back to ``.env`` —
+        # both lookups go through _map_path.
+        assert sandbox._workspace_dotenv() == {"BUG1_MARKER": "workspace_env"}
+        sandbox.close()
+
     def test_optional_user_volumes_passed_through(
         self,
         tmp_path: Path,
