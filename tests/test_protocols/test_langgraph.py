@@ -192,10 +192,12 @@ class TestStream:
                 return self
 
         model = ToolCallingFakeModel(responses=["INTERNAL_SUMMARY", "VISIBLE_FINAL", "UNEXPECTED_THIRD_CALL"])
-        object.__setattr__(model, "profile", {"max_input_tokens": 300})
+        # 0.7.16+ counts tool schemas; 4000 + 10 turns still triggers
+        # summarization without overflowing the post-compaction budget.
+        object.__setattr__(model, "profile", {"max_input_tokens": 4000})
         graph = create_deep_agent(model=model, tools=[], backend=StateBackend())
         messages: list[BaseMessage] = []
-        for _ in range(5):
+        for _ in range(10):
             messages.extend(
                 [
                     HumanMessage(content="old user " + ("x " * 80)),
