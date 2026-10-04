@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- Docker 沙箱相对路径映射不再吞掉文件名开头的点（`.env` 不再被映射为 `env`），workspace `.env` 加载恢复正常。
+
 ## [1.0.1] - 2026-10-03
 
 ### 新增
