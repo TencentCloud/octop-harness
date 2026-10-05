@@ -56,7 +56,7 @@ Working handbook for AI coding agents in the `octop-harness` repository.
 | Layer | Technology |
 |-------|------------|
 | Language | Python 3.12+; every source file has `from __future__ import annotations` |
-| Agent runtime | `deepagents>=0.7,<0.8` + `langchain` / `langchain-core` / `langgraph` |
+| Agent runtime | `deepagents>=0.7.16,<0.8` + `langchain` / `langchain-core` / `langgraph` |
 | Config objects | `dataclasses` (`HarnessAgentConfig` / `ProviderConfig` / `ModelConfig`) with `to_dict` / `from_dict` |
 | Optional extras | `cli` (click + rich + prompt-toolkit), `bedrock`, `remote-backends`, `docker`, `opensandbox`, `observability` (langfuse), `acp`, `desktop` (mss + pynput + pillow), `web-search-all`, `object-storage`, `all` |
 | Ecosystem | `octop-memory`, `octop-browser`, `langchain-mcp-adapters` + `mcp` |
