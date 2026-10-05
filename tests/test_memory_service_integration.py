@@ -173,6 +173,63 @@ class TestHarnessAgentLLMClient:
         client.call_llm("x", tier="light")
         assert factory.last_ref == "p/heavy"
 
+    def test_temperature_rejection_retries_with_provider_default(self) -> None:
+        class _RejectsTemperature(_FakeModel):
+            def __init__(self) -> None:
+                super().__init__(content="recovered")
+                self.calls = 0
+
+            def invoke(self, messages: list[Any]) -> _FakeMsg:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("400 invalid temperature: temperature only support 1")
+                return _FakeMsg(self._content)
+
+        model = _RejectsTemperature()
+        factory = _Factory(model)
+        client = HarnessAgentLLMClient(factory, default_model="moonshot/kimi-for-coding")
+        out = client.call_llm("x", temperature=0.0)
+
+        assert out == "recovered"
+        assert model.calls == 2
+        # Second bind must omit temperature so the provider default applies.
+        assert model.bind_calls[0].get("temperature") == 0.0
+        assert "temperature" not in model.bind_calls[1]
+
+    def test_non_temperature_error_does_not_retry_without_temperature(self) -> None:
+        class _CountingBadModel(_FakeModel):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def invoke(self, messages: list[Any]) -> _FakeMsg:
+                self.calls += 1
+                raise RuntimeError("boom")
+
+        model = _CountingBadModel()
+        factory = _Factory(model)
+        client = HarnessAgentLLMClient(factory, default_model="p/m")
+        with pytest.raises(LLMClientError):
+            client.call_llm("x", temperature=0.0)
+        assert model.calls == 1
+
+    def test_temperature_wording_without_value_set_does_not_retry(self) -> None:
+        class _CountingBadModel(_FakeModel):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def invoke(self, messages: list[Any]) -> _FakeMsg:
+                self.calls += 1
+                raise RuntimeError("400 invalid temperature: temperature only support 1")
+
+        model = _CountingBadModel()
+        factory = _Factory(model)
+        client = HarnessAgentLLMClient(factory, default_model="p/m")
+        with pytest.raises(LLMClientError):
+            client.call_llm("x", temperature=None)
+        assert model.calls == 1
+
     def test_failure_wraps_in_llm_client_error(self) -> None:
         client = HarnessAgentLLMClient(_Factory(_BadModel()), default_model="p/m")
         with pytest.raises(LLMClientError):
