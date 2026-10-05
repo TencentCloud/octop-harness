@@ -379,6 +379,39 @@ class TestRecallInjectScope:
             }
         ]
 
+    def test_recall_log_keeps_full_query_and_reports_length(
+        self, service: _SpyService, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from langchain_core.messages import HumanMessage
+
+        mw = MemoryMiddleware(service=service, jsonl_enabled=False)  # type: ignore[arg-type]
+        runtime = MagicMock()
+        runtime.config = {"configurable": {"thread_id": "thr-1"}}
+        with caplog.at_level("INFO", logger="octop_harness.middleware.memory"):
+            mw.before_model({"messages": [HumanMessage(content="what did we decide")]}, runtime)
+        line = next(r for r in caplog.records if "recall_inject" in r.getMessage())
+        assert "what did we decide" in line.getMessage()
+        assert "chars=18" in line.getMessage()
+
+    def test_recall_log_truncates_long_query_at_500_with_full_length(
+        self, service: _SpyService, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from langchain_core.messages import HumanMessage
+
+        long_query = "q" * 700
+        mw = MemoryMiddleware(service=service, jsonl_enabled=False)  # type: ignore[arg-type]
+        runtime = MagicMock()
+        runtime.config = {"configurable": {"thread_id": "thr-1"}}
+        with caplog.at_level("INFO", logger="octop_harness.middleware.memory"):
+            mw.before_model({"messages": [HumanMessage(content=long_query)]}, runtime)
+        line = next(r for r in caplog.records if "recall_inject" in r.getMessage())
+        msg = line.getMessage()
+        assert "chars=700" in msg
+        assert "q" * 500 in msg
+        assert "q" * 501 not in msg
+        # Logging truncation must not shorten the query handed to recall itself.
+        assert service.recall_calls[0]["query"] == long_query
+
 
 class TestRecallFallback:
     def test_wrap_model_call_survives_recall_crash(self) -> None:
