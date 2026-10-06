@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import MagicMock
@@ -110,6 +111,24 @@ class TestSanitizeLlmToolName:
             "tencent-docs__abc_manage_search_file"
         )
 
+    def test_keeps_names_at_the_64_char_limit(self) -> None:
+        name = "a" * 64
+        assert sanitize_llm_tool_name(name) == name
+
+    def test_truncates_names_over_the_64_char_limit(self) -> None:
+        sanitized = sanitize_llm_tool_name("tencent-docs_create_smartcanvas_by_mdx" + "a" * 28)
+        assert len(sanitized) == 64
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sanitized)
+
+    def test_truncation_preserves_the_server_prefix(self) -> None:
+        sanitized = sanitize_llm_tool_name(f"tencent-docs_{'x' * 60}")
+        assert sanitized.startswith("tencent-docs_")
+        assert len(sanitized) <= 64
+
+    def test_truncates_after_substituting_illegal_characters(self) -> None:
+        sanitized = sanitize_llm_tool_name(f"服务器.{'y' * 65}")
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sanitized)
+
 
 class TestAloadMcpToolPostprocess:
     @pytest.mark.asyncio
@@ -159,6 +178,51 @@ class TestAloadMcpToolPostprocess:
         )
         result = await tools[0].coroutine(query="budget")
         assert result == {"search_key": "budget"}
+
+    @pytest.mark.asyncio
+    async def test_over_long_tool_names_stay_within_llm_limits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        raw_long = "tencent-docs_create_smartcanvas_by_mdx" + "a" * 28  # 66 chars, legal charset
+        raw_sibling = "tencent-docs_create_smartcanvas_by_mdx" + "b" * 28
+        assert len(raw_long) == 66
+
+        class _Client:
+            def __init__(self, configs: dict[str, object], **kwargs: object) -> None:
+                del configs, kwargs
+
+            async def get_tools(self) -> list[MagicMock]:
+                long_tool = MagicMock()
+                long_tool.name = raw_long
+
+                async def _run(**arguments: object) -> dict[str, object]:
+                    return arguments
+
+                long_tool.coroutine = _run
+                sibling = MagicMock()
+                sibling.name = raw_sibling
+                sibling.coroutine = None
+                return [long_tool, sibling]
+
+        monkeypatch.setattr("octop_harness.mcp.MultiServerMCPClient", _Client)
+        tools = await aload_mcp_tools(
+            {
+                "tencent-docs": {
+                    "transport": "http",
+                    "url": "http://docs",
+                    "tool_arg_aliases": {
+                        raw_long.removeprefix("tencent-docs_"): {"query": "search_key"},
+                    },
+                }
+            }
+        )
+        name_re = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+        final_names = [t.name for t in tools]
+        assert all(name_re.fullmatch(n) for n in final_names)
+        assert len(set(final_names)) == len(final_names)
+        assert all(n.startswith("tencent-docs_") for n in final_names)
+        # The alias registered under the original (over-long) name still applies
+        # after the rename, because alias lookup happens on the loaded name.
+        long_tool = next(t for t in tools if t.name != raw_sibling)
+        assert await long_tool.coroutine(query="budget") == {"search_key": "budget"}
 
 
 class TestMcpArgsModel:

@@ -23,6 +23,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LLM_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+# Strict LLM tool-name APIs (e.g. OpenAI) cap names at 64 chars and reject the
+# whole request when a single tool name is longer.
+_MAX_LLM_TOOL_NAME_LEN = 64
+# Base names are capped lower so the ``_N`` suffixes appended while deduping
+# keep the final name within the 64-char limit.
+_MAX_LLM_TOOL_BASE_NAME_LEN = _MAX_LLM_TOOL_NAME_LEN - 4
 _MCP_SPEC_META_KEYS = frozenset({"allowed_tools", "tool_arg_aliases"})
 _RESERVED_PYDANTIC_FIELD_NAMES = frozenset(name for name in dir(BaseModel) if not name.startswith("_"))
 
@@ -53,10 +59,16 @@ def validate_mcp_default_servers(
 
 
 def sanitize_llm_tool_name(name: str) -> str:
-    """Return a tool name accepted by strict LLM APIs (``^[a-zA-Z0-9_-]+$``)."""
-    if _LLM_TOOL_NAME_RE.match(name):
+    """Return a tool name accepted by strict LLM APIs (``^[a-zA-Z0-9_-]{1,64}$``)."""
+    if _LLM_TOOL_NAME_RE.match(name) and len(name) <= _MAX_LLM_TOOL_NAME_LEN:
         return name
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    # Head-keep truncation: composed names start with their server prefix, so
+    # cutting the tail only shortens the tool-name segment and preserves the
+    # ``startswith(prefix)`` mapping used by callers.
+    if len(sanitized) > _MAX_LLM_TOOL_NAME_LEN:
+        sanitized = sanitized[:_MAX_LLM_TOOL_NAME_LEN].rstrip("_") or "tool"
+    return sanitized
 
 
 def _pydantic_field_name(key: str, used: set[str]) -> str:
@@ -379,14 +391,19 @@ def _postprocess_mcp_tools(
         _wrap_tool_arguments(tool, aliases=aliases)
         _coerce_tool_args_schema(tool)
         sanitized = sanitize_llm_tool_name(name)
-        if sanitized == name:
+        if sanitized == name and len(name) <= _MAX_LLM_TOOL_NAME_LEN:
             used_names.add(name)
             continue
-        candidate = sanitized
+        base = sanitized
+        if len(base) > _MAX_LLM_TOOL_BASE_NAME_LEN:
+            base = base[:_MAX_LLM_TOOL_BASE_NAME_LEN].rstrip("_") or "tool"
+        candidate = base
         suffix = 2
         while candidate in used_names:
-            candidate = f"{sanitized}_{suffix}"
+            candidate = f"{base}_{suffix}"
             suffix += 1
+        if len(candidate) > _MAX_LLM_TOOL_NAME_LEN:
+            candidate = candidate[:_MAX_LLM_TOOL_NAME_LEN]
         used_names.add(candidate)
         tool.name = candidate
 

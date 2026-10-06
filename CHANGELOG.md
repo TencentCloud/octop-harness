@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - 将 `deepagents` 下限提高到 `>=0.7.16`，接入上游同路径并行 `edit_file` / `write_file` 防护（langchain-ai/deepagents#6446）。
+- MCP 工具名超过 LLM 64 字符上限时自动截断（保留服务器前缀与参数别名映射），单个超长工具名不再导致整个 tools 组校验失败（HTTP 400）。
 
 ## [1.0.1] - 2026-10-03
 
