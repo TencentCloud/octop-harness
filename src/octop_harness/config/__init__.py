@@ -650,7 +650,8 @@ class HarnessAgentConfig:
 
     # —— PII redaction (default ON: secrets in inputs/outputs/tool results
     # are masked with stars before reaching the model or session log).
-    # The built-in detector covers LLM provider API keys; see
+    # The built-in detector covers LLM provider API keys, credential
+    # assignments, Chinese personal numbers, and US SSNs / phone numbers; see
     # ``octop_harness.middleware.pii`` for the format list.
     pii_enabled: bool = True
     pii_strategy: Literal["block", "redact", "mask", "hash"] = "mask"

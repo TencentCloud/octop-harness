@@ -25,15 +25,21 @@ Detected formats
 - Google Cloud / Gemini: ``AIzaSy...`` (39 chars)
 - HuggingFace: ``hf_...``
 - Tencent / Aliyun-style hex secrets after explicit assignment (``api_key=...``)
+- Credential assignments under a self-identifying keyword (``password=...``,
+  ``passwd``, ``secret``, ``client_secret``, ``token``)
 - Mainland China mobile numbers (common 13-19 prefixes, optional ``+86`` / ``0086``)
 - 18-character Chinese resident IDs: known province code, 1900-2099 birth date,
   non-zero sequence, and MOD 11-2 checksum
+- US Social Security numbers: area 001-899 except 666, group and serial non-zero
+- US phone numbers: NANP shape (area and exchange start at 2), with ``+1``
+  optional and ``-`` / ``.`` / space / ``(555)`` separators
 
 The pattern intentionally stays conservative: aggressive matching produces
 false positives that censor benign hex-y strings (commit hashes, UUIDs).
 
 Personal-number detection is limited to these formats; it does not verify
-identity, allocation, or ownership. Legacy 15-digit IDs are not detected.
+identity, allocation, or ownership. Legacy 15-digit IDs and non-US national
+number formats are not detected.
 """
 
 from __future__ import annotations
@@ -86,7 +92,34 @@ _CN_ID_PROVINCES = frozenset(
 )
 _ID_CHECK = "10X98765432"
 _ID_WEIGHTS = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
-_PERSONAL_LABELS = frozenset({"cn_mobile_phone", "cn_resident_id"})
+_PERSONAL_LABELS = frozenset({"cn_mobile_phone", "cn_resident_id", "us_ssn", "us_phone_number"})
+
+# Values a credential keyword may legitimately be followed by without a secret
+# being present: null literals, the type names that appear in annotations
+# (``password: str``), and schema vocabulary (``token: required``). Compared
+# case-insensitively against the captured value.
+_PLACEHOLDER_VALUES = frozenset(
+    {
+        "none",
+        "null",
+        "nil",
+        "true",
+        "false",
+        "undefined",
+        "str",
+        "int",
+        "bool",
+        "float",
+        "bytes",
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "object",
+        "required",
+        "optional",
+    }
+)
 
 # Each entry is ``(label, compiled_pattern)``. Key patterns are listed first so
 # they win when a personal number sits inside the same span.
@@ -119,6 +152,26 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.IGNORECASE | re.VERBOSE,
         ),
     ),
+    # ``password=...`` and friends. The keyword itself marks the value as a
+    # secret, so the value floor is 3 chars — far below the generic pattern's
+    # 20, which has to stay quiet on prose without a keyword to anchor it.
+    # The lookbehind/lookahead keep ``password_hash`` / ``max_tokens`` out.
+    (
+        "credential_assignment",
+        re.compile(
+            r"""
+            (?<![A-Za-z0-9_])
+            (?:client_secret|password|passwd|secret|token)
+            (?![A-Za-z0-9_])
+            ['"]?\s*[=:]\s*
+            (?!\$\{)          # ``password: ${DB_PASSWORD}`` — value lives elsewhere
+            ['"]?
+            (?P<value>[^\s'",;)\]}:]{3,})
+            ['"]?
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+    ),
     (
         "cn_mobile_phone",
         re.compile(
@@ -130,6 +183,34 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "cn_resident_id",
         re.compile(r"(?<![A-Za-z\d_])[1-9][0-9]{5}(?:19|20)[0-9]{9}[0-9Xx](?![A-Za-z\d_])"),
+    ),
+    # US SSN, canonical hyphenated form only. The excluded areas/groups/serials
+    # are the ones the SSA never issues. ISO dates need no special handling: a
+    # 4-digit year cannot satisfy ``\d{3}-``, and the lookbehind blocks the
+    # ``024-`` misalignment inside ``2024-``.
+    (
+        "us_ssn",
+        re.compile(r"(?<![\d-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d-])"),
+    ),
+    # US phone in NANP shape: area and exchange both start at 2. Requiring a
+    # separator keeps bare 10-digit runs (IDs, timestamps) out.
+    (
+        "us_phone_number",
+        re.compile(
+            r"""
+            (?<![\d-])
+            (?:\+?1[ .-]?)?
+            (?:
+                \([2-9]\d{2}\)[ .-]?
+                |
+                [2-9]\d{2}[ .-]
+            )
+            [2-9]\d{2}[ .-]
+            \d{4}
+            (?![\d-])
+            """,
+            re.VERBOSE,
+        ),
     ),
 )
 
@@ -157,8 +238,9 @@ def _overlaps(start: int, end: int, seen: list[tuple[int, int]]) -> bool:
 def detect_pii(text: str) -> list[PIIMatch]:
     """Return all suspected PII spans inside ``text``.
 
-    Detects provider API keys, mainland mobile numbers and resident IDs
-    (see module docstring for supported formats). The output shape matches what
+    Detects provider API keys, credential assignments, Chinese mobile numbers
+    and resident IDs, and US SSNs and phone numbers (see the module docstring
+    for the supported formats). The output shape matches what
     ``PIIMiddleware`` expects from a custom detector:
     ``[{"type": str, "value": str, "start": int, "end": int}, ...]``.
     Spans are returned in left-to-right order. Same-start key matches keep
@@ -178,6 +260,9 @@ def detect_pii(text: str) -> list[PIIMatch]:
                 start, end = m.span()
                 value = m.group(0)
             if label == "cn_resident_id" and not _valid_resident_id(value):
+                continue
+            # ``password=None`` / ``password: str`` are declarations, not leaks.
+            if label == "credential_assignment" and value.lower() in _PLACEHOLDER_VALUES:
                 continue
             # Keys still de-dupe by start so a wider ``api_key=`` assignment
             # is not dropped when a nested ``sk-`` also matches. Personal

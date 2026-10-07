@@ -213,3 +213,122 @@ def test_wider_api_key_assignment_remains_detected() -> None:
     value = "prefixprefixprefix-sk-abcdefghijklmnopqrstuv"
     matches = detect_pii(f"api_key={value}")
     assert any(m["type"] == "generic_api_key_assignment" and m["value"] == value for m in matches)
+
+
+class TestCredentialAssignments:
+    """``password=...`` and friends.
+
+    These keywords identify themselves, so the value counts as secret even
+    when it is far shorter than the 20-char floor the generic API-key pattern
+    needs to stay quiet on prose.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "value"),
+        [
+            ('password="hunter2"', "hunter2"),
+            ("password=Sup3rS3cret!2024", "Sup3rS3cret!2024"),
+            ("password: correcthorsebatterystaple", "correcthorsebatterystaple"),
+            ("PASSWORD=hunter2", "hunter2"),
+            ("passwd=Sup3rS3cret", "Sup3rS3cret"),
+            ("secret=Sup3rS3cret", "Sup3rS3cret"),
+            ("client_secret=Sup3rS3cret", "Sup3rS3cret"),
+            ("token=abc123def456", "abc123def456"),
+        ],
+    )
+    def test_value_span_only(self, text: str, value: str) -> None:
+        matches = detect_pii(text)
+        assert len(matches) == 1
+        match = matches[0]
+        assert match["type"] == "credential_assignment"
+        assert match["value"] == value
+        # Only the secret is reported, never the ``password=`` boilerplate.
+        assert text[match["start"] : match["end"]] == value
+
+    @pytest.mark.parametrize(
+        ("text", "value"),
+        [
+            ('{ "password": "hunter2" }', "hunter2"),
+            ("password=hunter2,", "hunter2"),
+            ("password=hunter2\nnext", "hunter2"),
+        ],
+    )
+    def test_value_stops_at_delimiters(self, text: str, value: str) -> None:
+        matches = detect_pii(text)
+        assert matches and matches[0]["value"] == value
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'password: str = ""',  # annotation, not a value
+            "password=None",
+            "password: required",  # placeholder word
+            "password_hash=abcdef0123456789",  # compound name, not a credential
+            "max_tokens=4096",  # ``token`` inside a longer identifier
+            "token: str",
+            "secret_santa=abcdef",
+            "password: ${DB_PASSWORD}",  # indirection, value resolved elsewhere
+        ],
+    )
+    def test_benign_assignments_are_ignored(self, text: str) -> None:
+        assert detect_pii(text) == []
+
+
+class TestUSPersonalInformation:
+    @pytest.mark.parametrize("value", ["123-45-6789", "219-09-9999", "772-84-1234"])
+    def test_us_ssn_span(self, value: str) -> None:
+        text = f"SSN: {value}."
+        matches = detect_pii(text)
+        assert len(matches) == 1
+        assert matches[0]["type"] == "us_ssn"
+        assert text[matches[0]["start"] : matches[0]["end"]] == value
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "000-12-3456",  # area 000 is never issued
+            "666-12-3456",  # area 666 is never issued
+            "900-12-3456",  # area 9xx is not issued
+            "123-00-4567",  # group 00 is never issued
+            "123-45-0000",  # serial 0000 is never issued
+            "2024-01-15",  # ISO date: 4-digit year cannot be a 3-digit area
+            "2024-01-15 order",  # same, with trailing text to defeat anchoring
+        ],
+    )
+    def test_invalid_us_ssn(self, text: str) -> None:
+        assert detect_pii(text) == []
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "555-234-5678",
+            "(555) 234-5678",
+            "555.234.5678",
+            "555 234 5678",
+            "+1-555-234-5678",
+            "1-555-234-5678",
+        ],
+    )
+    def test_us_phone_span(self, value: str) -> None:
+        text = f"call {value} now"
+        matches = detect_pii(text)
+        assert len(matches) == 1
+        assert matches[0]["type"] == "us_phone_number"
+        assert text[matches[0]["start"] : matches[0]["end"]] == value
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "123-456-7890",  # area code cannot start with 1
+            "555-123-45678",  # one digit too many
+            "055-123-4567",  # area code cannot start with 0
+            "555-023-4567",  # exchange cannot start with 0
+        ],
+    )
+    def test_invalid_us_phone(self, text: str) -> None:
+        assert detect_pii(text) == []
+
+    def test_us_phone_does_not_claim_chinese_mobile(self) -> None:
+        # A mainland number is 11 digits and must stay with ``cn_mobile_phone``
+        # even with a country prefix attached.
+        assert [m["type"] for m in detect_pii("+86 13800138000")] == ["cn_mobile_phone"]

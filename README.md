@@ -151,7 +151,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 #### Safety
 - `SecurityPolicy` with tool guardrails, filesystem permissions (`FilesystemPermission`), and PII redaction middleware.
-- PII detection covers provider API keys, mainland China mobile numbers (common 13-19 prefixes, optional `+86` / `0086`), and 18-character resident IDs with a known province code, 1900-2099 date, and checksum. Existing `pii_strategy` and `pii_surfaces` apply; legacy 15-digit IDs and other countries' numbers are out of scope.
+- PII detection covers provider API keys, credential assignments (`password=...`, `passwd`, `secret`, `client_secret`, `token`), mainland China mobile numbers (common 13-19 prefixes, optional `+86` / `0086`), 18-character resident IDs with a known province code, 1900-2099 date, and checksum, plus US SSNs and NANP phone numbers. Existing `pii_strategy` and `pii_surfaces` apply; legacy 15-digit Chinese IDs and non-US national number formats are out of scope.
 
 #### CLI
 `octop-harness` provides: `init`, `chat`, `agent`, `config` (e.g. `config provider add`), `skill`, and `update`.
