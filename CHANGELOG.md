@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- OpenSandbox 后端补齐 `mkdir_path` / `delete_path` / `move_path`，修复非挂载启动专家时 `BackendOperationNotSupportedError` 导致工作区初始化失败的问题。
 - 将 `deepagents` 下限提高到 `>=0.7.16`，接入上游同路径并行 `edit_file` / `write_file` 防护（langchain-ai/deepagents#6446）。
 
 ## [1.0.1] - 2026-10-03
