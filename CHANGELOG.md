@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 插件系统新增 `channel` 插件类型：`kind: channel` 插件可在 `setup()` 中通过 `ctx.channel(kind, channel_cls, label=..., fields=...)` 贡献渠道实现；`PluginRegistry.all_channels()` 汇总全部插件渠道注册（同 kind 冲突时先注册者优先）。
+
+
 ### 修复
 
 - 将 `deepagents` 下限提高到 `>=0.7.16`，接入上游同路径并行 `edit_file` / `write_file` 防护（langchain-ai/deepagents#6446）。
