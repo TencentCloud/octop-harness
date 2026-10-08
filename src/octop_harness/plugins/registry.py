@@ -36,11 +36,43 @@ class SkillRegistration:
 
 
 @dataclass
+class ChannelRegistration:
+    """A channel class contributed by a plugin.
+
+    ``kind`` is the channel-type string persisted in the control-plane
+    database (e.g. ``"octo"``) and passed to the gateway's channel manager.
+    ``label`` / ``icon`` / ``intro_url`` are display hints for the dashboard
+    channel catalogue; ``fields`` is an optional form schema (same shape as
+    the dashboard's ``ChannelField`` dicts) so the drawer can render real
+    inputs instead of the raw-JSON fallback.
+    """
+
+    plugin_id: str
+    kind: str
+    channel_cls: Any
+    label: str = ""
+    icon: str = ""
+    intro_url: str = ""
+    fields: list[ConfigField] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        kind = str(self.kind).strip().lower()
+        if not kind:
+            raise ValueError("channel kind must not be empty")
+        self.kind = kind
+        if not (isinstance(self.channel_cls, type) or callable(self.channel_cls)):
+            raise ValueError("channel_cls must be a class or factory callable")
+        if self.fields and not isinstance(self.fields, list):
+            raise ValueError("fields must be a list of field dicts")
+
+
+@dataclass
 class LoadedPlugin:
     manifest: PluginManifest
     source_path: Path
     tools: list[ToolRegistration] = field(default_factory=list)
     middleware: list[MiddlewareRegistration] = field(default_factory=list)
+    channels: list[ChannelRegistration] = field(default_factory=list)
     skills_dir: Path | None = None
     diagnostics: list[str] = field(default_factory=list)
     context: Any | None = None
@@ -85,6 +117,20 @@ class PluginRegistry:
         out: list[ToolRegistration] = []
         for plugin in self._plugins.values():
             out.extend(plugin.tools)
+        return out
+
+    def all_channels(self) -> list[ChannelRegistration]:
+        """Channel registrations across all enabled plugins (first wins on kind clash)."""
+        out: list[ChannelRegistration] = []
+        seen: set[str] = set()
+        for plugin in self._plugins.values():
+            if plugin.manifest.kind != "channel":
+                continue
+            for reg in plugin.channels:
+                if reg.kind in seen:
+                    continue
+                seen.add(reg.kind)
+                out.append(reg)
         return out
 
     def build_middleware_chain(self, *, global_enabled: dict[str, bool] | None = None) -> list[Any]:

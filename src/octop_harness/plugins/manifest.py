@@ -8,7 +8,9 @@ from typing import Any, Literal
 
 import yaml
 
-PluginKind = Literal["tool", "skill", "hook"]
+PluginKind = Literal["tool", "skill", "hook", "channel"]
+
+PLUGIN_KINDS = ("tool", "skill", "hook", "channel")
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,7 @@ class PluginManifest:
             raise ValueError("plugin.yaml requires id and version")
 
         kind = str(data.get("kind") or "tool").strip().lower()
-        if kind not in ("tool", "skill", "hook"):
+        if kind not in PLUGIN_KINDS:
             raise ValueError(f"unsupported plugin kind: {kind!r}")
 
         entry = str(data.get("entry") or "main.py").strip()
