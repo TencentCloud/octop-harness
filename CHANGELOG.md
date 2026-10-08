@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 将 `deepagents` 下限提高到 `>=0.7.16`，接入上游同路径并行 `edit_file` / `write_file` 防护（langchain-ai/deepagents#6446）。
 - 记忆辅助调用可单独配置读取超时。提炼输出预算写入 memory runtime 的 `extraction.max_tokens`（提取器总会自带预算，客户端兜底覆盖不到）。OpenAI 兼容端点在 `auto` 下对 Qwen3 / QwQ / DeepSeek-R / reasoner 默认关闭深度思考（TencentCloud/Octop#1360）。
+- 远程 MCP 工具的 `array` / `object` 参数不再降级为 `str`（此前服务端返回 JSON-RPC -32602），现分别映射为 `list[Any]` / `dict[str, Any]`。
 
 ## [1.0.1] - 2026-10-03
 

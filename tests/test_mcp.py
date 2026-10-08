@@ -250,6 +250,65 @@ class TestMcpArgsModel:
         with pytest.raises(ValidationError, match="origin"):
             model.model_validate({"origin": None, "destination": None})
 
+    def test_maps_array_parameters_to_list(self) -> None:
+        model = mcp_args_model(
+            "batch_delete",
+            {
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                    "ids": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        )
+        assert model.model_validate({"ids": ["a", "b"]}).ids == ["a", "b"]
+        with pytest.raises(ValidationError, match="ids"):
+            model.model_validate({"ids": "a,b"})
+        props = model.model_json_schema()["properties"]
+        assert props["ids"]["type"] == "array"
+
+    def test_maps_object_parameters_to_dict(self) -> None:
+        model = mcp_args_model(
+            "notion_update_page",
+            {
+                "type": "object",
+                "required": ["properties"],
+                "properties": {
+                    "properties": {"type": "object", "additionalProperties": True},
+                },
+            },
+        )
+        assert model.model_validate({"properties": {"title": "hello"}}).properties == {"title": "hello"}
+        with pytest.raises(ValidationError, match="properties"):
+            model.model_validate({"properties": ["not", "a", "dict"]})
+
+    def test_mixed_scalar_array_and_object_parameters(self) -> None:
+        model = mcp_args_model(
+            "drive_create_file",
+            {
+                "type": "object",
+                "required": ["name", "parents"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "shared": {"type": "boolean"},
+                    "parents": {"type": "array", "items": {"type": "string"}},
+                    "properties": {"type": "object", "additionalProperties": {"type": "string"}},
+                },
+            },
+        )
+        parsed = model.model_validate(
+            {
+                "name": "report.txt",
+                "shared": True,
+                "parents": ["folder_1"],
+                "properties": {"mimeType": "text/plain"},
+            }
+        )
+        assert parsed.name == "report.txt"
+        assert parsed.shared is True
+        assert parsed.parents == ["folder_1"]
+        assert parsed.properties == {"mimeType": "text/plain"}
+
     @pytest.mark.asyncio
     async def test_strips_none_arguments_before_mcp_call(
         self,
