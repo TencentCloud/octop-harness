@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- PII 脱敏新增凭据赋值（`password=` / `passwd=` / `secret=` / `client_secret=` / `token=`，值至少 3 字符）与美式格式（SSN，以及区号、局号首位均为 2-9 的美国电话号码）。`password=None`、`password: str` 这类声明式写法不会被误脱敏。
+
 ### 修复
 
 - 将 `deepagents` 下限提高到 `>=0.7.16`，接入上游同路径并行 `edit_file` / `write_file` 防护（langchain-ai/deepagents#6446）。
