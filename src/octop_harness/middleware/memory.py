@@ -40,6 +40,12 @@ from octop_harness.middleware.memory_recall import (
     stamp_recall_snapshot,
 )
 
+# ~20MB at the default 4KB page size. Matches
+# octop_memory.pipeline.lifecycle.vacuum.MAINTENANCE_INCREMENTAL_VACUUM_PAGES.
+# Kept local so a host can pass it to an already-installed octop-memory
+# whose ``nudge_vacuum`` accepts ``pages`` but does not export the constant yet.
+_MAINTENANCE_VACUUM_PAGES = 5000
+
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
     from octop_memory import MemoryService
@@ -786,7 +792,11 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             if not _claim_reclaim_slot(memory, window=self._maintenance_interval_seconds / 2):
                 logger.debug("memory.maintenance skip: another agent just reclaimed this store")
                 return
-            self._run_reclaim_pass(memory, run_gc=run_gc, nudge_vacuum=nudge_vacuum)
+
+            def _nudge(store: Any) -> Any:
+                return nudge_vacuum(store, pages=_MAINTENANCE_VACUUM_PAGES)
+
+            self._run_reclaim_pass(memory, run_gc=run_gc, nudge_vacuum=_nudge)
         except Exception:  # maintenance runs off the user path; pylint: disable=broad-except
             logger.warning("memory.maintenance failed", exc_info=True)
         finally:
