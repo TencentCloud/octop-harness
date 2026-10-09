@@ -26,8 +26,9 @@ plugin's extractor / promotion worker can degrade gracefully (write the
 from __future__ import annotations
 
 import logging
+import re
 import threading
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from octop_memory.ports.llm import LLMClientError, LLMTier
 
@@ -37,6 +38,14 @@ if TYPE_CHECKING:
     from octop_harness.llm.factory import ChatModelFactory
 
 logger = logging.getLogger(__name__)
+
+# Model ids that start a reasoning chain unless the request turns it off.
+# Matched against the model id (the part after the last "/"), not the provider.
+_REASONING_MODEL_RE = re.compile(
+    r"(qwen3|qwen-3|qwq|deepseek-r\d|reasoner|(?:^|[^a-z])thinking(?:[^a-z]|$))",
+    re.IGNORECASE,
+)
+ThinkingMode = Literal["auto", "off", "on"]
 
 
 class HarnessAgentLLMClient:
@@ -51,6 +60,10 @@ class HarnessAgentLLMClient:
             first non-empty value wins; both tiers share it.
         default_model: Last-resort model ref when no aux and no live chat
             model have been recorded yet.
+        thinking: ``auto`` disables depth-thinking for known reasoning model
+            ids; ``off`` disables it for every OpenAI-compatible model;
+            ``on`` leaves the server default. Main-chat thinking settings
+            are not applied to this client.
     """
 
     # Default timeouts in seconds. Light covers per-session extraction and alias
@@ -69,6 +82,7 @@ class HarnessAgentLLMClient:
         default_model: str | None = None,
         light_timeout_s: float | None = None,
         heavy_timeout_s: float | None = None,
+        thinking: ThinkingMode = "auto",
     ) -> None:
         configured = _first_ref(aux_model, light_model, heavy_model)
         if configured is None and default_model is None:
@@ -80,6 +94,7 @@ class HarnessAgentLLMClient:
         self._default_model = default_model
         self._light_timeout_s = light_timeout_s if light_timeout_s is not None else self.DEFAULT_LIGHT_TIMEOUT_S
         self._heavy_timeout_s = heavy_timeout_s if heavy_timeout_s is not None else self.DEFAULT_HEAVY_TIMEOUT_S
+        self._thinking: ThinkingMode = thinking
         self._current_lock = threading.Lock()
         self._current_model: str | None = None
 
@@ -187,6 +202,7 @@ class HarnessAgentLLMClient:
             temperature=temperature,
             response_format=response_format,
             timeout_s=self._light_timeout_s if tier == "light" else self._heavy_timeout_s,
+            extra_body=_disable_thinking_extra_body(ref, self._thinking),
         )
         messages = build_text_messages(prompt, system=system)
 
@@ -209,6 +225,22 @@ class HarnessAgentLLMClient:
             ) from exc
 
         return stringify_content(response.content)
+
+
+def _disable_thinking_extra_body(ref: str, mode: ThinkingMode) -> dict[str, Any] | None:
+    """Return the OpenAI-compatible body that turns reasoning off, or None.
+
+    ``enable_thinking`` is a chat-template flag used by Qwen3 / vLLM-style
+    servers. Official OpenAI rejects unknown body fields, so ``auto`` only
+    attaches it when the model id looks like a default-on reasoning model.
+    """
+    if mode == "on":
+        return None
+    if mode == "auto":
+        model_id = ref.rsplit("/", 1)[-1]
+        if _REASONING_MODEL_RE.search(model_id) is None:
+            return None
+    return {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 def _first_ref(*refs: str | None) -> str | None:
