@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- PII 检测新增口令类赋值（`password` / `passwd` / `secret` / `token` 后跟 `=` 或 `:`，仅脱敏值本身）与美国格式（SSN `###-##-####`，以及带分隔符的美国电话号码），沿用 `pii_strategy` 与 `pii_surfaces`。
+
 ## [1.0.2] - 2026-10-09
 
 ### 修复
