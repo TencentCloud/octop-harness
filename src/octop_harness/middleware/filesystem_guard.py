@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable, Iterable
+from pathlib import Path
 from typing import Any, Literal
 
 from deepagents.backends.utils import validate_path
 from deepagents.middleware.filesystem import FilesystemPermission
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
+from langchain_core.messages.tool import ToolCall
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from wcmatch import glob as wcglob
@@ -46,6 +49,68 @@ _OUTSIDE_ROOT_REMEDIATION = (
     "widen the storage root so it contains this path "
     "(on Windows, set an explicit drive path such as D:/octop-data)."
 )
+
+_WINDOWS_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def is_windows_absolute_path(raw: str) -> bool:
+    """True for leftover ``D:\\…`` / ``D:/…`` / UNC host paths."""
+    return bool(_WINDOWS_ABS_RE.match(raw.strip()))
+
+
+def rewrite_legacy_windows_fs_path(
+    raw: str,
+    *,
+    root_dir: str | Path | None = None,
+    workspace_dir: str | Path | None = None,
+) -> str:
+    """Map a leftover Windows absolute path onto the current storage jail.
+
+    Conversation history and memory often keep ``D:\\octop-data\\…`` after the
+    backend root moves (or after migrating off Windows). deepagents virtual
+    mode treats that drive-letter string as a relative key; pathlib then jumps
+    to the other drive and raises ``Path … outside root directory``, which
+    used to abort the whole turn as a generic model-call failure.
+
+    When the same suffix exists under *root_dir* or *workspace_dir*, return a
+    jail-safe virtual path (``/data/…``). Otherwise return *raw* unchanged so
+    the outside-root soft-fail can explain the storage-root mismatch.
+    """
+    text = raw.strip()
+    if not text or not is_windows_absolute_path(text):
+        return raw
+
+    for base in (root_dir, workspace_dir):
+        mapped = _virtual_path_if_under_base(text, base)
+        if mapped is not None:
+            return mapped
+
+    posix = text.replace("\\", "/")
+    stripped = posix.split(":", 1)[-1].lstrip("/") if ":" in posix[:3] else posix.lstrip("/")
+    parts = [part for part in stripped.split("/") if part]
+    bases = [Path(item) for item in (root_dir, workspace_dir) if item]
+    for index in range(len(parts)):
+        suffix = "/".join(parts[index:])
+        for base in bases:
+            try:
+                candidate = (base.expanduser() / suffix).resolve()
+            except OSError:
+                continue
+            if candidate.is_file() or candidate.is_dir():
+                return f"/{suffix}"
+    return raw
+
+
+def _virtual_path_if_under_base(windows_path: str, base: str | Path | None) -> str | None:
+    if base is None:
+        return None
+    try:
+        resolved_base = Path(base).expanduser().resolve()
+        resolved = Path(windows_path).expanduser().resolve()
+        rel = resolved.relative_to(resolved_base).as_posix()
+    except (OSError, ValueError):
+        return None
+    return "/" if not rel or rel == "." else f"/{rel}"
 
 
 def _tool_base_name(name: str) -> str:
@@ -199,8 +264,56 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
     ``read_file``, …), not arbitrary tool ValueErrors.
     """
 
-    def __init__(self, permissions: list[FilesystemPermission] | None = None) -> None:
+    def __init__(
+        self,
+        permissions: list[FilesystemPermission] | None = None,
+        *,
+        root_dir: str | Path | None = None,
+        workspace_dir: str | Path | None = None,
+    ) -> None:
         self._permissions = list(permissions or ())
+        self._root_dir = root_dir
+        self._workspace_dir = workspace_dir
+
+    def _rewrite_legacy_windows_request(self, request: ToolCallRequest) -> ToolCallRequest:
+        tool_name, _ = _tool_call_meta(request)
+        raw_args: Any = request.tool_call.get("args") or {}
+        path = (
+            _path_from_tool_args(tool_name, raw_args)
+            if _tool_base_name(tool_name) in _FS_TOOL_OPS and isinstance(raw_args, dict)
+            else None
+        )
+        rewritten = (
+            rewrite_legacy_windows_fs_path(
+                path,
+                root_dir=self._root_dir,
+                workspace_dir=self._workspace_dir,
+            )
+            if path
+            else None
+        )
+        if not path or rewritten is None or rewritten == path:
+            return request
+        new_args: dict[str, Any] = dict(raw_args)
+        key = next((name for name in ("file_path", "path") if new_args.get(name) == path), None)
+        if key is None:
+            return request
+        new_args[key] = rewritten
+        logger.info("FilesystemGuard rewrote leftover Windows path %s -> %s", path, rewritten)
+        new_call: ToolCall = {
+            "name": str(request.tool_call.get("name") or ""),
+            "args": new_args,
+            "id": request.tool_call.get("id"),
+        }
+        if request.tool_call.get("type") == "tool_call":
+            new_call["type"] = "tool_call"
+        override = getattr(request, "override", None)
+        if callable(override):
+            updated = override(tool_call=new_call)
+            if isinstance(updated, ToolCallRequest):
+                return updated
+        request.tool_call = new_call
+        return request
 
     def _blocked_message(self, request: ToolCallRequest) -> ToolMessage | None:
         tool_name, call_id = _tool_call_meta(request)
@@ -243,6 +356,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
+        request = self._rewrite_legacy_windows_request(request)
         blocked = self._blocked_message(request)
         if blocked is not None:
             return blocked
@@ -259,6 +373,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
     ) -> ToolMessage | Command[Any]:
+        request = self._rewrite_legacy_windows_request(request)
         blocked = self._blocked_message(request)
         if blocked is not None:
             return blocked
@@ -275,5 +390,7 @@ __all__ = [
     "FilesystemGuardMiddleware",
     "filesystem_guard_block_reason",
     "is_path_outside_root_error",
+    "is_windows_absolute_path",
     "path_outside_root_tool_message",
+    "rewrite_legacy_windows_fs_path",
 ]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import pytest
 
 from octop_harness.middleware.pii import detect_pii
@@ -119,3 +121,95 @@ class TestPIIMiddlewareIntegration:
         # The original secret must NOT appear in the masked content.
         assert "sk-4b829b7b-b0aa-4064-8d53-18b0025594f2" not in str(content)
         assert "*" in str(content) or "[REDACTED" in str(content)
+
+
+class TestChinesePersonalInformation:
+    @pytest.mark.parametrize("value", ["13800138000", "+86 13800138000", "0086-13800138000", "19912345678"])
+    def test_mainland_mobile_span(self, value: str) -> None:
+        text = f"手机\uff1a{value}。"
+        assert detect_pii(text) == [{"type": "cn_mobile_phone", "value": value, "start": 3, "end": 3 + len(value)}]
+
+    @pytest.mark.parametrize(
+        "value", ["11010519491231002X", "11010519491231002x", "110105200002290013", "110105199001010010"]
+    )
+    def test_resident_id_span(self, value: str) -> None:
+        assert detect_pii(f"身份证\uff1a{value}。") == [
+            {"type": "cn_resident_id", "value": value, "start": 4, "end": 22}
+        ]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "12345678901",
+            "1380013800",
+            "138001380000",
+            "913800138000",
+            "order13800138000",
+            "13800138000abc",
+            "\uff11\uff13\uff18\uff10\uff10\uff11\uff13\uff18\uff10\uff10\uff10",
+            "110105194912310020",
+            "11010519490231002X",
+            "11010519491331002X",
+            "110105200102290010",  # Correct checksum, invalid leap day.
+            "110105194913310021",  # Correct checksum, invalid month.
+            "110105194912310003",  # Correct checksum, zero sequence.
+            "011010519491231002X",
+            "11010519491231002X0",
+            "order11010519491231002X",
+            "110105491231002",
+            "15400138000",  # 154 is not a mainland mobile prefix.
+            "14000138000",  # 140 is IoT/unused, not a handset prefix.
+            "99010519491231002X",  # Valid date/check shape, unknown province.
+            "11010518991231002X",  # Year outside 1900-2099.
+        ],
+    )
+    def test_benign_or_invalid_numbers(self, text: str) -> None:
+        assert detect_pii(text) == []
+
+    def test_mixed_matches_are_ordered_and_nonoverlapping(self) -> None:
+        key = "sk-abc-13800138000-abcdefghijklmnop"
+        text = f"13800138000 {key} 11010519491231002X"
+        matches = detect_pii(text)
+        assert [m["type"] for m in matches] == ["cn_mobile_phone", "openai", "cn_resident_id"]
+        assert all(text[m["start"] : m["end"]] == m["value"] for m in matches)
+        assert all(a["end"] <= b["start"] for a, b in pairwise(matches))
+
+    @pytest.mark.parametrize("strategy", ["mask", "redact", "hash", "block"])
+    @pytest.mark.parametrize("surface", ["input", "output", "tool_results"])
+    def test_middleware_strategies_and_surfaces(self, strategy: str, surface: str) -> None:
+        from langchain.agents.middleware import PIIMiddleware
+        from langchain.agents.middleware.pii import PIIDetectionError
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        text = "phone: 13800138000; ID: 11010519491231002X"
+        mw = PIIMiddleware(
+            pii_type="api_key",
+            detector=detect_pii,
+            strategy=strategy,  # type: ignore[arg-type]
+            apply_to_input=surface == "input",
+            apply_to_output=surface == "output",
+            apply_to_tool_results=surface == "tool_results",
+        )
+        messages = {
+            "input": [HumanMessage(content=text)],
+            "output": [HumanMessage(content="hello"), AIMessage(content=text)],
+            "tool_results": [AIMessage(content=""), ToolMessage(content=text, tool_call_id="test")],
+        }[surface]
+        hook = mw.after_model if surface == "output" else mw.before_model
+        if strategy == "block":
+            with pytest.raises(PIIDetectionError):
+                hook({"messages": messages}, runtime=None)  # type: ignore[arg-type]
+            return
+        result = hook({"messages": messages}, runtime=None)  # type: ignore[arg-type]
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "13800138000" not in content
+        assert "11010519491231002X" not in content
+        assert "phone: " in content and "; ID: " in content
+        assert messages[-1].content == text
+
+
+def test_wider_api_key_assignment_remains_detected() -> None:
+    value = "prefixprefixprefix-sk-abcdefghijklmnopqrstuv"
+    matches = detect_pii(f"api_key={value}")
+    assert any(m["type"] == "generic_api_key_assignment" and m["value"] == value for m in matches)

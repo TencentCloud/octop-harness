@@ -1146,6 +1146,14 @@ class HarnessAgent:
         ws = self._workspace_path.expanduser().resolve()
         root, virtual = self._peek_backend_mount()
         if not virtual or root is None:
+            from octop_harness.backends.workspace import (
+                is_cloud_storage_backend,
+                remote_workspace_virtual_root,
+            )
+
+            backend = getattr(self, "_backend", None)
+            if backend is not None and is_cloud_storage_backend(backend):
+                ws = Path(remote_workspace_virtual_root(ws))
             return ws
         try:
             if root == Path("/").resolve():
@@ -1154,9 +1162,7 @@ class HarnessAgent:
         except (OSError, ValueError):
             return ws
         posix = rel.as_posix()
-        if not posix or posix == ".":
-            return Path("/")
-        return Path("/" + posix)
+        return Path("/") if not posix or posix == "." else Path("/" + posix)
 
     def _host_system_dir(self) -> Path:
         """Host directory for sessions / sqlite — under the on-disk workspace."""
@@ -1311,6 +1317,7 @@ class HarnessAgent:
                 spec,
                 workspace_dir=self._workspace_path,
                 system_files_path=self._config.system_files_path,
+                explicit_virtual_paths=self._config.explicit_virtual_paths,
             )
 
     def _wire_workspace_dotenv_for_execute(self) -> None:
@@ -1348,6 +1355,12 @@ class HarnessAgent:
         if cfg.media_generation is not None and cfg.media_generation.has_api_key():
             tools.extend(build_media_generation_tools(self._workspace, cfg.media_generation))
         tools.extend(self._memory_runtime.build_tools())
+        if cfg.explicit_virtual_paths:
+            from octop_harness.backends.explicit_virtual_path import (
+                build_virtual_to_native_tool,
+            )
+
+            tools.append(build_virtual_to_native_tool(self._backend))
         if cfg.tools:
             tools.extend(cfg.tools)
         if cfg.acp_delegate_enabled:
@@ -1446,7 +1459,14 @@ class HarnessAgent:
         from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
 
         fs_permissions = list(cfg.permissions) if cfg.permissions and spec_supports_execution(cfg.backend) else []
-        chain.append(FilesystemGuardMiddleware(fs_permissions))
+        root_dir, _virtual = self._peek_backend_mount()
+        chain.append(
+            FilesystemGuardMiddleware(
+                fs_permissions,
+                root_dir=root_dir,
+                workspace_dir=cfg.workspace_dir,
+            )
+        )
 
         if cfg.mcp_server_configs:
             chain.append(
@@ -1689,6 +1709,9 @@ class HarnessAgent:
                 "credentials are missing. If the user asks for generated media, ask them to "
                 "configure credentials in the host application; do not retry or claim success."
             )
+        from octop_harness.backends.explicit_virtual_path import EXPLICIT_VIRTUAL_PATH_PROMPT
+
+        directive += f" {EXPLICIT_VIRTUAL_PATH_PROMPT}" if cfg.explicit_virtual_paths else ""
         kwargs["system_prompt"] = (
             base_prompt + "\n\n" + directive + "\n\n" + render_slash_skill_prompt(language=cfg.language)
         ).strip()

@@ -370,7 +370,6 @@ class DockerSandbox(BaseSandbox):
         self._pids_limit = pids_limit
         self._environment = {str(k): str(v) for k, v in dict(environment or {}).items()}
         self._environment_file = str(Path(environment_file).expanduser()) if environment_file else None
-        self._environment_file_cache: tuple[tuple[int, int], dict[str, str]] | None = None
         self._workspace_dotenv_cache: tuple[float, dict[str, str]] | None = None
         self._workspace_dotenv_ttl = 2.0
 
@@ -916,18 +915,7 @@ class DockerSandbox(BaseSandbox):
         path = self._environment_file
         if not path:
             return {}
-        file = Path(path)
-        try:
-            st = file.stat()
-            fp = (st.st_mtime_ns, st.st_size)
-        except OSError:
-            fp = (-1, -1)
-        cached = self._environment_file_cache
-        if cached is not None and cached[0] == fp:
-            return cached[1]
-        values = {} if fp == (-1, -1) else load_dotenv_path(file)
-        self._environment_file_cache = (fp, values)
-        return values
+        return load_dotenv_path(path)
 
     def _workspace_dotenv(self) -> dict[str, str]:
         now = time.monotonic()

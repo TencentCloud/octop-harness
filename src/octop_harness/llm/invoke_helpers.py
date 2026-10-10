@@ -44,9 +44,9 @@ def bind_call_options(
     # Anthropic's adapter rejects ``json_object`` before sending.
     if response_format == "json" and _is_langchain_openai_model(model):
         kwargs["response_format"] = {"type": "json_object"}
-    # ``extra_body`` rides the OpenAI SDK ``create()`` call (thinking
-    # controls, vendor knobs). Only bound for langchain-openai models —
-    # other adapters would choke on the unknown key before sending.
+    # Vendor extensions (thinking controls, ``reasoning_effort``) ride
+    # ChatOpenAI's ``extra_body``. Copy so a later mutate cannot change the
+    # bound request. Other adapters reject the key, so skip them.
     if extra_body and _is_langchain_openai_model(model):
         kwargs["extra_body"] = dict(extra_body)
     if not kwargs:

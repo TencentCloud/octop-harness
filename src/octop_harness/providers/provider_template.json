@@ -1889,6 +1889,101 @@
     "variant": "agent_plan"
   },
   {
+    "id": "iflytek-astron-token-plan",
+    "name": "iFlytek Astron Token Plan",
+    "base_url": "https://maas-token-api.cn-huabei-1.xf-yun.com/v2",
+    "protocol": "openai",
+    "api_key_env": "IFLYTEK_ASTRON_TOKEN_PLAN_API_KEY",
+    "api_key_prefix": "",
+    "logo": "iflytek.svg",
+    "models": [
+      {
+        "id": "spark-x2.5",
+        "name": "Spark-X2.5",
+        "max_input_tokens": 262144
+      },
+      {
+        "id": "xsparkx2flash",
+        "name": "Spark-X2-Flash",
+        "max_input_tokens": 262144
+      },
+      {
+        "id": "xopglm52",
+        "name": "GLM-5.2",
+        "max_input_tokens": 262144
+      },
+      {
+        "id": "xopglm51",
+        "name": "GLM-5.1",
+        "max_input_tokens": 200000
+      },
+      {
+        "id": "xopglm5",
+        "name": "GLM-5",
+        "max_input_tokens": 200000
+      },
+      {
+        "id": "xopdeepseekv4pro",
+        "name": "DeepSeek-V4-Pro",
+        "max_input_tokens": 262144
+      },
+      {
+        "id": "xopkimik26",
+        "name": "Kimi-K2.6",
+        "max_input_tokens": 262144,
+        "input": [
+          "text",
+          "image"
+        ]
+      },
+      {
+        "id": "xopkimik25",
+        "name": "Kimi-K2.5",
+        "max_input_tokens": 131072
+      },
+      {
+        "id": "xopqwen35397b",
+        "name": "Qwen3.5-397B-A17B",
+        "max_input_tokens": 262144,
+        "input": [
+          "text",
+          "image"
+        ]
+      },
+      {
+        "id": "xopqwen36v35b",
+        "name": "Qwen3.6-35B-A3B",
+        "max_input_tokens": 131072,
+        "input": [
+          "text",
+          "image"
+        ]
+      },
+      {
+        "id": "xopqwen35v35b",
+        "name": "Qwen3.5-35B-A3B",
+        "max_input_tokens": 131072,
+        "input": [
+          "text",
+          "image"
+        ]
+      },
+      {
+        "id": "xop3qwencodernext",
+        "name": "Qwen3-Coder-Next-FP8",
+        "max_input_tokens": 262144
+      },
+      {
+        "id": "xopglmv47flash",
+        "name": "GLM-4.7-Flash",
+        "max_input_tokens": 131072
+      }
+    ],
+    "vendor": "iflytek",
+    "vendor_name": "iFlytek Astron",
+    "variant": "token_plan"
+  },
+  {
     "id": "siliconflow-cn",
     "name": "SiliconFlow (China)",
     "base_url": "https://api.siliconflow.cn/v1",

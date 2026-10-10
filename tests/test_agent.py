@@ -9,6 +9,7 @@ echoes whatever was passed to it.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -1640,3 +1641,48 @@ class TestAgentVisibleWorkspaceDir:
             prompt = create.call_args.kwargs["system_prompt"]
         assert render_slash_skill_prompt(language=cfg.language) in prompt
         assert "SKILL.md" in prompt
+
+
+class TestExplicitVirtualPathTool:
+    def test_build_tools_registers_bound_converter(
+        self,
+        cfg: HarnessAgentConfig,
+        mock_model_factory: Callable[[], Any],
+        stub_create_deep_agent: Any,
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        explicit = replace(
+            cfg,
+            explicit_virtual_paths=True,
+            workspace_dir=root,
+            backend={
+                "type": "filesystem",
+                "root_dir": str(root),
+                "virtual_mode": True,
+            },
+        )
+        with mock_model_factory(), stub_create_deep_agent as create, HarnessAgent(explicit) as agent:
+            registered = create.call_args.kwargs["tools"]
+            built = agent._build_tools()
+            assert any(getattr(tool, "name", None) == "virtual_to_native_path" for tool in registered)
+            tool = next(item for item in built if getattr(item, "name", None) == "virtual_to_native_path")
+            result = tool.invoke({"path": "/data/a.txt"})
+            assert result == {
+                "kind": "native_path",
+                "path": os.fspath((root / "data" / "a.txt").resolve()),
+            }
+            with pytest.raises(ValueError, match="explicit virtual"):
+                tool.invoke({"path": "C:/work/data/a.txt"})
+            prompt = create.call_args.kwargs["system_prompt"]
+            assert "virtual_to_native_path" in prompt
+            assert "execute/shell is not rewritten" in prompt
+
+        with mock_model_factory(), stub_create_deep_agent as create, HarnessAgent(cfg) as agent:
+            names = [getattr(tool, "name", None) for tool in create.call_args.kwargs["tools"]]
+            built_names = [getattr(tool, "name", None) for tool in agent._build_tools()]
+            assert "virtual_to_native_path" not in names
+            assert "virtual_to_native_path" not in built_names
+            prompt = create.call_args.kwargs["system_prompt"]
+            assert "execute/shell is not rewritten" not in prompt

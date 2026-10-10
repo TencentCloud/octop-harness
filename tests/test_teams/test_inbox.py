@@ -325,3 +325,33 @@ def test_inbox_rejects_non_positive_concurrency() -> None:
 
     with pytest.raises(ValueError, match="max_concurrency"):
         HarnessAgentInboxManager(call_agent=_call, processor=proc, max_concurrency=0)
+
+
+@pytest.mark.asyncio
+async def test_inbox_marks_model_retry_failure_prompt_as_failed() -> None:
+    from octop_harness.messages import MODEL_RETRY_FAILURE_MARK
+
+    proc = _Processor()
+    prompt = f"{MODEL_RETRY_FAILURE_MARK}\nThe model API request failed.\nTechnical detail: boom"
+
+    async def target(_msg: InboxMessage) -> dict[str, Any]:
+        return {"messages": [{"role": "assistant", "content": prompt}]}
+
+    inbox = HarnessAgentInboxManager(
+        call_agent=_Caller().call,
+        processor=proc,
+        invoke_target=target,
+    )
+    msg = InboxMessage(
+        id="retry-failure",
+        target_agent_id="B",
+        source_agent_id="A",
+        source_thread_id="thread",
+        message="test",
+        user_id=1,
+    )
+    await inbox._process(msg)
+    assert msg.status == "failed"
+    assert msg.error_text == prompt
+    assert proc.events[0].status == "failed"
+    assert "boom" in (proc.events[0].error_text or "")

@@ -120,6 +120,7 @@
 #### 安全
 
 - `SecurityPolicy` 提供工具护栏、文件系统权限（`FilesystemPermission`）与敏感信息脱敏中间件。
+- 敏感信息检测覆盖 API Key、中国大陆手机号（常见 13-19 号段，可带 `+86` / `0086`）及省份代码、1900-2099 出生日期和校验位均有效的 18 位居民身份证号，沿用 `pii_strategy` 与 `pii_surfaces`；不识别旧版 15 位身份证号或其他国家的号码。
 
 
 
@@ -162,7 +163,7 @@ pip install 'octop-harness[cli,all]'
 | `object-storage`  | 腾讯云 COS + 阿里云 OSS + 华为云 OBS SDK                          |
 | `desktop`         | 桌面截图 / 键鼠（`mss`、`pynput`、`pillow`）                       |
 | `web-search-all`  | 全部网页搜索后端（Tavily / Brave / Google）                        |
-| `remote-backends` | 经 `deepagents-backends` 的 Postgres / 上游 S3（Python ≥3.12） |
+| `remote-backends` | Postgres 工作区后端（`psycopg`）。S3 使用内置 boto3 后端。 |
 | `observability`   | Langfuse                                                 |
 | `acp`             | ACP agent runner                                         |
 | `all`             | 上面全部**库功能** extras（**不含** `cli`；两者都要则用 `[cli,all]`）      |

@@ -56,6 +56,21 @@ class TestCoreProviderPresets:
         assert kimi.vendor == "kimi"
         assert kimi.variant == "open_platform_cn"
 
+    def test_bundled_templates_include_iflytek_astron_token_plan(self) -> None:
+        presets = {p.id: p for p in load_provider_templates(templates_path=_BUNDLED_TEMPLATE)}
+        token = presets["iflytek-astron-token-plan"]
+        assert token.base_url == "https://maas-token-api.cn-huabei-1.xf-yun.com/v2"
+        assert token.protocol == "openai"
+        assert token.vendor == "iflytek"
+        assert token.vendor_name == "iFlytek Astron"
+        assert token.variant == "token_plan"
+        assert token.models[0].id == "spark-x2.5"
+        models = {m.id: m for m in token.models}
+        assert models["xopkimik26"].is_multimodal is True
+        assert models["spark-x2.5"].is_multimodal is False
+        logo = resources.files("octop_harness.providers.logos").joinpath(token.logo)
+        assert logo.is_file()
+
     def test_load_custom_path(self, tmp_path: Path) -> None:
         custom = tmp_path / "my_providers.json"
         custom.write_text(

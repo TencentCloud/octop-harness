@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "octop-harness"
 # Single source of truth for the package version (runtime reads via importlib.metadata).
-version = "1.0.0"
+version = "1.0.2"
 description = "Production-grade Harness Agent built on top of LangChain Deep Agents."
 readme = "README.md"
 license = { text = "MIT" }
@@ -30,11 +30,13 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "deepagents>=0.7,<0.8",
-    "langchain>=1.3.14,<2.0",
-    "langchain-core>=1.5.0,<2.0",
+    # 0.7.16+ rejects sibling same-path file mutations in one model reply
+    # (langchain-ai/deepagents#6446). Older 0.7.x can silently lose edits.
+    "deepagents>=0.7.16,<0.8",
+    "langchain>=1.4.2,<2.0",
+    "langchain-core>=1.6.3,<2.0",
     "langchain-openai>=1.2.2,<2.0",
-    "langchain-anthropic>=1.5.4,<2.0",
+    "langchain-anthropic>=1.7.2,<2.0",
     "langgraph>=1.0,<2.0",
     "langgraph-checkpoint-sqlite>=2.0",
     "httpx>=0.27",
@@ -51,7 +53,10 @@ dependencies = [
 # Fine-grained extras (prefer these in error messages / minimal installs)
 cli = ["click>=8.1", "rich>=13.0", "prompt-toolkit>=3.0", "python-dotenv>=1.0"]
 bedrock = ["langchain-aws>=0.2"]
-remote-backends = ['deepagents-backends>=0.2; python_version >= "3.12"']
+remote-backends = [
+    "psycopg[binary]>=3.2",
+    'deepagents-backends>=0.2; python_version >= "3.12"',
+]
 docker = ["docker>=7.0"]
 opensandbox = ["opensandbox>=0.1.16,<1.2"]
 observability = ["langfuse>=4.9.0"]
@@ -79,6 +84,7 @@ all = [  # library feature extras only; exclude cli — use [cli,all] when neede
     "langchain-tavily>=0.1",
     "langchain-community>=0.3",
     "google-api-python-client>=2.0",
+    "psycopg[binary]>=3.2",
     'deepagents-backends>=0.2; python_version >= "3.12"',
     "docker>=7.0",
     "langfuse>=4.9.0",
@@ -233,6 +239,8 @@ module = [
     "prompt_toolkit.*",
     "boto3.*",
     "botocore.*",
+    "psycopg",
+    "psycopg.*",
     "psutil.*",
     "fastmcp.*",
     "acp.*",

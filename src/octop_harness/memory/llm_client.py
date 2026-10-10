@@ -26,9 +26,10 @@ plugin's extractor / promotion worker can degrade gracefully (write the
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from octop_memory.ports.llm import LLMClientError, LLMTier
 
@@ -38,6 +39,14 @@ if TYPE_CHECKING:
     from octop_harness.llm.factory import ChatModelFactory
 
 logger = logging.getLogger(__name__)
+
+# Model ids that start a reasoning chain unless the request turns it off.
+# Matched against the model id (the part after the last "/"), not the provider.
+_REASONING_MODEL_RE = re.compile(
+    r"(qwen3|qwen-3|qwq|deepseek-r\d|reasoner|(?:^|[^a-z])thinking(?:[^a-z]|$))",
+    re.IGNORECASE,
+)
+ThinkingMode = Literal["auto", "off", "on"]
 
 
 class HarnessAgentLLMClient:
@@ -56,9 +65,15 @@ class HarnessAgentLLMClient:
             ``None`` keeps the class defaults.
         default_max_tokens: Completion budget applied when a call does not
             pass its own ``max_tokens``; ``None`` adds no client-side cap.
-        extra_body: Vendor-specific request extras (thinking controls on
-            OpenAI-compatible endpoints) bound to every call; ``None`` or
-            empty adds nothing.
+            Extraction always sends a budget, so this does not override
+            ``memory_extract_max_tokens``.
+        extra_body: Vendor request extras merged onto every call after the
+            thinking switch. Matching top-level keys from here win.
+            ``None`` or empty adds nothing.
+        thinking: ``auto`` disables depth-thinking for known reasoning model
+            ids; ``off`` disables it for every OpenAI-compatible model;
+            ``on`` leaves the server default. Main-chat thinking settings
+            are not applied to this client.
     """
 
     # Default timeouts in seconds. Light covers per-session extraction and alias
@@ -79,6 +94,7 @@ class HarnessAgentLLMClient:
         heavy_timeout_s: float | None = None,
         default_max_tokens: int | None = None,
         extra_body: Mapping[str, object] | None = None,
+        thinking: ThinkingMode = "auto",
     ) -> None:
         configured = _first_ref(aux_model, light_model, heavy_model)
         if configured is None and default_model is None:
@@ -92,6 +108,7 @@ class HarnessAgentLLMClient:
         self._heavy_timeout_s = heavy_timeout_s if heavy_timeout_s is not None else self.DEFAULT_HEAVY_TIMEOUT_S
         self._default_max_tokens = default_max_tokens
         self._extra_body = dict(extra_body) if extra_body else None
+        self._thinking: ThinkingMode = thinking
         self._current_lock = threading.Lock()
         self._current_model: str | None = None
 
@@ -200,7 +217,7 @@ class HarnessAgentLLMClient:
             temperature=temperature,
             response_format=response_format,
             timeout_s=self._light_timeout_s if tier == "light" else self._heavy_timeout_s,
-            extra_body=self._extra_body,
+            extra_body=_aux_extra_body(ref, self._thinking, self._extra_body),
         )
         messages = build_text_messages(prompt, system=system)
 
@@ -223,6 +240,38 @@ class HarnessAgentLLMClient:
             ) from exc
 
         return stringify_content(response.content)
+
+
+def _aux_extra_body(
+    ref: str,
+    thinking: ThinkingMode,
+    extra_body: Mapping[str, object] | None,
+) -> dict[str, Any] | None:
+    """Merge the thinking switch with caller extras.
+
+    The switch is applied first. Caller keys replace it at the top level,
+    so an explicit ``chat_template_kwargs`` wins over the automatic disable.
+    """
+    merged: dict[str, Any] = dict(_disable_thinking_extra_body(ref, thinking) or {})
+    if extra_body:
+        merged.update(extra_body)
+    return merged or None
+
+
+def _disable_thinking_extra_body(ref: str, mode: ThinkingMode) -> dict[str, Any] | None:
+    """Return the OpenAI-compatible body that turns reasoning off, or None.
+
+    ``enable_thinking`` is a chat-template flag used by Qwen3 / vLLM-style
+    servers. Official OpenAI rejects unknown body fields, so ``auto`` only
+    attaches it when the model id looks like a default-on reasoning model.
+    """
+    if mode == "on":
+        return None
+    if mode == "auto":
+        model_id = ref.rsplit("/", 1)[-1]
+        if _REASONING_MODEL_RE.search(model_id) is None:
+            return None
+    return {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 def _first_ref(*refs: str | None) -> str | None:

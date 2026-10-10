@@ -151,6 +151,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 #### Safety
 - `SecurityPolicy` with tool guardrails, filesystem permissions (`FilesystemPermission`), and PII redaction middleware.
+- PII detection covers provider API keys, mainland China mobile numbers (common 13-19 prefixes, optional `+86` / `0086`), and 18-character resident IDs with a known province code, 1900-2099 date, and checksum. Existing `pii_strategy` and `pii_surfaces` apply; legacy 15-digit IDs and other countries' numbers are out of scope.
 
 #### CLI
 `octop-harness` provides: `init`, `chat`, `agent`, `config` (e.g. `config provider add`), `skill`, and `update`.
@@ -184,7 +185,7 @@ Optional dependency extras (install only what you need; missing extras fail at u
 | `object-storage` | Tencent COS + Alibaba OSS + Huawei OBS SDKs |
 | `desktop` | Desktop screenshot / input (`mss`, `pynput`, `pillow`) |
 | `web-search-all` | All web-search backends (Tavily / Brave / Google) |
-| `remote-backends` | Postgres / upstream S3 via `deepagents-backends` (Python ≥3.12) |
+| `remote-backends` | Postgres workspace backend (`psycopg`). S3 uses the bundled boto3 backend. |
 | `observability` | Langfuse |
 | `acp` | ACP agent runner |
 | `all` | All library feature extras above (**excludes** `cli`; use `[cli,all]` for both) |

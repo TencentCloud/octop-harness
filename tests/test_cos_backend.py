@@ -254,12 +254,55 @@ class TestBinaryUpload:
         png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
         ws = BackendWorkspace(backend, tmp_path)
         await ws.aupload_bytes(".octop/avatar.png", png)
-        assert "ws/.octop/avatar.png" in fake_client.objects
-        envelope = json.loads(fake_client.objects["ws/.octop/avatar.png"].decode("utf-8"))
+        stored_key = f"ws/.octop/workspaces/{tmp_path.name}/.octop/avatar.png"
+        assert stored_key in fake_client.objects
+        envelope = json.loads(fake_client.objects[stored_key].decode("utf-8"))
         assert envelope["encoding"] == "base64"
         got = await ws.adownload_bytes(".octop/avatar.png")
         assert got == png
         assert str(tmp_path) not in next(iter(fake_client.objects))
+
+    async def test_workspace_files_land_under_virtual_folder(
+        self, backend: CosBackend, fake_client: FakeCosClient, tmp_path: Path
+    ) -> None:
+        from octop_harness.backends.workspace import BackendWorkspace, remote_workspace_virtual_root
+
+        virt = remote_workspace_virtual_root(tmp_path)
+        ws = BackendWorkspace(backend, tmp_path)
+        await ws.awrite_text("SOUL.md", "hello")
+        await ws.awrite_text("skills/demo/SKILL.md", "skill")
+
+        stored = f"ws{virt}/SOUL.md"
+        assert stored in fake_client.objects
+        assert "ws/SOUL.md" not in fake_client.objects
+        assert str(tmp_path) not in stored
+
+        root = backend.ls("/")
+        root_paths = {e["path"] for e in root.entries or []}
+        assert "/.octop" in root_paths
+        assert all(e.get("is_dir") for e in root.entries or [] if e["path"] == "/.octop")
+
+        workspaces = backend.ls("/.octop/workspaces")
+        ws_paths = {e["path"] for e in workspaces.entries or []}
+        assert virt in ws_paths
+
+        listed = await ws.als(".")
+        assert listed is not None
+        presented = {row["path"].rstrip("/") for row in listed.entries or []}
+        assert "SOUL.md" in presented
+        assert "skills" in presented
+
+    async def test_workspace_reads_legacy_flattened_root_file(
+        self, backend: CosBackend, fake_client: FakeCosClient, tmp_path: Path
+    ) -> None:
+        from octop_harness.backends.workspace import BackendWorkspace
+
+        backend.write("/SOUL.md", "legacy-root")
+        ws = BackendWorkspace(backend, tmp_path)
+        assert await ws.aread_text("SOUL.md") == "legacy-root"
+        await ws.awrite_text("SOUL.md", "nested")
+        assert await ws.aread_text("SOUL.md") == "nested"
+        assert f"ws/.octop/workspaces/{tmp_path.name}/SOUL.md" in fake_client.objects
 
 
 class TestEdit:
@@ -329,6 +372,7 @@ class TestMkdir:
         entries = backend.ls("/").entries or []
         octop_dir = next(e for e in entries if e.get("is_dir") and e["path"].rstrip("/") == "/.octop")
         assert octop_dir["is_dir"] is True
+        assert sum(1 for e in entries if e["path"].rstrip("/") == "/.octop") == 1
 
     def test_mkdir_path_creates_parents(self, backend: CosBackend, fake_client: FakeCosClient) -> None:
         backend.mkdir_path("/a/b")

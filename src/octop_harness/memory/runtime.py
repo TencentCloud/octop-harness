@@ -61,7 +61,12 @@ class MemoryRuntime:
         if config.memory_enabled:
             self._memory = self._build_memory()
             self._llm_client = self._build_llm_client() if config.memory_aux_model_enabled else None
-            self._service = MemoryService(self._memory, llm=self._llm_client, host="octop-harness")
+            self._service = MemoryService(
+                self._memory,
+                llm=self._llm_client,
+                config=_extraction_service_config(config),
+                host="octop-harness",
+            )
 
     @property
     def memory(self) -> Any | None:
@@ -262,6 +267,7 @@ class MemoryRuntime:
                 heavy_timeout_s=cfg.memory_aux_heavy_timeout_s,
                 default_max_tokens=cfg.memory_aux_max_tokens,
                 extra_body=cfg.memory_aux_extra_body,
+                thinking=cfg.memory_aux_thinking,
             )
         except (ValueError, TypeError):  # pragma: no cover - defensive
             logger.warning(
@@ -269,6 +275,18 @@ class MemoryRuntime:
                 exc_info=True,
             )
             return None
+
+
+def _extraction_service_config(config: HarnessAgentConfig) -> dict[str, Any] | None:
+    """Budget passed into octop-memory's extractor.
+
+    ``CandidateExtractor`` always sends its own ``max_tokens`` (default
+    2048). A harness-side fallback on the chat client never overrides that,
+    so the host budget has to land in ``extraction.max_tokens``.
+    """
+    if config.memory_extract_max_tokens is None:
+        return None
+    return {"extraction": {"max_tokens": config.memory_extract_max_tokens}}
 
 
 __all__ = ["MemoryRuntime"]
