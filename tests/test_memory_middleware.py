@@ -513,8 +513,11 @@ class TestIdleMaintenance:
             stats.total_deleted = 3
             return stats
 
-        def _fake_nudge(_memory: object, **_kwargs: object) -> Any:
+        seen_pages: list[object] = []
+
+        def _fake_nudge(_memory: object, **kwargs: object) -> Any:
             calls.append("nudge_vacuum")
+            seen_pages.append(kwargs.get("pages"))
             stats = MagicMock()
             stats.pages_reclaimed = 7
             stats.auto_vacuum_enabled = True
@@ -535,6 +538,9 @@ class TestIdleMaintenance:
         try:
             mw._run_maintenance_tick(service)
             assert calls == ["run_gc", "nudge_vacuum"]
+            from octop_harness.middleware.memory import _MAINTENANCE_VACUUM_PAGES
+
+            assert seen_pages == [_MAINTENANCE_VACUUM_PAGES]
         finally:
             mw.shutdown()
 

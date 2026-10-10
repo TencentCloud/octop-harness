@@ -29,6 +29,7 @@ def bind_call_options(
     temperature: float | None = None,
     response_format: Literal["text", "json"] = "text",
     timeout_s: float | None = None,
+    extra_body: dict[str, Any] | None = None,
 ) -> Any:
     kwargs: dict[str, object] = {}
     if max_tokens is not None:
@@ -43,6 +44,10 @@ def bind_call_options(
     # Anthropic's adapter rejects ``json_object`` before sending.
     if response_format == "json" and _supports_openai_response_format(model):
         kwargs["response_format"] = {"type": "json_object"}
+    # Vendor extensions (Qwen ``enable_thinking``) go through ChatOpenAI's
+    # ``extra_body``. Other adapters reject or ignore the key, so skip them.
+    if extra_body and _supports_openai_response_format(model):
+        kwargs["extra_body"] = extra_body
     if not kwargs:
         return model
     bind = getattr(model, "bind", None)
