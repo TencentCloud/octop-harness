@@ -11,10 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 插件系统新增 `channel` 插件类型：`kind: channel` 插件可在 `setup()` 中通过 `ctx.channel(kind, channel_cls, label=..., fields=...)` 贡献渠道实现；`PluginRegistry.all_channels()` 汇总全部插件渠道注册（同 kind 冲突时先注册者优先）。
 
+- 记忆辅助调用可配置客户端兜底 `memory_aux_max_tokens`（提炼预算仍走 `memory_extract_max_tokens`），以及 OpenAI 兼容端点的 `memory_aux_extra_body`。显式 `extra_body` 覆盖 `memory_aux_thinking` 生成的同名键。
+
+## [1.0.2] - 2026-10-09
 
 ### 修复
 
 - 将 `deepagents` 下限提高到 `>=0.7.16`，接入上游同路径并行 `edit_file` / `write_file` 防护（langchain-ai/deepagents#6446）。
+- 记忆辅助调用可单独配置读取超时。提炼输出预算写入 memory runtime 的 `extraction.max_tokens`（提取器总会自带预算，客户端兜底覆盖不到）。OpenAI 兼容端点在 `auto` 下对 Qwen3 / QwQ / DeepSeek-R / reasoner 默认关闭深度思考（TencentCloud/Octop#1360）。
+- 小时增量 vacuum 预算提高到 5000 页，大批删除后的 freelist 可在数小时内回收，而不是数周。
 
 ## [1.0.1] - 2026-10-03
 

@@ -808,6 +808,31 @@ class HarnessAgentConfig:
     # Fixed-interval cadence (mode="interval"): seconds between sweeps of all
     # recently-active sessions. Default 6h.
     memory_extract_interval_seconds: float = 21600.0
+    # Output budget for extraction / episode completions. ``None`` keeps
+    # octop-memory's built-in 2048. This is written into the memory runtime's
+    # ``extraction.max_tokens`` — the extractor always sends its own
+    # ``max_tokens``, so a client-side fallback cannot override it.
+    memory_extract_max_tokens: int | None = None
+    # How long one auxiliary request may block. ``None`` keeps
+    # ``HarnessAgentLLMClient`` defaults (light 120s, heavy 300s). These are
+    # not the idle/interval trigger: those decide when extraction starts.
+    memory_aux_light_timeout_s: float | None = None
+    memory_aux_heavy_timeout_s: float | None = None
+    # Depth-thinking on OpenAI-compatible aux calls. ``auto`` turns it off
+    # for model ids that default to a reasoning chain (Qwen3, QwQ,
+    # DeepSeek-R, reasoner). ``off`` always sends ``enable_thinking=false``.
+    # ``on`` leaves the server default. Main-chat thinking settings are not
+    # reused here.
+    memory_aux_thinking: Literal["auto", "off", "on"] = "auto"
+    # Completion budget for aux calls that do not pass their own
+    # ``max_tokens`` (promotion / page regen). Extraction is unaffected:
+    # it always sends a budget, overridden only by
+    # ``memory_extract_max_tokens``. ``None`` adds no client-side cap.
+    memory_aux_max_tokens: int | None = None
+    # Extra OpenAI-compatible request fields merged onto every aux call
+    # (for example ``reasoning_effort``). Merged after the thinking switch,
+    # so these top-level keys win. Bound only for langchain-openai models.
+    memory_aux_extra_body: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # Validation
@@ -833,6 +858,11 @@ class HarnessAgentConfig:
         if self.session_log_max_bytes <= 0:
             raise ValueError("session_log_max_bytes must be positive")
 
+        if self.memory_aux_max_tokens is not None and self.memory_aux_max_tokens < 1:
+            raise ValueError(f"memory_aux_max_tokens must be >= 1, got {self.memory_aux_max_tokens!r}")
+        if self.memory_aux_extra_body is not None and not isinstance(self.memory_aux_extra_body, dict):
+            raise ValueError("memory_aux_extra_body must be a dict when set")
+
         if self.language not in ("en", "zh"):
             raise ValueError(f"language must be 'en' or 'zh', got {self.language!r}")
         if self.tool_search_mode not in ("client", "native", "eager"):
@@ -847,6 +877,13 @@ class HarnessAgentConfig:
             raise ValueError(
                 f"peer_invoke_mode must be 'sync', 'async', or 'both', got {self.peer_invoke_mode!r}",
             )
+        if self.memory_aux_thinking not in ("auto", "off", "on"):
+            raise ValueError(
+                f"memory_aux_thinking must be 'auto', 'off', or 'on', got {self.memory_aux_thinking!r}",
+            )
+        _validate_extract_max_tokens(self.memory_extract_max_tokens)
+        _validate_aux_timeout("memory_aux_light_timeout_s", self.memory_aux_light_timeout_s)
+        _validate_aux_timeout("memory_aux_heavy_timeout_s", self.memory_aux_heavy_timeout_s)
 
         # Workspace must be an absolute directory: it doubles as the backend's
         # on-disk root for local backends and as the parent for all
@@ -1049,6 +1086,14 @@ class HarnessAgentConfig:
             "memory_extract_trigger_mode": self.memory_extract_trigger_mode,
             "memory_extract_idle_seconds": self.memory_extract_idle_seconds,
             "memory_extract_interval_seconds": self.memory_extract_interval_seconds,
+            "memory_extract_max_tokens": self.memory_extract_max_tokens,
+            "memory_aux_light_timeout_s": self.memory_aux_light_timeout_s,
+            "memory_aux_heavy_timeout_s": self.memory_aux_heavy_timeout_s,
+            "memory_aux_thinking": self.memory_aux_thinking,
+            "memory_aux_max_tokens": self.memory_aux_max_tokens,
+            "memory_aux_extra_body": (
+                dict(self.memory_aux_extra_body) if self.memory_aux_extra_body is not None else None
+            ),
             "debug": self.debug,
             "language": self.language,
             "default_timezone": self.default_timezone,
@@ -1203,6 +1248,20 @@ def _coerce_config_field(
     else:
         coerced = value
     return coerced
+
+
+def _validate_extract_max_tokens(value: int | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or not 128 <= value <= 65536:
+        raise ValueError("memory_extract_max_tokens must be an int from 128 to 65536, or None")
+
+
+def _validate_aux_timeout(name: str, value: float | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 30 <= float(value) <= 3600:
+        raise ValueError(f"{name} must be between 30 and 3600 seconds, or None")
 
 
 def _path_to_str(value: str | Path) -> str:

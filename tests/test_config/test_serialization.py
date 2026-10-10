@@ -48,6 +48,10 @@ def _full_config(tmp_path: Path) -> HarnessAgentConfig:
         memory_extract_trigger_mode="interval",
         memory_extract_idle_seconds=120.0,
         memory_extract_interval_seconds=600.0,
+        memory_extract_max_tokens=1024,
+        memory_aux_light_timeout_s=45,
+        memory_aux_heavy_timeout_s=90,
+        memory_aux_thinking="off",
         system_prompt="be helpful",
         subagents=[{"name": "researcher", "description": "research", "system_prompt": "..."}],
         task_tool_last=False,
@@ -141,6 +145,50 @@ class TestHarnessAgentConfigRoundTrip:
         assert cfg.memory_extract_on_session_end is True
         assert cfg.memory_extract_trigger_mode == "idle"
         assert cfg.memory_extract_idle_seconds == 300.0
+        assert cfg.memory_extract_max_tokens is None
+        assert cfg.memory_aux_light_timeout_s is None
+        assert cfg.memory_aux_thinking == "auto"
+
+    def test_aux_call_limits_reject_bad_values(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="memory_extract_max_tokens"):
+            HarnessAgentConfig(name="a", workspace_dir=tmp_path, memory_extract_max_tokens=1)
+        with pytest.raises(ValueError, match="memory_aux_light_timeout_s"):
+            HarnessAgentConfig(name="a", workspace_dir=tmp_path, memory_aux_light_timeout_s=5)
+        with pytest.raises(ValueError, match="memory_aux_thinking"):
+            HarnessAgentConfig(name="a", workspace_dir=tmp_path, memory_aux_thinking="maybe")  # type: ignore[arg-type]
+
+    def test_memory_aux_call_options_default_to_unset(self) -> None:
+        cfg = HarnessAgentConfig()
+        assert cfg.memory_aux_light_timeout_s is None
+        assert cfg.memory_aux_heavy_timeout_s is None
+        assert cfg.memory_aux_max_tokens is None
+        assert cfg.memory_aux_extra_body is None
+
+    def test_round_trip_preserves_memory_aux_call_options(self, tmp_path: Path) -> None:
+        cfg = HarnessAgentConfig(
+            name="aux-options",
+            workspace_dir=tmp_path,
+            memory_aux_light_timeout_s=42.0,
+            memory_aux_heavy_timeout_s=90.0,
+            memory_aux_max_tokens=1024,
+            memory_aux_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        restored = HarnessAgentConfig.from_dict(json.loads(json.dumps(cfg.to_dict())))
+
+        assert restored.memory_aux_light_timeout_s == 42.0
+        assert restored.memory_aux_heavy_timeout_s == 90.0
+        assert restored.memory_aux_max_tokens == 1024
+        assert restored.memory_aux_extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
+
+    def test_memory_aux_call_options_validation(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="memory_aux_light_timeout_s"):
+            HarnessAgentConfig(name="t", workspace_dir=tmp_path, memory_aux_light_timeout_s=0.0)
+        with pytest.raises(ValueError, match="memory_aux_heavy_timeout_s"):
+            HarnessAgentConfig(name="t", workspace_dir=tmp_path, memory_aux_heavy_timeout_s=-1.0)
+        with pytest.raises(ValueError, match="memory_aux_max_tokens"):
+            HarnessAgentConfig(name="t", workspace_dir=tmp_path, memory_aux_max_tokens=0)
+        with pytest.raises(ValueError, match="memory_aux_extra_body"):
+            HarnessAgentConfig(name="t", workspace_dir=tmp_path, memory_aux_extra_body="enable_thinking=false")
 
     def test_to_dict_is_jsonable(self, tmp_path: Path) -> None:
         cfg = _full_config(tmp_path)
@@ -167,6 +215,10 @@ class TestHarnessAgentConfigRoundTrip:
         assert restored.memory_extract_trigger_mode == "interval"
         assert restored.memory_extract_idle_seconds == 120.0
         assert restored.memory_extract_interval_seconds == 600.0
+        assert restored.memory_extract_max_tokens == 1024
+        assert restored.memory_aux_light_timeout_s == 45
+        assert restored.memory_aux_heavy_timeout_s == 90
+        assert restored.memory_aux_thinking == "off"
         # tuple field round-trips through list and back to tuple.
         assert restored.pii_surfaces == ("input",)
         assert restored.debug is True
