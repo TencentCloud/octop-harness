@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 记忆辅助调用可配置客户端兜底 `memory_aux_max_tokens`（提炼预算仍走 `memory_extract_max_tokens`），以及 OpenAI 兼容端点的 `memory_aux_extra_body`。显式 `extra_body` 覆盖 `memory_aux_thinking` 生成的同名键。
 
+### 修复
+
+- 火山方舟单张生图不再发送 `sequential_image_generation`，修复 Seedream 5.0 pro / flash（`doubao-seedream-5-0-pro-260628` / `doubao-seedream-5-0-flash-260915`）返回 `InvalidParameter` 的问题；这两个模型不支持组图，`count > 1` 时在本地直接返回 `unsupported_input` 校验错误。
+
 ## [1.0.2] - 2026-10-09
 
 ### 修复
