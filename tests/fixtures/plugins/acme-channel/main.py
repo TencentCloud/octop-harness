@@ -7,7 +7,7 @@ class AcmeChannel:
     channel_type = "acme"
 
 
-def setup(ctx) -> None:  # noqa: ANN001 - PluginContext
+def setup(ctx) -> None:
     ctx.channel(
         "acme",
         AcmeChannel,

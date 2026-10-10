@@ -98,9 +98,7 @@ class PluginContext:
                 back to a raw-JSON config textarea.
         """
         if self._manifest.kind != "channel":
-            raise ValueError(
-                f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not channel"
-            )
+            raise ValueError(f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not channel")
         normalized_label = str(label or "").strip() or str(kind).strip()
         self._channels.append(
             ChannelRegistration(

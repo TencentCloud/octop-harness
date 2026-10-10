@@ -13,9 +13,7 @@ from octop_harness.plugins.registry import PluginRegistry
 from octop_harness.plugins.tools import _tool_enabled
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "plugins" / "echo-tool"
-_CHANNEL_FIXTURE = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "plugins" / "acme-channel"
-)
+_CHANNEL_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "plugins" / "acme-channel"
 
 
 @pytest.fixture(autouse=True)
@@ -129,16 +127,12 @@ def test_registry_all_channels_first_wins() -> None:
     loaded1 = LoadedPlugin(
         manifest=PluginManifest(id="p1", version="1", name="p1", kind="channel", entry="m.py"),
         source_path=Path("."),
-        channels=[
-            ChannelRegistration(plugin_id="p1", kind="acme", channel_cls=A)
-        ],
+        channels=[ChannelRegistration(plugin_id="p1", kind="acme", channel_cls=A)],
     )
     loaded2 = LoadedPlugin(
         manifest=PluginManifest(id="p2", version="1", name="p2", kind="channel", entry="m.py"),
         source_path=Path("."),
-        channels=[
-            ChannelRegistration(plugin_id="p2", kind="acme", channel_cls=B)
-        ],
+        channels=[ChannelRegistration(plugin_id="p2", kind="acme", channel_cls=B)],
     )
     registry = PluginRegistry()
     registry.register(loaded1)
