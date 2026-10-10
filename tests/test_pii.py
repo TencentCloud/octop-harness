@@ -213,3 +213,60 @@ def test_wider_api_key_assignment_remains_detected() -> None:
     value = "prefixprefixprefix-sk-abcdefghijklmnopqrstuv"
     matches = detect_pii(f"api_key={value}")
     assert any(m["type"] == "generic_api_key_assignment" and m["value"] == value for m in matches)
+
+
+class TestCredentialAssignments:
+    @pytest.mark.parametrize(
+        ("text", "value"),
+        [
+            ("password=hunter2", "hunter2"),
+            ("PASSWORD=hunter2", "hunter2"),
+            ("passwd: hunter2", "hunter2"),
+            ("secret='s3cr3t-value'", "s3cr3t-value"),
+            ('token: "abc123def456"', "abc123def456"),
+        ],
+    )
+    def test_assignment_masks_value_only(self, text: str, value: str) -> None:
+        matches = detect_pii(text)
+        assert [m["type"] for m in matches] == ["credential_assignment"]
+        assert matches[0]["value"] == value
+        assert text[matches[0]["start"] : matches[0]["end"]] == value
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Please reset your password and retry.",
+            "send the token in the header",
+            "password=",
+            "password: ",
+        ],
+    )
+    def test_non_assignment_text_is_ignored(self, text: str) -> None:
+        assert detect_pii(text) == []
+
+
+class TestUSFormats:
+    @pytest.mark.parametrize("value", ["123-45-6789", "078-05-1120"])
+    def test_ssn_span(self, value: str) -> None:
+        text = f"SSN: {value}"
+        assert detect_pii(text) == [{"type": "us_ssn", "value": value, "start": 5, "end": 5 + len(value)}]
+
+    @pytest.mark.parametrize("value", ["(555) 123-4567", "555-123-4567", "555.123.4567", "+1 555-123-4567"])
+    def test_us_phone_span(self, value: str) -> None:
+        text = f"call {value} now"
+        assert detect_pii(text) == [{"type": "us_phone", "value": value, "start": 5, "end": 5 + len(value)}]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "version 2.456-7890",
+            "release 2024-01-1234",
+            "order 000-12-3456",
+            "code 666-12-3456",
+            "id 900-12-3456",
+            "serial 123-45-0000",
+            "id 123-456-7890",
+        ],
+    )
+    def test_benign_or_invalid_formats(self, text: str) -> None:
+        assert detect_pii(text) == []

@@ -25,9 +25,13 @@ Detected formats
 - Google Cloud / Gemini: ``AIzaSy...`` (39 chars)
 - HuggingFace: ``hf_...``
 - Tencent / Aliyun-style hex secrets after explicit assignment (``api_key=...``)
+- Credential assignments: ``password=...`` / ``passwd: ...`` / ``secret=...`` /
+  ``token: ...`` (value only, surrounding quotes trimmed)
 - Mainland China mobile numbers (common 13-19 prefixes, optional ``+86`` / ``0086``)
 - 18-character Chinese resident IDs: known province code, 1900-2099 birth date,
   non-zero sequence, and MOD 11-2 checksum
+- US Social Security numbers (``###-##-####``) that pass the SSA range rules
+- US phone numbers in separated formats (``(555) 123-4567``, ``555-123-4567``)
 
 The pattern intentionally stays conservative: aggressive matching produces
 false positives that censor benign hex-y strings (commit hashes, UUIDs).
@@ -86,7 +90,7 @@ _CN_ID_PROVINCES = frozenset(
 )
 _ID_CHECK = "10X98765432"
 _ID_WEIGHTS = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
-_PERSONAL_LABELS = frozenset({"cn_mobile_phone", "cn_resident_id"})
+_PERSONAL_LABELS = frozenset({"cn_mobile_phone", "cn_resident_id", "us_ssn", "us_phone"})
 
 # Each entry is ``(label, compiled_pattern)``. Key patterns are listed first so
 # they win when a personal number sits inside the same span.
@@ -119,6 +123,22 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.IGNORECASE | re.VERBOSE,
         ),
     ),
+    # ``password=...`` / ``token: ...`` style credential assignments. Only the
+    # value is reported; quotes are trimmed like the pattern above. Values that
+    # open with a provider key are de-duped by start position further down.
+    (
+        "credential_assignment",
+        re.compile(
+            r"""
+            \b(?:password|passwd|secret|token)\b
+            \s*[=:]\s*
+            ['"]?
+            (?P<value>[^\s'"]+)
+            ['"]?
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        ),
+    ),
     (
         "cn_mobile_phone",
         re.compile(
@@ -130,6 +150,22 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "cn_resident_id",
         re.compile(r"(?<![A-Za-z\d_])[1-9][0-9]{5}(?:19|20)[0-9]{9}[0-9Xx](?![A-Za-z\d_])"),
+    ),
+    (
+        "us_ssn",
+        re.compile(r"(?<![A-Za-z\d_])[0-9]{3}-[0-9]{2}-[0-9]{4}(?![A-Za-z\d_])"),
+    ),
+    # US phones require explicit separators and a NANP-shaped area code
+    # (``[2-9]XX``) so version strings and bare digit runs are left alone.
+    (
+        "us_phone",
+        re.compile(
+            r"(?<![A-Za-z\d_])"
+            r"(?:\+?1[ .-])?"
+            r"(?:\([2-9]\d{2}\)[ .-]?|[2-9]\d{2}[.-])"
+            r"\d{3}[.-]\d{4}"
+            r"(?![A-Za-z\d_])"
+        ),
     ),
 )
 
@@ -150,6 +186,12 @@ def _valid_resident_id(value: str) -> bool:
     return value[-1].upper() == _ID_CHECK[checksum % 11]
 
 
+def _valid_ssn(value: str) -> bool:
+    """Reject SSN shapes the SSA never issues (000/666/9xx area, 00 group, 0000 serial)."""
+    area, group, serial = value.split("-")
+    return area not in {"000", "666"} and not area.startswith("9") and group != "00" and serial != "0000"
+
+
 def _overlaps(start: int, end: int, seen: list[tuple[int, int]]) -> bool:
     return any(start < previous_end and end > previous_start for previous_start, previous_end in seen)
 
@@ -157,8 +199,9 @@ def _overlaps(start: int, end: int, seen: list[tuple[int, int]]) -> bool:
 def detect_pii(text: str) -> list[PIIMatch]:
     """Return all suspected PII spans inside ``text``.
 
-    Detects provider API keys, mainland mobile numbers and resident IDs
-    (see module docstring for supported formats). The output shape matches what
+    Detects provider API keys, credential assignments, mainland mobile numbers
+    and resident IDs, and US SSNs / phone numbers (see module docstring for
+    supported formats). The output shape matches what
     ``PIIMiddleware`` expects from a custom detector:
     ``[{"type": str, "value": str, "start": int, "end": int}, ...]``.
     Spans are returned in left-to-right order. Same-start key matches keep
@@ -178,6 +221,8 @@ def detect_pii(text: str) -> list[PIIMatch]:
                 start, end = m.span()
                 value = m.group(0)
             if label == "cn_resident_id" and not _valid_resident_id(value):
+                continue
+            if label == "us_ssn" and not _valid_ssn(value):
                 continue
             # Keys still de-dupe by start so a wider ``api_key=`` assignment
             # is not dropped when a nested ``sk-`` also matches. Personal
