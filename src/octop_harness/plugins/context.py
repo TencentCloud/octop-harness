@@ -7,6 +7,7 @@ from typing import Any
 
 from octop_harness.plugins.manifest import PluginManifest
 from octop_harness.plugins.registry import (
+    ChannelRegistration,
     LoadedPlugin,
     MiddlewareRegistration,
     PluginRegistry,
@@ -22,6 +23,7 @@ class PluginContext:
         self._source_path = source_path
         self._tools: list[ToolRegistration] = []
         self._middleware: list[MiddlewareRegistration] = []
+        self._channels: list[ChannelRegistration] = []
         self._skills_dir: Path | None = None
         self._model_factory: Any | None = None
         self._get_protocol: Any | None = None
@@ -68,6 +70,48 @@ class PluginContext:
             ),
         )
 
+    def channel(
+        self,
+        kind: str,
+        channel_cls: Any,
+        *,
+        label: str = "",
+        icon: str = "",
+        intro_url: str = "",
+        fields: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Register a channel implementation contributed by this plugin.
+
+        Args:
+            kind: Channel-type string persisted in the control-plane DB and
+                passed to the gateway channel manager (e.g. ``"acme"``).
+            channel_cls: Channel class (or zero-arg-compatible factory). The
+                host application is responsible for constructing it with its
+                own ``ChannelConfig`` contract.
+            label: Display name for the dashboard channel catalogue. Falls
+                back to ``kind`` when omitted.
+            icon: Optional icon URL / asset path for the catalogue card.
+            intro_url: Optional "how to get credentials" link.
+            fields: Optional form schema (list of ``ChannelField``-shaped
+                dicts: ``name``/``label``/``type``/``placeholder``/
+                ``required``/``helpKey``). When omitted the dashboard falls
+                back to a raw-JSON config textarea.
+        """
+        if self._manifest.kind != "channel":
+            raise ValueError(f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not channel")
+        normalized_label = str(label or "").strip() or str(kind).strip()
+        self._channels.append(
+            ChannelRegistration(
+                plugin_id=self._manifest.id,
+                kind=str(kind),
+                channel_cls=channel_cls,
+                label=normalized_label,
+                icon=str(icon or "").strip(),
+                intro_url=str(intro_url or "").strip(),
+                fields=list(fields or []),
+            ),
+        )
+
     def skills(self, relative_path: str) -> None:
         if self._manifest.kind != "skill":
             raise ValueError(f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not skill")
@@ -111,6 +155,7 @@ class PluginContext:
             source_path=self._source_path,
             tools=list(self._tools),
             middleware=list(self._middleware),
+            channels=list(self._channels),
             skills_dir=self._skills_dir,
         )
 

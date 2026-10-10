@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 新增
 
+- 插件系统新增 `channel` 插件类型：`kind: channel` 插件可在 `setup()` 中通过 `ctx.channel(kind, channel_cls, label=..., fields=...)` 贡献渠道实现；`PluginRegistry.all_channels()` 汇总全部插件渠道注册（同 kind 冲突时先注册者优先）。
+
 - 记忆辅助调用可配置客户端兜底 `memory_aux_max_tokens`（提炼预算仍走 `memory_extract_max_tokens`），以及 OpenAI 兼容端点的 `memory_aux_extra_body`。显式 `extra_body` 覆盖 `memory_aux_thinking` 生成的同名键。
 
 ## [1.0.2] - 2026-10-09
