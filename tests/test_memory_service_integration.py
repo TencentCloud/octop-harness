@@ -355,6 +355,69 @@ class TestHarnessAgentLLMClient:
         out = client.call_llm("x")
         assert out == '{"candidates": []}'
 
+    def test_timeout_overrides_and_default_budget_are_bound(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(
+            _Factory(openai_model),
+            default_model="p/m",
+            light_timeout_s=42.0,
+            heavy_timeout_s=90.0,
+            default_max_tokens=256,
+        )
+        client.call_llm("x")
+        assert openai_model.bind_calls[-1]["timeout"] == 42.0
+        assert openai_model.bind_calls[-1]["max_tokens"] == 256
+
+        client.call_llm("x", tier="heavy")
+        assert openai_model.bind_calls[-1]["timeout"] == 90.0
+
+    def test_caller_budget_wins_over_default_budget(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(_Factory(openai_model), default_model="p/m", default_max_tokens=256)
+        client.call_llm("x", max_tokens=99)
+        assert openai_model.bind_calls[-1]["max_tokens"] == 99
+
+    def test_no_default_budget_leaves_max_tokens_unbound(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(_Factory(openai_model), default_model="p/m")
+        client.call_llm("x")
+        assert "max_tokens" not in openai_model.bind_calls[-1]
+
+    def test_extra_body_is_openai_only(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        openai_client = HarnessAgentLLMClient(
+            _Factory(openai_model),
+            default_model="p/m",
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        openai_client.call_llm("x")
+        assert openai_model.bind_calls[-1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+        anthropic_model = _FakeAnthropicModel()
+        anthropic_client = HarnessAgentLLMClient(
+            _Factory(anthropic_model),
+            default_model="p/m",
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        anthropic_client.call_llm("x")
+        assert "extra_body" not in anthropic_model.bind_calls[-1]
+
+    def test_explicit_extra_body_overrides_thinking_switch(self) -> None:
+        model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(
+            _Factory(model),
+            default_model="local/Qwen3-8B",
+            extra_body={
+                "reasoning_effort": "low",
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+        )
+        client.call_llm("x")
+        assert model.bind_calls[-1]["extra_body"] == {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "reasoning_effort": "low",
+        }
+
 
 def test_memory_runtime_writes_budget_into_extraction_config(tmp_path: Path) -> None:
     """The extractor ignores a client-side max_tokens fallback, so the host budget goes to the runtime."""
@@ -375,6 +438,8 @@ def test_memory_runtime_writes_budget_into_extraction_config(tmp_path: Path) -> 
         memory_aux_light_timeout_s=45,
         memory_aux_heavy_timeout_s=90,
         memory_aux_thinking="off",
+        memory_aux_max_tokens=256,
+        memory_aux_extra_body={"reasoning_effort": "low"},
         session_log_enabled=False,
         checkpointer=False,
     )
@@ -386,6 +451,8 @@ def test_memory_runtime_writes_budget_into_extraction_config(tmp_path: Path) -> 
         assert runtime._llm_client._light_timeout_s == 45
         assert runtime._llm_client._heavy_timeout_s == 90
         assert runtime._llm_client._thinking == "off"
+        assert runtime._llm_client._default_max_tokens == 256
+        assert runtime._llm_client._extra_body == {"reasoning_effort": "low"}
     finally:
         runtime.close()
 

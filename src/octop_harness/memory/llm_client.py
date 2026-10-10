@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 from octop_memory.ports.llm import LLMClientError, LLMTier
@@ -60,6 +61,15 @@ class HarnessAgentLLMClient:
             first non-empty value wins; both tiers share it.
         default_model: Last-resort model ref when no aux and no live chat
             model have been recorded yet.
+        light_timeout_s / heavy_timeout_s: Read-timeout overrides per tier;
+            ``None`` keeps the class defaults.
+        default_max_tokens: Completion budget applied when a call does not
+            pass its own ``max_tokens``; ``None`` adds no client-side cap.
+            Extraction always sends a budget, so this does not override
+            ``memory_extract_max_tokens``.
+        extra_body: Vendor request extras merged onto every call after the
+            thinking switch. Matching top-level keys from here win.
+            ``None`` or empty adds nothing.
         thinking: ``auto`` disables depth-thinking for known reasoning model
             ids; ``off`` disables it for every OpenAI-compatible model;
             ``on`` leaves the server default. Main-chat thinking settings
@@ -82,6 +92,8 @@ class HarnessAgentLLMClient:
         default_model: str | None = None,
         light_timeout_s: float | None = None,
         heavy_timeout_s: float | None = None,
+        default_max_tokens: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
         thinking: ThinkingMode = "auto",
     ) -> None:
         configured = _first_ref(aux_model, light_model, heavy_model)
@@ -94,6 +106,8 @@ class HarnessAgentLLMClient:
         self._default_model = default_model
         self._light_timeout_s = light_timeout_s if light_timeout_s is not None else self.DEFAULT_LIGHT_TIMEOUT_S
         self._heavy_timeout_s = heavy_timeout_s if heavy_timeout_s is not None else self.DEFAULT_HEAVY_TIMEOUT_S
+        self._default_max_tokens = default_max_tokens
+        self._extra_body = dict(extra_body) if extra_body else None
         self._thinking: ThinkingMode = thinking
         self._current_lock = threading.Lock()
         self._current_model: str | None = None
@@ -126,6 +140,7 @@ class HarnessAgentLLMClient:
         if not refs:
             raise LLMClientError(f"no model configured for tier={tier!r}")
 
+        effective_max_tokens = max_tokens if max_tokens is not None else self._default_max_tokens
         last_exc: BaseException | None = None
         for index, ref in enumerate(refs):
             try:
@@ -134,7 +149,7 @@ class HarnessAgentLLMClient:
                     prompt,
                     tier=tier,
                     system=system,
-                    max_tokens=max_tokens,
+                    max_tokens=effective_max_tokens,
                     temperature=temperature,
                     response_format=response_format,
                 )
@@ -202,7 +217,7 @@ class HarnessAgentLLMClient:
             temperature=temperature,
             response_format=response_format,
             timeout_s=self._light_timeout_s if tier == "light" else self._heavy_timeout_s,
-            extra_body=_disable_thinking_extra_body(ref, self._thinking),
+            extra_body=_aux_extra_body(ref, self._thinking, self._extra_body),
         )
         messages = build_text_messages(prompt, system=system)
 
@@ -225,6 +240,22 @@ class HarnessAgentLLMClient:
             ) from exc
 
         return stringify_content(response.content)
+
+
+def _aux_extra_body(
+    ref: str,
+    thinking: ThinkingMode,
+    extra_body: Mapping[str, object] | None,
+) -> dict[str, Any] | None:
+    """Merge the thinking switch with caller extras.
+
+    The switch is applied first. Caller keys replace it at the top level,
+    so an explicit ``chat_template_kwargs`` wins over the automatic disable.
+    """
+    merged: dict[str, Any] = dict(_disable_thinking_extra_body(ref, thinking) or {})
+    if extra_body:
+        merged.update(extra_body)
+    return merged or None
 
 
 def _disable_thinking_extra_body(ref: str, mode: ThinkingMode) -> dict[str, Any] | None:

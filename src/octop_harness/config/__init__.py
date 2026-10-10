@@ -824,6 +824,15 @@ class HarnessAgentConfig:
     # ``on`` leaves the server default. Main-chat thinking settings are not
     # reused here.
     memory_aux_thinking: Literal["auto", "off", "on"] = "auto"
+    # Completion budget for aux calls that do not pass their own
+    # ``max_tokens`` (promotion / page regen). Extraction is unaffected:
+    # it always sends a budget, overridden only by
+    # ``memory_extract_max_tokens``. ``None`` adds no client-side cap.
+    memory_aux_max_tokens: int | None = None
+    # Extra OpenAI-compatible request fields merged onto every aux call
+    # (for example ``reasoning_effort``). Merged after the thinking switch,
+    # so these top-level keys win. Bound only for langchain-openai models.
+    memory_aux_extra_body: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # Validation
@@ -848,6 +857,11 @@ class HarnessAgentConfig:
                 seen_ids.add(p.id)
         if self.session_log_max_bytes <= 0:
             raise ValueError("session_log_max_bytes must be positive")
+
+        if self.memory_aux_max_tokens is not None and self.memory_aux_max_tokens < 1:
+            raise ValueError(f"memory_aux_max_tokens must be >= 1, got {self.memory_aux_max_tokens!r}")
+        if self.memory_aux_extra_body is not None and not isinstance(self.memory_aux_extra_body, dict):
+            raise ValueError("memory_aux_extra_body must be a dict when set")
 
         if self.language not in ("en", "zh"):
             raise ValueError(f"language must be 'en' or 'zh', got {self.language!r}")
@@ -1076,6 +1090,10 @@ class HarnessAgentConfig:
             "memory_aux_light_timeout_s": self.memory_aux_light_timeout_s,
             "memory_aux_heavy_timeout_s": self.memory_aux_heavy_timeout_s,
             "memory_aux_thinking": self.memory_aux_thinking,
+            "memory_aux_max_tokens": self.memory_aux_max_tokens,
+            "memory_aux_extra_body": (
+                dict(self.memory_aux_extra_body) if self.memory_aux_extra_body is not None else None
+            ),
             "debug": self.debug,
             "language": self.language,
             "default_timezone": self.default_timezone,

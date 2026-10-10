@@ -265,6 +265,8 @@ class MemoryRuntime:
                 default_model=default,
                 light_timeout_s=cfg.memory_aux_light_timeout_s,
                 heavy_timeout_s=cfg.memory_aux_heavy_timeout_s,
+                default_max_tokens=cfg.memory_aux_max_tokens,
+                extra_body=cfg.memory_aux_extra_body,
                 thinking=cfg.memory_aux_thinking,
             )
         except (ValueError, TypeError):  # pragma: no cover - defensive
