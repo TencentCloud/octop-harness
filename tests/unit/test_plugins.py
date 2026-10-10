@@ -93,6 +93,13 @@ def test_context_channel_registration(tmp_path: Path) -> None:
     assert reg.label == "Acme IM"
     assert reg.fields[0]["name"] == "token"
 
+    ctx.channel("Beta", DummyChannel, icon="  icon.png  ", intro_url="  https://example.com/b  ")
+    omitted = ctx.to_loaded().channels[1]
+    assert omitted.kind == "beta"
+    assert omitted.label == "Beta"
+    assert omitted.icon == "icon.png"
+    assert omitted.intro_url == "https://example.com/b"
+
 
 def test_context_channel_rejects_wrong_kind(tmp_path: Path) -> None:
     manifest = PluginManifest(id="x", version="1", name="x", kind="tool", entry="main.py")
