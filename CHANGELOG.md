@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 记忆辅助调用可配置客户端兜底 `memory_aux_max_tokens`（提炼预算仍走 `memory_extract_max_tokens`），以及 OpenAI 兼容端点的 `memory_aux_extra_body`。显式 `extra_body` 覆盖 `memory_aux_thinking` 生成的同名键。
 - OpenAI 兼容模型支持按模型选择 Chat Completions 或 Responses API，并可显式开启受限的 Responses → Chat Completions 回退。
+- `LoopGuardMiddleware`：同一工具、相同参数连续失败 3 次后在工具结果中提示模型不要重试；第 5 次失败后若模型仍发出相同调用，则不再执行并结束该轮（参见 TencentCloud/Octop#1927）。
 
 ## [1.0.2] - 2026-10-09
 
