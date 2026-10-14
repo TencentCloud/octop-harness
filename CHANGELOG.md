@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- OpenAI 兼容流式调用只保留最后一个 chunk 的 `usage_metadata`，避免 SiliconFlow 等在每个分片都带累计 usage 的上游把 `input_tokens` 乘以 chunk 数（TencentCloud/Octop#2007）。
+
 ## [1.0.3] - 2026-10-14
 
 ### 新增

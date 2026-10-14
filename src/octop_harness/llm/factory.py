@@ -570,6 +570,40 @@ def _adapt_codex_instructions(payload: dict[str, Any], source_messages: list[Any
     ]
 
 
+def _chunk_without_usage(chunk: Any) -> Any:
+    """Drop token usage from a stream generation chunk.
+
+    Some OpenAI-compatible gateways (notably SiliconFlow) attach *cumulative*
+    ``usage`` to every SSE chunk. LangChain then adds those ``usage_metadata``
+    values when merging ``AIMessageChunk``s, so ``input_tokens`` grows as
+    ``real_prompt * chunk_count``. Intermediate chunks must not carry usage;
+    only the final chunk should retain it (OpenAI's own include_usage shape).
+    """
+    message = getattr(chunk, "message", None)
+    if message is None:
+        return chunk
+    usage = getattr(message, "usage_metadata", None)
+    response_metadata = getattr(message, "response_metadata", None)
+    wire = response_metadata if isinstance(response_metadata, dict) else {}
+    has_wire = bool(wire.get("token_usage") or wire.get("usage"))
+    if not usage and not has_wire:
+        return chunk
+    updates: dict[str, Any] = {}
+    if usage:
+        updates["usage_metadata"] = None
+    if has_wire:
+        cleaned = dict(wire)
+        cleaned.pop("token_usage", None)
+        cleaned.pop("usage", None)
+        updates["response_metadata"] = cleaned
+    if not updates or not hasattr(message, "model_copy"):
+        return chunk
+    new_message = message.model_copy(update=updates)
+    if hasattr(chunk, "model_copy"):
+        return chunk.model_copy(update={"message": new_message})
+    return chunk
+
+
 def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
     """Return a ``ChatOpenAI`` subclass that round-trips ``reasoning_content``.
 
@@ -588,6 +622,10 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 
     No module-level helpers are mutated, so the subclass is safe under
     concurrent use.
+
+    Streaming also keeps ``usage_metadata`` only on the final chunk so
+    cumulative-per-chunk providers (SiliconFlow and similar) do not inflate
+    token counts when LangChain merges ``AIMessageChunk``s.
     """
     cached = _REASONING_AWARE_CHAT_OPENAI.get(id(base_cls))
     if cached is not None:
@@ -616,29 +654,57 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 
         def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
             yielded = False
+            pending: Any | None = None
             try:
                 for chunk in super()._stream(*args, **kwargs):
                     yielded = True
-                    yield chunk
+                    if pending is not None:
+                        yield _chunk_without_usage(pending)
+                    pending = chunk
+                if pending is not None:
+                    yield pending
+                    pending = None
             except Exception as exc:
+                if pending is not None:
+                    # Flush the last received chunk so a mid-stream failure does
+                    # not drop content held by the one-chunk usage delay.
+                    yield pending
+                    pending = None
                 fallback = None if yielded else _fallback_model_for(self, exc, kwargs)
                 if fallback is None:
                     raise
                 for chunk in fallback._stream(*args, **kwargs):
-                    yield _mark_api_fallback_chunk(chunk)
+                    if pending is not None:
+                        yield _mark_api_fallback_chunk(_chunk_without_usage(pending))
+                    pending = chunk
+                if pending is not None:
+                    yield _mark_api_fallback_chunk(pending)
 
         async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
             yielded = False
+            pending: Any | None = None
             try:
                 async for chunk in super()._astream(*args, **kwargs):
                     yielded = True
-                    yield chunk
+                    if pending is not None:
+                        yield _chunk_without_usage(pending)
+                    pending = chunk
+                if pending is not None:
+                    yield pending
+                    pending = None
             except Exception as exc:
+                if pending is not None:
+                    yield pending
+                    pending = None
                 fallback = None if yielded else _fallback_model_for(self, exc, kwargs)
                 if fallback is None:
                     raise
                 async for chunk in fallback._astream(*args, **kwargs):
-                    yield _mark_api_fallback_chunk(chunk)
+                    if pending is not None:
+                        yield _mark_api_fallback_chunk(_chunk_without_usage(pending))
+                    pending = chunk
+                if pending is not None:
+                    yield _mark_api_fallback_chunk(pending)
 
         def _create_chat_result(self, response: Any, generation_info: dict[str, Any] | None = None) -> Any:
             return _copy_reasoning_from_response(super()._create_chat_result(response, generation_info), response)
