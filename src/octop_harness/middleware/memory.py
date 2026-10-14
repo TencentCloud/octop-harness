@@ -101,9 +101,14 @@ class _BackgroundExecutor:
     """
 
     def submit(self, fn: Callable[[], None], *, label: str) -> None:
+        from octop_harness.observability.logging import current_log_agent_id, logging_scope
+
+        agent_id = current_log_agent_id()
+
         def _runner() -> None:
             try:
-                fn()
+                with logging_scope(agent_id):
+                    fn()
             except Exception:  # pragma: no cover - never raise into the user turn; pylint: disable=broad-except
                 logger.warning("MemoryMiddleware background %s failed", label, exc_info=True)
 
@@ -465,11 +470,10 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                     query, thread_id=thread_id, session_id=session_id, limit=self._recall_limit
                 )
                 rendered = getattr(result, "rendered", None) or ""
-                logger.info(
-                    "memory.trigger recall_inject thread=%s session=%s query=%r limit=%d hit=%s",
+                logger.debug(
+                    "memory.trigger recall_inject thread=%s session=%s limit=%d hit=%s",
                     thread_id,
                     session_id,
-                    query[:60],
                     self._recall_limit,
                     bool(rendered),
                 )
@@ -493,7 +497,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         assert service is not None  # gated by caller
 
         def _run() -> None:
-            logger.info(
+            logger.debug(
                 "memory.trigger capture_turn session=%s thread=%s user=%s user_chars=%d asst_chars=%d",
                 session_id,
                 thread_id,
@@ -537,6 +541,9 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         """
         if self._extract_idle_seconds <= 0 or self._service is None:
             return
+        from octop_harness.observability.logging import current_log_agent_id
+
+        agent_id = current_log_agent_id()
         with self._idle_lock:
             existing = self._idle_timers.pop(session_id, None)
             if existing is not None:
@@ -544,24 +551,22 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             timer = threading.Timer(
                 self._extract_idle_seconds,
                 self._on_idle_extract,
-                args=(session_id,),
+                args=(session_id, agent_id),
             )
             timer.daemon = True
             timer.name = f"hm-idle-{session_id}"
             self._idle_timers[session_id] = timer
             timer.start()
 
-    def _on_idle_extract(self, session_id: str) -> None:
+    def _on_idle_extract(self, session_id: str, agent_id: str | None = None) -> None:
         """Timer callback: drop the timer and run session-end extraction."""
+        from octop_harness.observability.logging import logging_scope
+
         with self._idle_lock:
             self._idle_timers.pop(session_id, None)
-        logger.info(
-            "memory.trigger idle_extract fire session=%s after %ss idle",
-            session_id,
-            self._extract_idle_seconds,
-        )
-        self.end_session(session_id, background=True)
-        self._submit_maintenance()
+        with logging_scope(agent_id):
+            self.end_session(session_id, background=True)
+            self._submit_maintenance()
 
     def _cancel_idle_timer(self, session_id: str) -> None:
         """Cancel any pending idle timer for ``session_id`` (idempotent)."""

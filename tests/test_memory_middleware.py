@@ -497,6 +497,26 @@ class TestIdleMaintenance:
         finally:
             mw.shutdown()
 
+    def test_background_submit_keeps_log_agent_only(self) -> None:
+        """Background work inherits the log agent id, not the HTTP session scope."""
+        from octop_harness.llm.session_header import current_session_id, session_header_scope
+        from octop_harness.middleware.memory import _BackgroundExecutor
+        from octop_harness.observability.logging import current_log_agent_id, logging_scope
+
+        seen: dict[str, object] = {}
+        done = threading.Event()
+
+        def _fn() -> None:
+            seen["agent"] = current_log_agent_id()
+            seen["session"] = current_session_id()
+            done.set()
+
+        with session_header_scope("thread-1"), logging_scope("AGT1"):
+            _BackgroundExecutor().submit(_fn, label="log-scope")
+        assert done.wait(2)
+        assert seen["agent"] == "AGT1"
+        assert seen["session"] != "thread-1"
+
     def test_maintenance_runs_gc_and_nudge_without_prune(
         self, service: _SpyService, monkeypatch: pytest.MonkeyPatch
     ) -> None:

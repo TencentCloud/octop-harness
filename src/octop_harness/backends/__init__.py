@@ -39,6 +39,7 @@ this backend uses (put/get/list/delete/head/multipart).
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -48,6 +49,11 @@ if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
 
 logger = logging.getLogger(__name__)
+
+# One warning per workspace for the life of the process. Agent startup builds
+# the same host-root shell more than once, and each build used to log again.
+_HOST_ROOT_WARNED: set[str] = set()
+_HOST_ROOT_WARN_LOCK = threading.Lock()
 
 # String aliases that callers can use in ``HarnessAgentConfig.backend``.
 _BUILTIN_TYPES: frozenset[str] = frozenset(
@@ -282,6 +288,20 @@ def _maybe_wrap_workspace_artifacts(
     )
 
 
+def _warn_host_root_once(workspace_dir: str | Path | None) -> None:
+    """Log the host-root shell warning at most once per workspace."""
+    key = "<none>" if workspace_dir is None else str(workspace_dir)
+    with _HOST_ROOT_WARN_LOCK:
+        if key in _HOST_ROOT_WARNED:
+            return
+        _HOST_ROOT_WARNED.add(key)
+    logger.warning(
+        "⚠️  LocalShellBackend is rooted at '/' (workspace=%s): the agent has shell access "
+        "to the entire host. Restrict ``backend.root_dir`` in production to limit exposure.",
+        key,
+    )
+
+
 def _build_local_shell(
     kwargs: dict[str, Any],
     *,
@@ -306,11 +326,7 @@ def _build_local_shell(
     kwargs.setdefault("inherit_env", True)
 
     if is_host_root(root_dir):
-        logger.warning(
-            "⚠️  LocalShellBackend is rooted at '/' (workspace=%s): the agent has shell access "
-            "to the entire host. Restrict ``backend.root_dir`` in production to limit exposure.",
-            workspace_dir if workspace_dir is not None else "<none>",
-        )
+        _warn_host_root_once(workspace_dir)
 
     from_spec = bool(kwargs.pop("explicit_virtual_paths", False))
     shell_kwargs: dict[str, Any] = {

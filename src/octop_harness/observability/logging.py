@@ -82,6 +82,11 @@ def logging_scope(agent_id: str | None) -> Iterator[None]:
         _log_agent_id.reset(token)
 
 
+def current_log_agent_id() -> str | None:
+    """Return the agent id installed by :func:`logging_scope`, if any."""
+    return _log_agent_id.get()
+
+
 def _existing_handler_file() -> Path | None:
     pkg_logger = logging.getLogger("octop_harness")
     for handler in pkg_logger.handlers:
@@ -195,6 +200,7 @@ __all__ = [
     "DEFAULT_LOG_BACKUP_COUNT",
     "DEFAULT_LOG_MAX_BYTES",
     "LogLevel",
+    "current_log_agent_id",
     "current_log_file",
     "default_log_dir",
     "ensure_logging",

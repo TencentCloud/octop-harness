@@ -72,6 +72,7 @@ class BootstrapMiddleware(AgentMiddleware[Any, Any]):
         self._user_path = workspace.resolve_path(USER_FILENAME)
         self._max_bootstrap_turns = max_bootstrap_turns
         self._on_complete = on_complete
+        self._announced_bootstrap = False
 
     @property
     def is_bootstrapped(self) -> bool:
@@ -107,11 +108,13 @@ class BootstrapMiddleware(AgentMiddleware[Any, Any]):
             logger.info("Bootstrap file is empty — skipping injection.")
             return request
 
-        logger.info(
-            "Bootstrap active — appending %d chars from %s onto the compiled system prompt",
-            len(content),
-            self._bootstrap_path,
-        )
+        if not self._announced_bootstrap:
+            self._announced_bootstrap = True
+            logger.debug(
+                "Bootstrap active — appending %d chars from %s onto the compiled system prompt",
+                len(content),
+                self._bootstrap_path,
+            )
         messages: list[AnyMessage] = [m for m in request.messages if not isinstance(m, SystemMessage)]
         return request.override(
             system_message=append_to_system_message(request.system_message, content),

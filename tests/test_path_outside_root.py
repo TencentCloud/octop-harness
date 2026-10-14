@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -136,3 +137,28 @@ async def test_middleware_rewrites_leftover_windows_path_before_tool(tmp_path) -
     out = await mw.awrap_tool_call(request, handler)
     assert isinstance(out, ToolMessage)
     assert seen["path"] == "/data/文章存稿/_核验与备选标题.md"
+
+
+@pytest.mark.asyncio
+async def test_windows_path_rewrite_logs_once_at_debug(tmp_path, caplog: pytest.LogCaptureFixture) -> None:
+    target = tmp_path / "data" / "x.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("ok", encoding="utf-8")
+    mw = FilesystemGuardMiddleware(root_dir=tmp_path)
+    path = r"D:\octop-data\data\x.md"
+
+    def _request() -> MagicMock:
+        request = MagicMock()
+        request.tool_call = {"name": "read_file", "id": "call_1", "args": {"file_path": path}}
+        request.override = None
+        return request
+
+    async def handler(req: Any) -> ToolMessage:
+        return ToolMessage(content="ok", name="read_file", tool_call_id="call_1")
+
+    with caplog.at_level(logging.DEBUG, logger="octop_harness.middleware.filesystem_guard"):
+        await mw.awrap_tool_call(_request(), handler)
+        await mw.awrap_tool_call(_request(), handler)
+    logged = [rec for rec in caplog.records if "rewrote leftover Windows path" in rec.message]
+    assert len(logged) == 1
+    assert logged[0].levelno == logging.DEBUG

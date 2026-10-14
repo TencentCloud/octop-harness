@@ -274,6 +274,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         self._permissions = list(permissions or ())
         self._root_dir = root_dir
         self._workspace_dir = workspace_dir
+        self._rewritten_logged: set[str] = set()
 
     def _rewrite_legacy_windows_request(self, request: ToolCallRequest) -> ToolCallRequest:
         tool_name, _ = _tool_call_meta(request)
@@ -299,7 +300,9 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         if key is None:
             return request
         new_args[key] = rewritten
-        logger.info("FilesystemGuard rewrote leftover Windows path %s -> %s", path, rewritten)
+        if path not in self._rewritten_logged:
+            self._rewritten_logged.add(path)
+            logger.debug("FilesystemGuard rewrote leftover Windows path %s -> %s", path, rewritten)
         new_call: ToolCall = {
             "name": str(request.tool_call.get("name") or ""),
             "args": new_args,

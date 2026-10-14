@@ -187,8 +187,10 @@ class TestDictForms:
 
         with caplog.at_level(logging.WARNING):
             backend = resolve_backend("local_shell")
+            resolve_backend("local_shell")
         assert isinstance(backend, LocalShellBackend)
-        assert any("rooted at '/'" in rec.message for rec in caplog.records)
+        matching = [rec for rec in caplog.records if "rooted at '/'" in rec.message]
+        assert len(matching) == 1
 
     def test_local_shell_root_slash_warns(
         self,
@@ -201,8 +203,12 @@ class TestDictForms:
                 {"type": "local_shell", "root_dir": "/"},
                 workspace_dir=tmp_path,
             )
+            resolve_backend(
+                {"type": "local_shell", "root_dir": "/"},
+                workspace_dir=tmp_path,
+            )
         matching = [rec.message for rec in caplog.records if "rooted at '/'" in rec.message]
-        assert matching
+        assert len(matching) == 1
         assert f"workspace={tmp_path}" in matching[0]
 
     def test_local_shell_explicit_root_no_warning(
