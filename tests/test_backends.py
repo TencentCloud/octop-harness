@@ -185,6 +185,11 @@ class TestDictForms:
         """Default root is '/', which DOES trigger the warning."""
         from deepagents.backends import LocalShellBackend
 
+        from octop_harness.backends import _HOST_ROOT_WARNED
+
+        # The warning is once per workspace for the process. An earlier test
+        # may already have built a host-root shell with no workspace.
+        _HOST_ROOT_WARNED.clear()
         with caplog.at_level(logging.WARNING):
             backend = resolve_backend("local_shell")
             resolve_backend("local_shell")
@@ -198,6 +203,9 @@ class TestDictForms:
         tmp_path: Path,
     ) -> None:
         """Explicitly setting root_dir='/' triggers the warning (includes workspace)."""
+        from octop_harness.backends import _HOST_ROOT_WARNED
+
+        _HOST_ROOT_WARNED.clear()
         with caplog.at_level(logging.WARNING):
             resolve_backend(
                 {"type": "local_shell", "root_dir": "/"},
