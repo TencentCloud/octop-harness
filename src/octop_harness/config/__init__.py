@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from deepagents import SubAgent
 
 from octop_harness.acp.models import ACPRunnerConfig, default_acp_runners
+from octop_harness.decision.config import DecisionConfig
 
 if TYPE_CHECKING:
     # State / runtime types are intentionally erased to ``Any`` to avoid
@@ -711,6 +712,10 @@ class HarnessAgentConfig:
     # (lose async) but cannot gain background dispatch.
     peer_invoke_mode: Literal["sync", "async", "both"] = "both"
 
+    # —— Decision model ——
+    # None, or a disabled config, leaves the middleware unmounted.
+    decision: DecisionConfig | None = None
+
     # —— Progressive tool loading ——
     # Names in this set remain registered with DeepAgents for real execution.
     # Client mode keeps name/description references visible but defers parameter
@@ -1129,6 +1134,7 @@ class HarnessAgentConfig:
             "debug": self.debug,
             "language": self.language,
             "default_timezone": self.default_timezone,
+            "decision": self.decision.to_dict() if self.decision is not None else None,
         }
         # Backend: serialize only if it's a string or dict spec; live instances skipped.
         if isinstance(self.backend, str | dict) or self.backend is None:
@@ -1275,6 +1281,10 @@ def _coerce_config_field(
         if not isinstance(value, dict):
             raise TypeError("'media_generation' must be a dict or null")
         coerced = MediaGenerationConfig.from_dict(value)
+    elif key == "decision":
+        if not isinstance(value, dict):
+            raise TypeError("'decision' must be a dict or null")
+        coerced = DecisionConfig.from_dict(value)
     elif key == "subagents":
         coerced = [_subagent_from_dict(item) for item in value]
     else:
@@ -1395,6 +1405,7 @@ def _web_search_tools_to_jsonable(value: bool | Literal["auto", "all"] | Sequenc
 __all__ = [
     "DEFAULT_CONFIG_FILENAME",
     "DEFAULT_SESSION_LOG_MAX_BYTES",
+    "DecisionConfig",
     "HarnessAgentConfig",
     "InputModality",
     "MediaGenerationConfig",

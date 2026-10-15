@@ -73,11 +73,19 @@ class BootstrapMiddleware(AgentMiddleware[Any, Any]):
         self._max_bootstrap_turns = max_bootstrap_turns
         self._on_complete = on_complete
         self._announced_bootstrap = False
+        self._marker_known: bool | None = None
 
     @property
     def is_bootstrapped(self) -> bool:
-        """Whether the completion marker already exists on the backend."""
-        return bootstrap_marker_exists(self._workspace, bootstrap_marker=self._marker_path)
+        """Whether the completion marker already exists on the backend.
+
+        The answer is remembered for this middleware instance. A missing marker
+        is a remote GET (COS 404); model calls must not repeat it.
+        """
+        if self._marker_known is not None:
+            return self._marker_known
+        self._marker_known = bootstrap_marker_exists(self._workspace, bootstrap_marker=self._marker_path)
+        return self._marker_known
 
     # ── model-call hook: inject BOOTSTRAP.md as system prompt ───────────────
 
@@ -145,6 +153,7 @@ class BootstrapMiddleware(AgentMiddleware[Any, Any]):
         if self.is_bootstrapped:
             return
         self._workspace.write_text(self._marker_path, "", force=True)
+        self._marker_known = True
         logger.info("Bootstrap complete — wrote %s on backend", self._marker_path)
         if self._on_complete is None:
             return

@@ -517,3 +517,25 @@ def test_complete_storage_bootstrap_path(tmp_path: Path) -> None:
     assert "base" in joined
     assert "custom onboarding" in joined
     assert joined.find("base") < joined.find("custom onboarding")
+
+
+def test_missing_marker_is_checked_once(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path)
+    calls = 0
+    real_exists = ws.exists
+
+    def _counted(path: str) -> bool:
+        nonlocal calls
+        calls += 1
+        return real_exists(path)
+
+    ws.exists = _counted  # type: ignore[method-assign]
+    mw = BootstrapMiddleware(
+        ws,
+        bootstrap_file=DEFAULT_BOOTSTRAP_PATH,
+        bootstrap_marker=DEFAULT_BOOTSTRAPPED_PATH,
+    )
+
+    assert mw.is_bootstrapped is False
+    assert mw.is_bootstrapped is False
+    assert calls == 1

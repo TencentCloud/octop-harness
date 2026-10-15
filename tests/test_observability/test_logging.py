@@ -18,6 +18,7 @@ from octop_harness.observability.logging import (
     resolve_log_dir,
     setup_logging,
     teardown_logging,
+    use_host_logging,
 )
 
 
@@ -249,3 +250,11 @@ class TestEnsureLogging:
         matching = [h for h in pkg_logger.handlers if getattr(h, "name", None) == _HANDLER_NAME]
         assert len(matching) == 1
         assert Path(matching[0].baseFilename).parent == app_dir.resolve()
+
+    def test_host_logging_skips_package_file(self, tmp_path: Path) -> None:
+        setup_logging(tmp_path / "dated")
+        use_host_logging()
+        assert ensure_logging() is None
+        pkg_logger = logging.getLogger("octop_harness")
+        assert pkg_logger.handlers == []
+        assert pkg_logger.propagate is True

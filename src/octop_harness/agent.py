@@ -1426,7 +1426,8 @@ class HarnessAgent:
         skill_filter → tool_guard → filesystem_guard (outside-root soft-fail; deny
         rules when permissions + execution backend) → mcp_tools → retry →
         pii → media_offload → checkpoint_ts → memory → user middleware → team →
-        conversation_mode → tools_filter → tool search → task tool ordering → context_usage.
+        conversation_mode → tools_filter → decision (only when enabled) → tool search →
+        task tool ordering → context_usage.
 
         ``MediaOffloadMiddleware`` runs **after** PII (so PII still sees plain
         text) and **before** ``MemoryMiddleware`` so session logs store the
@@ -1537,6 +1538,20 @@ class HarnessAgent:
 
         chain.append(ConversationModeMiddleware())
         chain.append(ToolsFilterMiddleware(config=cfg))
+
+        from octop_harness.decision import decision_active
+
+        decision = cfg.decision
+        if decision is not None and decision_active(decision):
+            from octop_harness.middleware.decision import DecisionMiddleware
+
+            chain.append(
+                DecisionMiddleware(
+                    config=decision,
+                    team=self._team_manager,
+                    language=cfg.language,
+                )
+            )
 
         # Search only the final model-visible tool set. In particular, this
         # must run after MCP and user filtering so hidden tools cannot leak

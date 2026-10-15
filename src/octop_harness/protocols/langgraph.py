@@ -120,7 +120,26 @@ def _usage_event(msg_chunk: Any, metadata: Any, node: str) -> dict[str, Any] | N
         model = str(metadata.get("ls_model_name") or metadata.get("model") or "")
     if model:
         event["model"] = model
+    saved = _decision_saved(msg_chunk)
+    if saved > 0:
+        event["usage"] = {**event["usage"], "decision_saved": saved}
     return event
+
+
+def _decision_saved(msg: Any) -> int:
+    kwargs = getattr(msg, "additional_kwargs", None)
+    if not isinstance(kwargs, dict) and isinstance(msg, dict):
+        kwargs = msg.get("additional_kwargs")
+    if not isinstance(kwargs, dict):
+        return 0
+    ctx = kwargs.get("context_usage")
+    if not isinstance(ctx, dict):
+        return 0
+    try:
+        saved = int(ctx.get("decision_saved") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return saved if saved > 0 else 0
 
 
 class LangGraphProtocol(ChatProtocol):
@@ -247,6 +266,12 @@ class LangGraphProtocol(ChatProtocol):
                 out.append({"type": AgentEventType.TOOL_RESULT, "node": node_name, "messages": node_messages})
             else:
                 out.append({"type": AgentEventType.STATE_UPDATE, "node": node_name, "data": node_data})
+            for message in node_messages:
+                if _decision_saved(message) <= 0:
+                    continue
+                usage_event = _usage_event(message, {}, node_name)
+                if usage_event is not None:
+                    out.append(usage_event)
         return out
 
     def _project_chunk(self, chunk: dict[str, Any], splitter: ThinkSplitter) -> list[dict[str, Any]]:
