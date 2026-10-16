@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `ManagedMCPClient` for persistent, task-owned MCP sessions and resources.
+
+### Fixed
+
+- Preserve object, array and enum arguments in MCP tool schemas.
+- Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
+
 ## [1.0.3] - 2026-10-14
 
 ### 新增

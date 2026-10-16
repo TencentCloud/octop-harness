@@ -291,6 +291,11 @@ used only for clear unsupported-endpoint/model errors, before any streamed
 output. It does not apply to native tool search or other Responses-only request
 features, and never masks authentication, rate-limit, timeout, or server errors.
 
+HITL `resume_hitl(thread_id, decisions)` retains the paused stream's user, tool
+selections and other request configuration across nested approvals. The host must
+authorize the resume caller. This context is process-local, isolated by thread,
+and released when the resumed stream finishes or the agent closes.
+
 ## Documentation
 
 - [What is Octop Harness?](#what-is-octop-harness)
@@ -375,3 +380,23 @@ Thanks to all contributors:
 <a href="https://github.com/TencentCloud/octop-harness/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=TencentCloud/octop-harness" />
 </a>
+
+## Persistent MCP sessions
+
+Use `ManagedMCPClient` when tools keep state across calls, such as a design brief.
+The client owns its transport in one task and serializes concurrent callers.
+It returns original MCP SDK results, including structured content and errors.
+
+```python
+from octop_harness import ManagedMCPClient
+
+async with ManagedMCPClient({"transport": "stdio", "command": "my-mcp", "args": []}) as client:
+    definitions = await client.get_tools()
+    result = await client.call_tool("collect", {"title": "Demo"})
+    resources = await client.list_resources()
+    resource = await client.read_resource("example://design")
+```
+
+Explicit `await client.aclose()` is also supported. Closed or disconnected clients
+must be replaced; writes are never retried automatically. Default MCP tool loading
+remains stateless.

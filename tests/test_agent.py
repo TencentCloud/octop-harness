@@ -1686,3 +1686,53 @@ class TestExplicitVirtualPathTool:
             assert "virtual_to_native_path" not in built_names
             prompt = create.call_args.kwargs["system_prompt"]
             assert "execute/shell is not rewritten" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], Any],
+    stub_create_deep_agent: Any,
+) -> None:
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    seen: list[dict[str, Any]] = []
+
+    async def stream(messages: Any, config: dict[str, Any], **kwargs: Any) -> Any:
+        yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+
+    async def resume(thread_id: str, decisions: Any, config: dict[str, Any]) -> Any:
+        seen.append(deepcopy(config["configurable"]))
+        if len(seen) == 1:
+            yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+        else:
+            yield {"type": "token", "content": "done"}
+
+    with mock_model_factory(), stub_create_deep_agent:
+        agent = HarnessAgent(cfg)
+    agent._protocols["langgraph"] = SimpleNamespace(stream=stream, resume_stream=resume)  # type: ignore[assignment]
+    request = ChatRequest(
+        messages="design",
+        thread_id="design-thread",
+        user="7",
+        agent_id="designer",
+        mcp_servers=["open-design__one"],
+        configurable={"locale": "zh", "session_key": "session", "knowledge_base_ids": ["kb"]},
+    )
+    expected = request.to_runnable_config()["configurable"]
+    try:
+        chunks = [c async for c in agent.stream(request)]
+        assert len(chunks) == 1
+        assert chunks[0]["type"] == "hitl_required"
+        # A different thread's user and connector must not overwrite this pause.
+        other = ChatRequest(messages="other", thread_id="other-thread", user="8", mcp_servers=["other"])
+        _ = [c async for c in agent.stream(other)]
+        _ = [c async for c in agent.resume_hitl("design-thread", [{"type": "approve"}])]
+        _ = [c async for c in agent.resume_hitl("design-thread", [{"type": "approve"}])]
+        assert seen == [expected, expected]
+        assert "design-thread" not in agent._hitl_resume_configs
+        assert "other-thread" in agent._hitl_resume_configs
+    finally:
+        await agent.aclose()
+    assert agent._hitl_resume_configs == {}
