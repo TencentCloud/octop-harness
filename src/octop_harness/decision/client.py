@@ -14,7 +14,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = httpx.Timeout(15.0)
+_DEFAULT_TIMEOUT = httpx.Timeout(15.0)
+_LAYA_TIMEOUT = httpx.Timeout(60.0)
+
+
+def _timeout_for(provider: str) -> httpx.Timeout:
+    """Local CPU Laya can take about a second per question."""
+    return _LAYA_TIMEOUT if provider == "laya" else _DEFAULT_TIMEOUT
 
 
 def _criteria(text: str) -> dict[str, str]:
@@ -102,6 +108,7 @@ class HttpDecisionClient:
         self._api_key = api_key
         self._model = model.strip()
         self._provider = provider.strip()
+        self._timeout = _timeout_for(self._provider)
 
     def score(self, *, state: str, statements: list[tuple[str, str]], strict: bool = False) -> dict[str, float]:
         if not statements or not self._endpoint:
@@ -111,7 +118,7 @@ class HttpDecisionClient:
                 self._endpoint,
                 json=self._body(state, statements),
                 headers=self._headers(),
-                timeout=_TIMEOUT,
+                timeout=self._timeout,
             )
             response.raise_for_status()
             return parse_probabilities(response.json())
@@ -131,7 +138,7 @@ class HttpDecisionClient:
         if not statements or not self._endpoint:
             return {}
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(
                     self._endpoint,
                     json=self._body(state, statements),

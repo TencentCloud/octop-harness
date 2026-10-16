@@ -13,6 +13,7 @@ from langgraph.config import var_child_runnable_config
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from octop_harness.decision import decision_active, parse_probabilities
+from octop_harness.decision.client import _timeout_for
 from octop_harness.decision.config import DecisionConfig
 from octop_harness.decision.select import Candidate, keep_confident, lexical_shortlist
 from octop_harness.middleware.decision import DecisionMiddleware
@@ -119,6 +120,11 @@ def test_parse_probabilities_accepts_common_shapes() -> None:
     assert parse_probabilities({"answers": [{"id": "a", "probability": 0.8}]}) == {"a": 0.8}
     assert parse_probabilities({"results": [{"id": "b", "p_yes": "0.4"}]}) == {"b": 0.4}
     assert parse_probabilities({"questions": [{"id": "c", "answer": {"yes": 0.7}}]}) == {"c": 0.7}
+
+
+def test_local_laya_allows_a_full_cpu_batch_to_finish() -> None:
+    assert _timeout_for("laya").read == 60
+    assert _timeout_for("jev").read == 15
 
 
 def test_build_decision_body_uses_noul_questions() -> None:
