@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -249,6 +250,52 @@ class TestMcpArgsModel:
 
         with pytest.raises(ValidationError, match="origin"):
             model.model_validate({"origin": None, "destination": None})
+
+    def test_maps_array_with_typed_items(self) -> None:
+        model = mcp_args_model(
+            "set_peer_card",
+            {
+                "type": "object",
+                "required": ["peer_card"],
+                "properties": {
+                    "peer_card": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        )
+        assert model.model_fields["peer_card"].annotation == list[str]
+        schema_props = model.model_json_schema()["properties"]["peer_card"]
+        assert schema_props["type"] == "array"
+        assert schema_props["items"] == {"type": "string"}
+        parsed = model.model_validate({"peer_card": ["IDENTITY: x", "STYLE: y"]})
+        assert parsed.model_dump(by_alias=True) == {"peer_card": ["IDENTITY: x", "STYLE: y"]}
+
+    def test_maps_object_property_to_dict(self) -> None:
+        model = mcp_args_model(
+            "create_record",
+            {
+                "type": "object",
+                "required": ["payload"],
+                "properties": {"payload": {"type": "object"}},
+            },
+        )
+        assert model.model_fields["payload"].annotation == dict[str, Any]
+        parsed = model.model_validate({"payload": {"k": 1}})
+        assert parsed.model_dump(by_alias=True) == {"payload": {"k": 1}}
+
+    def test_array_without_items_degrades_to_list_any(self) -> None:
+        model = mcp_args_model(
+            "mixed_shapes",
+            {
+                "type": "object",
+                "required": ["loose", "untyped"],
+                "properties": {
+                    "loose": {"type": "array"},
+                    "untyped": {"description": "no type"},
+                },
+            },
+        )
+        assert model.model_fields["loose"].annotation == list[Any]
+        assert model.model_fields["untyped"].annotation is str
 
     @pytest.mark.asyncio
     async def test_strips_none_arguments_before_mcp_call(

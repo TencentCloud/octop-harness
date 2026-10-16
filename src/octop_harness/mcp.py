@@ -130,6 +130,42 @@ class _McpArgsBase(BaseModel):
         return json_schema
 
 
+_JSON_SCALAR_TYPES: dict[str, Any] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "object": dict[str, Any],
+}
+
+_ARRAY_ITEM_TYPES: dict[str, Any] = {
+    "string": list[str],
+    "integer": list[int],
+    "number": list[float],
+    "boolean": list[bool],
+    "object": list[dict[str, Any]],
+}
+
+
+def _py_type_from_json_schema(spec: dict[str, Any]) -> Any:
+    """Map a JSON Schema property spec onto a Python type.
+
+    ``array`` and ``object`` must not collapse to ``str``: Pydantic would then
+    coerce a list/dict argument into its repr string before the call reaches
+    the MCP server, which rejects it (JSON-RPC -32602). A typed ``items`` maps
+    to a typed ``list[...]`` so the element type stays visible in the
+    LLM-facing schema.
+    """
+    json_type = spec.get("type")
+    if json_type == "array":
+        items = spec.get("items")
+        item_type = items.get("type") if isinstance(items, dict) else None
+        item_key = item_type if isinstance(item_type, str) else ""
+        return _ARRAY_ITEM_TYPES.get(item_key, list[Any])
+    scalar_key = json_type if isinstance(json_type, str) else ""
+    return _JSON_SCALAR_TYPES.get(scalar_key, str)
+
+
 def mcp_args_model(tool_name: str, input_schema: dict[str, Any]) -> type[Any]:
     """Build a Pydantic args model from an MCP tool ``inputSchema``."""
     props = input_schema.get("properties") or {}
@@ -141,15 +177,7 @@ def mcp_args_model(tool_name: str, input_schema: dict[str, Any]) -> type[Any]:
     used_names: set[str] = set()
     for key, spec in props.items():
         spec_dict: dict[str, Any] = spec if isinstance(spec, dict) else {}
-        json_type = spec_dict.get("type")
-        if json_type == "integer":
-            py_type: Any = int
-        elif json_type == "number":
-            py_type = float
-        elif json_type == "boolean":
-            py_type = bool
-        else:
-            py_type = str
+        py_type: Any = _py_type_from_json_schema(spec_dict)
         desc = spec_dict.get("description")
         field_name = _pydantic_field_name(str(key), used_names)
         if field_name != key:
