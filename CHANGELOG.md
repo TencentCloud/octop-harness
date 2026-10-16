@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 远程 MCP 工具的参数模型正确映射 JSON Schema 的 `array` / `object` 类型：`array` 按其 `items` 生成 `list[...]`，`object` 生成 `dict`，不再一律降级为 `str` 导致结构化参数被 Pydantic 转成字符串、被 MCP 服务端以 JSON-RPC -32602 拒绝。
+
 ## [1.0.3] - 2026-10-14
 
 ### 新增
