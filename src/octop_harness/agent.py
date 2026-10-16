@@ -86,6 +86,35 @@ def _tool_name_of(tool: Any) -> str:
     return ""
 
 
+def media_generation_directive(cfg: Any) -> str:
+    """System-prompt guidance about media generation, or ``""`` when ready.
+
+    Deliberately scoped to the host's *built-in* media tools. A connector can
+    supply its own image/video tool, and the previous unqualified wording
+    ("media generation tools are not configured") made the model refuse a tool
+    that was already present in its own tool list (#1983).
+    """
+    media = getattr(cfg, "media_generation", None)
+    if media is None:
+        return (
+            " The host's built-in image and video generation tools are not configured "
+            "in this runtime. This describes the built-in tools only: when the current "
+            "tool list contains another media-generation tool (for example one provided "
+            "by a connector), use it normally. Only if no such tool is available, state "
+            "that configuration is required; do not claim that media was generated."
+        )
+    if not media.has_api_key():
+        return (
+            " The host's built-in image and video generation tools are unavailable "
+            "because media-provider credentials are missing. This describes the built-in "
+            "tools only: when the current tool list contains another media-generation tool "
+            "(for example one provided by a connector), use it normally. Only if no such "
+            "tool is available, ask the user to configure credentials in the host "
+            "application; do not retry or claim success."
+        )
+    return ""
+
+
 class HarnessAgent:
     """A production-ready agent built on ``deepagents.create_deep_agent``.
 
@@ -1712,18 +1741,7 @@ class HarnessAgent:
             "For new AI-generated artifacts, prefer a subdirectory such as "
             "`generated/` over the workspace root."
         )
-        if cfg.media_generation is None:
-            directive += (
-                " Image and video generation tools are not configured in this runtime. "
-                "If the user asks for generated media, state that configuration is required; "
-                "do not claim that media was generated."
-            )
-        elif not cfg.media_generation.has_api_key():
-            directive += (
-                " Image and video generation tools are unavailable because media-provider "
-                "credentials are missing. If the user asks for generated media, ask them to "
-                "configure credentials in the host application; do not retry or claim success."
-            )
+        directive += media_generation_directive(cfg)
         from octop_harness.backends.explicit_virtual_path import EXPLICIT_VIRTUAL_PATH_PROMPT
 
         directive += f" {EXPLICIT_VIRTUAL_PATH_PROMPT}" if cfg.explicit_virtual_paths else ""

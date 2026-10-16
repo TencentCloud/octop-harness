@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- 系统提示词里的媒体生成说明改为只限定「宿主内置」工具：当连接器自带的生图工具已进入本次请求的工具清单时，模型不再因为「本运行环境未配置媒体工具」而拒绝调用（TencentCloud/Octop#1983）。
 - ChatGPT Codex 端点使用无状态流式 Responses 请求，将主系统提示词映射到 instructions，后续系统消息保留为 developer；显式 instructions 原样保留，并保留多轮工具历史；将 langchain-openai 最低版本提高至 1.3.3，避免无状态历史引用未存储条目。
 - 减少启动和对话过程中的重复诊断日志，保留需要关注的错误与告警。
 
