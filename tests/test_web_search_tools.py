@@ -18,7 +18,12 @@ from octop_harness.builtin.tools.web_search._registry import (
 )
 from octop_harness.builtin.tools.web_search.brave import brave_search
 from octop_harness.builtin.tools.web_search.google import google_search
-from octop_harness.builtin.tools.web_search.kimi import kimi_search
+from octop_harness.builtin.tools.web_search.kimi import (
+    DEFAULT_KIMI_MODEL,
+    KIMI_MODEL_ENV,
+    kimi_search,
+    kimi_search_model,
+)
 from octop_harness.builtin.tools.web_search.searchfree import searchfree_search
 from octop_harness.builtin.tools.web_search.tavily import tavily_search
 
@@ -268,10 +273,72 @@ class TestGoogleSearch:
 # ---------------------------------------------------------------------------
 
 
+def _answer_response(text: str) -> Any:
+    """A final ``finish_reason="stop"`` chat completion."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=text, tool_calls=None),
+            ),
+        ],
+    )
+
+
+def _tool_call_response(*calls: tuple[str, str, str]) -> Any:
+    """A ``finish_reason="tool_calls"`` completion carrying ``(id, name, args)``."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="tool_calls",
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id=call_id,
+                            function=SimpleNamespace(name=name, arguments=arguments),
+                        )
+                        for call_id, name, arguments in calls
+                    ],
+                ),
+            ),
+        ],
+    )
+
+
+def _install_fake_openai(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[Any],
+    captured: dict[str, Any],
+) -> None:
+    """Install a scripted ``openai`` module and log every ``create`` call."""
+    queue = list(responses)
+
+    class _FakeChatCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            captured.setdefault("calls", []).append(kwargs)
+            assert queue, "kimi_search called the SDK more often than scripted"
+            return queue.pop(0)
+
+    class _FakeChat:
+        def __init__(self) -> None:
+            self.completions = _FakeChatCompletions()
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["init"] = kwargs
+            self.chat = _FakeChat()
+
+    fake_module = ModuleType("openai")
+    fake_module.AsyncOpenAI = _FakeAsyncOpenAI  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_module)
+
+
 class TestKimiSearch:
     @pytest.fixture(autouse=True)
     def _clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.delenv(KIMI_MODEL_ENV, raising=False)
 
     @pytest.mark.asyncio
     async def test_missing_api_key_returns_error(self) -> None:
@@ -282,33 +349,92 @@ class TestKimiSearch:
     async def test_calls_sdk_when_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MOONSHOT_API_KEY", "secret")
         captured: dict[str, Any] = {}
+        _install_fake_openai(monkeypatch, [_answer_response("answer")], captured)
 
-        # Build a fake ``openai`` module exposing ``AsyncOpenAI``.
-        class _FakeChatCompletions:
-            async def create(self, **kwargs: Any) -> Any:
-                captured["call"] = kwargs
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))],
-                )
+        result = await kimi_search.ainvoke({"query": "hello"})
 
-        class _FakeChat:
-            def __init__(self) -> None:
-                self.completions = _FakeChatCompletions()
-
-        class _FakeAsyncOpenAI:
-            def __init__(self, **kwargs: Any) -> None:
-                captured["init"] = kwargs
-                self.chat = _FakeChat()
-
-        fake_module = ModuleType("openai")
-        fake_module.AsyncOpenAI = _FakeAsyncOpenAI  # type: ignore[attr-defined]
-        with patch.dict(sys.modules, {"openai": fake_module}):
-            result = await kimi_search.ainvoke({"query": "hello"})
         assert result == "answer"
         assert captured["init"]["api_key"] == "secret"
         assert captured["init"]["base_url"].startswith("https://api.moonshot.cn")
-        assert captured["call"]["model"].startswith("moonshot-")
-        assert any(t.get("type") == "web_search" for t in captured["call"]["tools"])
+        call = captured["calls"][0]
+        # The retired ``moonshot-v1-128k`` is gone; the default tracks a
+        # model Moonshot still serves to new accounts.
+        assert call["model"] == DEFAULT_KIMI_MODEL
+        assert call["tools"] == [
+            {"type": "builtin_function", "function": {"name": "$web_search"}},
+        ]
+        # Moonshot rejects any ``temperature`` other than the model's fixed
+        # value, so it must not be sent at all.
+        assert "temperature" not in call
+
+    @pytest.mark.asyncio
+    async def test_model_can_be_overridden_by_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MOONSHOT_API_KEY", "secret")
+        monkeypatch.setenv(KIMI_MODEL_ENV, "kimi-k3")
+        captured: dict[str, Any] = {}
+        _install_fake_openai(monkeypatch, [_answer_response("answer")], captured)
+
+        await kimi_search.ainvoke({"query": "hello"})
+
+        assert captured["calls"][0]["model"] == "kimi-k3"
+
+    @pytest.mark.asyncio
+    async def test_blank_model_env_falls_back_to_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(KIMI_MODEL_ENV, "   ")
+        assert kimi_search_model() == DEFAULT_KIMI_MODEL
+
+    @pytest.mark.asyncio
+    async def test_search_round_trip_echoes_tool_arguments(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``$web_search`` is builtin: the model's arguments *are* the result."""
+        monkeypatch.setenv("MOONSHOT_API_KEY", "secret")
+        captured: dict[str, Any] = {}
+        _install_fake_openai(
+            monkeypatch,
+            [
+                _tool_call_response(("call_1", "$web_search", '{"query": "octop"}')),
+                _answer_response("octop is a self-hosted agent platform [1]"),
+            ],
+            captured,
+        )
+
+        result = await kimi_search.ainvoke({"query": "what is octop"})
+
+        assert result == "octop is a self-hosted agent platform [1]"
+        assert len(captured["calls"]) == 2
+        follow_up = captured["calls"][1]["messages"]
+        # The assistant turn is replayed verbatim, then answered with the
+        # arguments the model produced.
+        assert follow_up[-2].tool_calls[0].id == "call_1"
+        assert follow_up[-1] == {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "name": "$web_search",
+            "content": '{"query": "octop"}',
+        }
+
+    @pytest.mark.asyncio
+    async def test_gives_up_when_model_keeps_searching(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("MOONSHOT_API_KEY", "secret")
+        captured: dict[str, Any] = {}
+        _install_fake_openai(
+            monkeypatch,
+            [_tool_call_response(("c", "$web_search", "{}")) for _ in range(5)],
+            captured,
+        )
+
+        result = await kimi_search.ainvoke({"query": "loop"})
+
+        assert "round limit" in result
+        assert len(captured["calls"]) == 5
 
 
 # ---------------------------------------------------------------------------

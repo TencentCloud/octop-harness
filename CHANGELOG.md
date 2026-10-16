@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- Kimi 内置联网搜索不再写死已停服的 `moonshot-v1-128k`：模型改由 `MOONSHOT_SEARCH_MODEL` 覆盖（默认 `kimi-k2.6`）。同时按 Moonshot 现行规范改用 `$web_search` 内置函数并回传 `tool_calls` 参数，且不再发送固定不可修改的 `temperature`——原实现对新账号恒返回 404 `resource_not_found_error`，改完模型名后仍会因 `temperature` 与工具声明报错（TencentCloud/Octop#1926）。
 - ChatGPT Codex 端点使用无状态流式 Responses 请求，将主系统提示词映射到 instructions，后续系统消息保留为 developer；显式 instructions 原样保留，并保留多轮工具历史；将 langchain-openai 最低版本提高至 1.3.3，避免无状态历史引用未存储条目。
 - 减少启动和对话过程中的重复诊断日志，保留需要关注的错误与告警。
 
