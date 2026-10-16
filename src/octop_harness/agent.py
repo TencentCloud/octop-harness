@@ -1455,6 +1455,10 @@ class HarnessAgent:
                 )
             )
 
+        from octop_harness.middleware.loop_guard import LoopGuardMiddleware
+
+        chain.append(LoopGuardMiddleware())
+
         # Filesystem tool boundary: always soften outside-root ValueError; apply
         # deny rules only when permissions are set on an execution backend.
         from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
