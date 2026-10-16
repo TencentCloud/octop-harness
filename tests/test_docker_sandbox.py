@@ -322,6 +322,26 @@ class TestPathMapping:
         assert sandbox._map_path("/tmp/x") == f"{root}/tmp/x"
         sandbox.close()
 
+    def test_relative_dotfiles_keep_leading_dots(self, tmp_path: Path, mock_docker: Any) -> None:
+        from octop_harness.backends.docker_sandbox import DockerSandbox
+
+        _docker_mod, _client, _container = mock_docker
+        sandbox = DockerSandbox(
+            workspace_dir=tmp_path,
+            workspace_path="/workspace",
+            image="python:3.12-slim",
+        )
+        # Leading dots belong to the filename, only an explicit "./" is a marker.
+        assert sandbox._map_path(".env") == "/workspace/.env"
+        assert sandbox._map_path("./.env") == "/workspace/.env"
+        assert sandbox._map_path(".octop/.env") == "/workspace/.octop/.env"
+        assert sandbox._map_path("rel.txt") == "/workspace/rel.txt"
+        assert sandbox._map_path("././rel.txt") == "/workspace/rel.txt"
+        assert sandbox._to_virtual_path(".env") == "/.env"
+        assert sandbox._to_virtual_path("./.env") == "/.env"
+        assert sandbox._to_virtual_path(".octop/.env") == "/.octop/.env"
+        sandbox.close()
+
     def test_explicit_workspace_path_overrides_dir(
         self,
         tmp_path: Path,
