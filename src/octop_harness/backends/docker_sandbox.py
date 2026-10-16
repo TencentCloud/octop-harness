@@ -175,6 +175,14 @@ def ensure_docker_image(image: str, *, client: Any | None = None) -> bool:
             ) from second_exc
 
 
+def _strip_relative_prefix(fragment: str) -> str:
+    """Strip one literal ``./`` prefix — ``lstrip("./")`` would also eat
+    leading dots that belong to the filename (``.env`` → ``env``)."""
+    if fragment.startswith("./") or fragment.startswith(".\\"):
+        return fragment[2:]
+    return fragment
+
+
 def _normalize_container_path(path: str) -> str:
     """Collapse ``.`` / ``..`` in a container absolute path (posix)."""
     parts: list[str] = []
@@ -679,7 +687,7 @@ class DockerSandbox(BaseSandbox):
             return self._clamp_to_workspace(raw)
 
         if not raw.startswith("/"):
-            rel = raw.lstrip("./")
+            rel = _strip_relative_prefix(raw)
             if not rel or rel == ".":
                 return root
             return self._clamp_to_workspace(f"{root}/{rel}")
@@ -699,7 +707,7 @@ class DockerSandbox(BaseSandbox):
         if raw.startswith("/"):
             normalized = _normalize_container_path(raw)
         else:
-            normalized = _normalize_container_path(f"{root}/{raw.lstrip('./')}")
+            normalized = _normalize_container_path(f"{root}/{_strip_relative_prefix(raw)}")
         if normalized == root:
             return "/"
         prefix = root + "/"
