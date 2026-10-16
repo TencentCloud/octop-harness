@@ -23,6 +23,8 @@ from octop_harness.media.models import (
 
 _SEEDREAM_5_MIN_PIXELS = 3_686_400
 _EXPLICIT_IMAGE_SIZE = re.compile(r"^(\d+)[xX](\d+)$")
+# Ark rejects sequential (multi-image) generation parameters for these models.
+_SEEDREAM_SINGLE_IMAGE_MODELS = ("doubao-seedream-5-0-pro", "doubao-seedream-5-0-flash")
 
 
 class VolcengineMediaProvider(BearerJsonMediaProvider):
@@ -47,7 +49,6 @@ class VolcengineMediaProvider(BearerJsonMediaProvider):
             "prompt": request.prompt,
             "response_format": "b64_json",
             "watermark": request.watermark,
-            "sequential_image_generation": "auto" if request.count > 1 else "disabled",
         }
         if request.reference_images:
             body["image"] = list(request.reference_images)
@@ -56,8 +57,7 @@ class VolcengineMediaProvider(BearerJsonMediaProvider):
             body["size"] = size
         if request.seed is not None:
             body["seed"] = request.seed
-        if request.count > 1:
-            body["sequential_image_generation_options"] = {"max_images": request.count}
+        body.update(_sequential_image_options(self.image_model, request.count))
 
         payload = await self._request_json(client, "POST", "/images/generations", json=body)
         error = payload.get("error")
@@ -167,6 +167,25 @@ def _seedream_image_size(model: str, requested: str | None) -> str | None:
     if match and int(match.group(1)) * int(match.group(2)) < _SEEDREAM_5_MIN_PIXELS:
         return "2K"
     return size
+
+
+def _sequential_image_options(model: str, count: int) -> dict[str, Any]:
+    """Return multi-image parameters; single-image requests must omit them entirely."""
+    if count <= 1:
+        return {}
+    if model.startswith(_SEEDREAM_SINGLE_IMAGE_MODELS):
+        raise MediaGenerationError(
+            f"Model {model} generates one image per request; count must be 1.",
+            code="unsupported_input",
+            category="validation",
+            safe_to_resubmit=True,
+            remediation="adjust_request",
+            model_instruction="Set count to 1, then call the tool at most once more.",
+        )
+    return {
+        "sequential_image_generation": "auto",
+        "sequential_image_generation_options": {"max_images": count},
+    }
 
 
 def _image_content(url: str, *, role: str) -> dict[str, Any]:
