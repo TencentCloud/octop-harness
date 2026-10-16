@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- Docker sandbox 相对路径映射改为只剥离字面 `./` 前缀，`.env`、`.octop/.env` 等以点开头的文件名不再丢失前导点；工作区 `.env` 重新能被 dotenv 加载器发现并注入命令执行环境。
+
 ## [1.0.3] - 2026-10-14
 
 ### 新增
