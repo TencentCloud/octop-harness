@@ -344,6 +344,44 @@ def test_repeated_user_text_starts_a_new_decision_pass() -> None:
     assert scorer.calls == 2
 
 
+def test_later_user_turn_sends_prior_conversation_to_the_decision_model() -> None:
+    tools = [_tool(f"misc_{i}", "unrelated") for i in range(16)]
+    tools.append(_tool("smtp_submit", "发送邮件"))
+    scorer = _Scorer({"tool:smtp_submit": 0.91})
+    mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
+    request = _request(
+        tools=tools,
+        messages=[
+            HumanMessage(content="帮我给张三写一封请假邮件"),
+            AIMessage(content="草稿已经写好了"),
+            HumanMessage(content="按刚才说的做"),
+        ],
+    )
+    out = mw.wrap_model_call(request, lambda item: item)
+    assert "请假邮件" in scorer.state
+    assert "按刚才说的做" in scorer.state
+    assert "草稿已经写好了" in scorer.state
+    assert "smtp_submit" in [item_id.split(":", 1)[1] for item_id, _ in scorer.statements]
+    assert "smtp_submit" in [tool.name for tool in out.tools]
+
+
+def test_decision_state_keeps_the_latest_ask_when_history_overflows() -> None:
+    from octop_harness.middleware.decision import _STATE_LIMIT, _state_text
+
+    earlier = "帮我处理这份很长的合同。" + ("条款" * (_STATE_LIMIT))
+    request = _request(
+        messages=[
+            HumanMessage(content=earlier),
+            AIMessage(content="草稿已经写好了。" + ("好" * (_STATE_LIMIT))),
+            HumanMessage(content="按刚才说的做"),
+        ]
+    )
+    state = _state_text(request, chinese=True)
+    assert len(state) <= _STATE_LIMIT
+    assert "按刚才说的做" in state
+    assert state.rstrip("…").endswith("按刚才说的做")
+
+
 def test_middleware_keeps_only_confident_tools() -> None:
     tools = [_tool(f"misc_{i}", "unrelated") for i in range(8)]
     tools.append(_tool("read_pdf", "读取 pdf 合同"))

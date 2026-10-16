@@ -40,7 +40,9 @@ _PENDING_DECISION: ContextVar[dict[str, Any] | None] = ContextVar(
     default=None,
 )
 
-_STATE_LIMIT = 1200
+# Decision APIs take a short situation string, not the chat model window.
+# Newest turns win when this budget is exceeded.
+_STATE_LIMIT = 2400
 _BLURB_LIMIT = 240
 _QUESTION_LIMIT = 20
 _CATALOG_LIMIT = 12
@@ -285,7 +287,8 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
                     narrowed = request
                 else:
                     probabilities = await self._scorer.score_async(
-                        state=_state_text(request), statements=work.statements
+                        state=_state_text(request, chinese=self._chinese),
+                        statements=work.statements,
                     )
                     narrowed = self._apply(request, work, probabilities)
             response = await _call_with_savings_async(request, narrowed, handler)
@@ -323,7 +326,10 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         work = self._collect(request)
         if work is None:
             return request
-        probabilities = score(state=_state_text(request), statements=work.statements)
+        probabilities = score(
+            state=_state_text(request, chinese=self._chinese),
+            statements=work.statements,
+        )
         return self._apply(request, work, probabilities)
 
     def _collect(self, request: ModelRequest) -> _Work | None:
@@ -334,7 +340,7 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
             return None
         work = _Work(thread_key=thread_key, turn_key=_turn_key(request))
         cfg = self._config
-        catalog_text = _followup_task(request) if _is_followup(request) else text
+        catalog_text = _followup_task(request) if _is_followup(request) else _user_history_text(request)
         if not catalog_text:
             catalog_text = _earlier_user_text(request) if _is_followup(request) else text
         if cfg.skills:
@@ -901,13 +907,89 @@ def _earlier_user_text(request: ModelRequest) -> str:
     return ""
 
 
-def _state_text(request: ModelRequest) -> str:
-    latest = _latest_user_text(request)
+def _message_line(msg: Any, *, chinese: bool) -> str:
+    text = _stringify_content(getattr(msg, "content", "")).strip()
+    if not text:
+        return ""
+    if isinstance(msg, HumanMessage):
+        prefix = "用户: " if chinese else "User: "
+        return prefix + text
+    if isinstance(msg, AIMessage):
+        prefix = "助手: " if chinese else "Assistant: "
+        return prefix + text
+    return ""
+
+
+def _fit_lines(lines: list[str], limit: int, *, head: str = "") -> str:
+    """Keep ``head`` and the newest line. Older lines fill what is left.
+
+    A line that does not fit is clipped from the start, then anything older
+    is dropped. The chat model still sees the full thread; this is only the
+    decision ``state`` budget.
+    """
+    if limit <= 0:
+        return ""
+    head = _clip(head, min(len(head), max(64, limit // 4))) if head else ""
+    body_limit = limit - len(head) - (1 if head else 0)
+    if not lines:
+        return head
+    latest = _clip(lines[-1], body_limit)
+    budget = body_limit - len(latest)
+    older: list[str] = []
+    if budget > 1:
+        budget -= 1
+        for line in reversed(lines[:-1]):
+            if budget <= 0:
+                break
+            sep = 1 if older else 0
+            room = budget - sep
+            if room <= 0:
+                break
+            piece = line if len(line) <= room else _clip(line, room)
+            older.append(piece)
+            budget -= len(piece) + sep
+            if len(line) > room:
+                break
+        older.reverse()
+    parts = [part for part in (head, *older, latest) if part]
+    return "\n".join(parts)
+
+
+def _user_texts(request: ModelRequest) -> list[str]:
+    texts: list[str] = []
+    for msg in getattr(request, "messages", None) or []:
+        if not isinstance(msg, HumanMessage):
+            continue
+        text = _stringify_content(msg.content).strip()
+        if text:
+            texts.append(text)
+    return texts
+
+
+def _conversation_lines(request: ModelRequest, *, chinese: bool) -> list[str]:
+    lines: list[str] = []
+    for msg in getattr(request, "messages", None) or []:
+        if isinstance(msg, ToolMessage):
+            continue
+        line = _message_line(msg, chinese=chinese)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _user_history_text(request: ModelRequest) -> str:
+    """User turns in this thread. The latest ask stays when the budget is tight."""
+    return _fit_lines(_user_texts(request), _STATE_LIMIT)
+
+
+def _state_text(request: ModelRequest, *, chinese: bool = True) -> str:
+    lines = _conversation_lines(request, chinese=chinese)
+    head = ""
     if _is_followup(request):
         earlier = _followup_task(request) or _earlier_user_text(request)
-        if earlier:
-            return _clip(f"{earlier}\n{latest}", _STATE_LIMIT)
-    return _clip(latest, _STATE_LIMIT)
+        if earlier and not any(earlier in line for line in lines):
+            head = earlier
+    return _fit_lines(lines, _STATE_LIMIT, head=head) or _clip(_latest_user_text(request), _STATE_LIMIT)
 
 
 def _thread_key(request: ModelRequest) -> str:
