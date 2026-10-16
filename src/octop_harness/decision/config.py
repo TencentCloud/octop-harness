@@ -34,7 +34,7 @@ class DecisionConfig:
     max_selected: int = 8
 
     def __post_init__(self) -> None:
-        provider = str(self.provider or "").strip().lower()
+        provider = str(self.provider).strip().lower()
         if provider not in _PROVIDERS:
             raise ValueError(f"decision provider must be one of {sorted(_PROVIDERS)}")
         self.provider = provider  # type: ignore[assignment]

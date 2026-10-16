@@ -76,8 +76,10 @@ class HarnessAgentManager:
         self._cancel_events: dict[tuple[str, str], asyncio.Event] = {}
         self._langfuse: LangfuseTracer | None = LangfuseTracer(langfuse) if langfuse and langfuse.configured else None
         self._security_policy: SecurityPolicy = SecurityPolicy.defaults()
+        self._log_dir: Path | None
+        self._log_file: Path | None
         if file_logging:
-            self._log_dir: Path | None = resolve_log_dir(log_dir)
+            self._log_dir = resolve_log_dir(log_dir)
             self._log_file = setup_logging(
                 self._log_dir,
                 level=log_level,

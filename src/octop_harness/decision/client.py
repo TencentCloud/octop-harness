@@ -53,9 +53,11 @@ def _read_probability(row: object) -> float | None:
     answer = row.get("answer")
     if raw is None and isinstance(answer, dict):
         raw = answer.get("noul", answer.get("probability", answer.get("p_yes", answer.get("yes"))))
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
     try:
         return float(raw)
-    except (TypeError, ValueError):
+    except ValueError:
         return None
 
 

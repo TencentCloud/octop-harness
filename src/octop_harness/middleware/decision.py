@@ -110,7 +110,7 @@ async def _call_with_savings_async(
         pending_decision_saved.reset(token)
 
 
-def _stamp_decision(response: Any, payload: dict[str, Any] | None) -> Any:
+def _stamp_decision(response: ModelResponse, payload: dict[str, Any] | None) -> ModelResponse:
     """Copy this turn's decision onto the reply so history can render it."""
     if not payload:
         return response
@@ -596,8 +596,7 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         if work.forced_member_ids:
             # Explicit user routing always wins. The decision model still
             # evaluates and displays that choice, but cannot silently reroute.
-            chosen = list(work.forced_member_ids)
-            return self._pin_members(request, work, chosen, scores)
+            return self._pin_members(request, work, list(work.forced_member_ids), scores)
         if unasked or any(item_id not in scores for item_id in asked):
             return request, self._part("member", None, scores, work.member_labels)
         chosen = keep_confident(
@@ -722,7 +721,8 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         reader = getattr(self._team, "peer_invoke_mode_for", None)
         if self._team is None or not agent_id or not callable(reader):
             return False
-        return reader(agent_id) == "async"
+        mode = reader(agent_id)
+        return isinstance(mode, str) and mode == "async"
 
     def _pin(self) -> frozenset[str] | None:
         try:
@@ -846,7 +846,7 @@ def _fit_questions(work: _Work) -> None:
             return
         alloc = dict(zip(order, _allocate([len(grouped[kind]) for kind in order], _QUESTION_LIMIT), strict=True))
     kept: list[tuple[str, str]] = []
-    asked = {"result": [], "skill": [], "tool": [], "member": []}
+    asked: dict[str, list[str]] = {"result": [], "skill": [], "tool": [], "member": []}
     for kind in ("result", "skill", "tool", "member"):
         chosen = grouped[kind][: alloc.get(kind, 0)]
         kept.extend(chosen)
