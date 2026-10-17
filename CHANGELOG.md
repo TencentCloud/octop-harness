@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- bwrap 沙箱原先只挂载 4 个 `/etc` 文件，依赖 `/etc/alternatives` 或 CA 证书的系统库与命令（numpy/pandas 的 `libblas`、ImageMagick 的 `convert`、requests 的默认证书加载）在沙箱内失效；现只读挂载 alternatives、CA 证书、动态链接器缓存与 fontconfig 等目录，宿主缺失的路径仍自动跳过（TencentCloud/Octop#2112）。
+
 ## [1.0.4] - 2026-10-16
 
 ### 新增
