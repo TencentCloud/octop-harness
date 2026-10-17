@@ -17,6 +17,7 @@ from octop_harness.builtin.tools.web_search._registry import (
     _provider_available,
 )
 from octop_harness.builtin.tools.web_search.brave import brave_search
+from octop_harness.builtin.tools.web_search.deepseek import deepseek_fetch, deepseek_search
 from octop_harness.builtin.tools.web_search.google import google_search
 from octop_harness.builtin.tools.web_search.kimi import kimi_search
 from octop_harness.builtin.tools.web_search.searchfree import searchfree_search
@@ -29,7 +30,15 @@ from octop_harness.builtin.tools.web_search.tavily import tavily_search
 
 class TestRegistry:
     def test_known_providers(self) -> None:
-        assert set(WEB_SEARCH_PROVIDERS) == {"tavily", "brave", "google", "kimi", "searchfree"}
+        assert set(WEB_SEARCH_PROVIDERS) == {
+            "tavily",
+            "brave",
+            "google",
+            "kimi",
+            "searchfree",
+            "deepseek_search",
+            "deepseek_fetch",
+        }
 
     def test_provider_available_all_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("FOO", "x")
@@ -51,7 +60,14 @@ class TestRegistry:
 class TestLoadWebSearchTools:
     @pytest.fixture(autouse=True)
     def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in ("TAVILY_API_KEY", "BRAVE_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CSE_ID", "MOONSHOT_API_KEY"):
+        for var in (
+            "TAVILY_API_KEY",
+            "BRAVE_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_CSE_ID",
+            "MOONSHOT_API_KEY",
+            "DEEPSEEK_API_KEY",
+        ):
             monkeypatch.delenv(var, raising=False)
 
     def test_false_returns_empty(self) -> None:
@@ -82,6 +98,8 @@ class TestLoadWebSearchTools:
             "google_search",
             "kimi_search",
             "searchfree_search",
+            "deepseek_search",
+            "deepseek_fetch",
         }
 
     def test_explicit_list_loads_named_providers(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -422,6 +440,247 @@ class TestSearchFreeSearch:
         with patch.object(mod.httpx, "AsyncClient", _FakeClient):
             result = await searchfree_search.ainvoke({"query": "hi"})
         assert "searchfree request failed" in result
+
+
+# ---------------------------------------------------------------------------
+# deepseek_search / deepseek_fetch (first-party DeepSeek Search + Fetch APIs)
+# ---------------------------------------------------------------------------
+
+
+def _fake_deepseek_client(
+    captured: dict[str, Any],
+    *,
+    status_code: int = 200,
+    body: Any = None,
+) -> type:
+    """Build a fake ``httpx.AsyncClient`` recording posts to DeepSeek."""
+
+    class _Resp:
+        def __init__(self) -> None:
+            self.status_code = status_code
+
+        def json(self) -> Any:
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+        @property
+        def text(self) -> str:
+            return "" if body is None else str(body)
+
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            """No-op."""
+
+        async def post(self, url: str, *, headers: dict[str, str], json: dict[str, Any]) -> _Resp:
+            captured.setdefault("calls", []).append(
+                {"url": url, "headers": headers, "json": json},
+            )
+            return _Resp()
+
+    return _FakeClient
+
+
+class TestDeepSeekSearch:
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_returns_error(self) -> None:
+        result = await deepseek_search.ainvoke({"query": "x"})
+        assert "DEEPSEEK_API_KEY" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_results_and_strips_empty_content(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+        captured: dict[str, Any] = {}
+        results = [
+            {
+                "title": "DeepSeek V4",
+                "url": "https://example.com/v4",
+                "snippet": "V4 is out",
+                "summary": "DeepSeek V4 released",
+                "rerank_score": 2.4,
+                "content": "",
+                "authority": 3,
+            },
+            {
+                "title": "With body",
+                "url": "https://example.com/body",
+                "snippet": "s",
+                "summary": "sum",
+                "rerank_score": 1.8,
+                "content": "full page text",
+                "authority": 2,
+            },
+        ]
+        client = _fake_deepseek_client(
+            captured,
+            body={"results": results},
+        )
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", client):
+            result = await deepseek_search.ainvoke(
+                {"query": "DeepSeek V4 release", "max_results": 3, "ori_question": "最新模型是啥"},
+            )
+        parsed = json.loads(result)
+        assert "content" not in parsed[0]
+        assert parsed[1]["content"] == "full page text"
+        call = captured["calls"][0]
+        assert call["url"].endswith("/v1/tools/search")
+        assert call["headers"]["Authorization"] == "Bearer ds-secret"
+        assert call["json"]["count"] == 3
+        assert call["json"]["need_content"] is False
+        assert call["json"]["ori_question"] == "最新模型是啥"
+
+    @pytest.mark.asyncio
+    async def test_omits_ori_question_when_blank_and_clamps_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+        captured: dict[str, Any] = {}
+        client = _fake_deepseek_client(captured, body={"results": [{"title": "t"}]})
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", client):
+            await deepseek_search.ainvoke({"query": "q", "max_results": 999})
+        call = captured["calls"][0]
+        assert "ori_question" not in call["json"]
+        assert call["json"]["count"] == 50
+
+    @pytest.mark.asyncio
+    async def test_empty_results_returns_no_results_message(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+        captured: dict[str, Any] = {}
+        client = _fake_deepseek_client(captured, body={"results": []})
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", client):
+            result = await deepseek_search.ainvoke({"query": "q"})
+        assert result == "No results found."
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_includes_api_message(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+        captured: dict[str, Any] = {}
+        client = _fake_deepseek_client(
+            captured,
+            status_code=401,
+            body={"error": {"message": "auth failed", "type": "authentication_error"}},
+        )
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", client):
+            result = await deepseek_search.ainvoke({"query": "q"})
+        assert "HTTP 401" in result
+        assert "auth failed" in result
+
+    @pytest.mark.asyncio
+    async def test_network_failure_returns_plain_text(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        class _BrokenClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _BrokenClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                """No-op."""
+
+            async def post(self, *args: Any, **kwargs: Any) -> Any:
+                raise mod.httpx.ConnectError("connection reset")
+
+        with patch.object(mod.httpx, "AsyncClient", _BrokenClient):
+            result = await deepseek_search.ainvoke({"query": "q"})
+        assert "deepseek_search request failed" in result
+
+
+class TestDeepSeekFetch:
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_returns_error(self) -> None:
+        result = await deepseek_fetch.ainvoke({"url": "https://example.com"})
+        assert "DEEPSEEK_API_KEY" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_title_and_markdown_content(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+        captured: dict[str, Any] = {}
+        client = _fake_deepseek_client(
+            captured,
+            body={"title": "Example", "content": "# Example\n\nBody."},
+        )
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", client):
+            result = await deepseek_fetch.ainvoke({"url": "https://example.com/article"})
+        assert json.loads(result) == {"title": "Example", "content": "# Example\n\nBody."}
+        call = captured["calls"][0]
+        assert call["url"].endswith("/v1/tools/fetch")
+        assert call["json"] == {"url": "https://example.com/article"}
+
+    @pytest.mark.asyncio
+    async def test_not_found_error_is_surfaced(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+        captured: dict[str, Any] = {}
+        client = _fake_deepseek_client(
+            captured,
+            status_code=404,
+            body={"error": {"message": "no extractable content", "type": "invalid_request_error"}},
+        )
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", client):
+            result = await deepseek_fetch.ainvoke({"url": "https://example.com/404"})
+        assert "HTTP 404" in result
+        assert "no extractable content" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_content_is_an_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+        captured: dict[str, Any] = {}
+        client = _fake_deepseek_client(captured, body={"title": "", "content": ""})
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", client):
+            result = await deepseek_fetch.ainvoke({"url": "https://example.com"})
+        assert "no usable content" in result
 
 
 # ---------------------------------------------------------------------------
