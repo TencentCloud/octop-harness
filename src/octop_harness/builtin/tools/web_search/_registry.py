@@ -33,7 +33,15 @@ import os
 from collections.abc import Iterable
 from typing import Any, Literal, cast
 
-WebSearchToolName = Literal["tavily", "brave", "google", "kimi", "searchfree"]
+WebSearchToolName = Literal[
+    "tavily",
+    "brave",
+    "google",
+    "kimi",
+    "searchfree",
+    "deepseek_search",
+    "deepseek_fetch",
+]
 
 # ``provider name → (required env vars, lazy loader returning a langchain tool)``.
 # Loaders are deliberately lazy so importing this module is cheap.
@@ -69,6 +77,18 @@ def _load_searchfree() -> Any:
     return searchfree_search
 
 
+def _load_deepseek_search() -> Any:
+    from octop_harness.builtin.tools.web_search.deepseek import deepseek_search
+
+    return deepseek_search
+
+
+def _load_deepseek_fetch() -> Any:
+    from octop_harness.builtin.tools.web_search.deepseek import deepseek_fetch
+
+    return deepseek_fetch
+
+
 WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     "tavily": (("TAVILY_API_KEY",), _load_tavily),
     "brave": (("BRAVE_API_KEY",), _load_brave),
@@ -77,6 +97,9 @@ WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     # ``searchfree`` needs no env vars — empty tuple makes it always
     # available under the ``auto`` policy.
     "searchfree": ((), _load_searchfree),
+    # DeepSeek's first-party Search + Fetch APIs share one ``DEEPSEEK_API_KEY``.
+    "deepseek_search": (("DEEPSEEK_API_KEY",), _load_deepseek_search),
+    "deepseek_fetch": (("DEEPSEEK_API_KEY",), _load_deepseek_fetch),
 }
 
 

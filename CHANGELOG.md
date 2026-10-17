@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 内置网络搜索新增 DeepSeek 官方 Search / Fetch 工具（`deepseek_search` / `deepseek_fetch`，配置 `DEEPSEEK_API_KEY` 后随 `auto` 策略自动挂载）：DeepSeek 自研搜索引擎支持 `site:`、`lang:`、`after:`/`before:` 等搜索语法并返回带 rerank 分与权威度的结构化结果；Fetch 将指定网页正文抓取为 Markdown。
+
 ## [1.0.4] - 2026-10-16
 
 ### 新增
