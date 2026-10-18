@@ -36,11 +36,38 @@ from octop_harness.backends.local_shell import (
 logger = logging.getLogger(__name__)
 
 _RO_BINDS = ("/usr", "/bin", "/lib", "/lib64")
+# Host ``/etc`` paths bound read-only into the jail. Each is skipped when the
+# host does not have it (``--ro-bind-try``), so one tuple serves Debian,
+# Fedora and Alpine layouts. Everything here is world-readable configuration
+# or public material; nothing secret is exposed.
 _ETC_TRY = (
+    # Name resolution and identity: the jail cannot run a shell without them.
     "/etc/resolv.conf",
+    "/etc/hosts",
     "/etc/passwd",
     "/etc/group",
     "/etc/nsswitch.conf",
+    # Debian's alternatives symlink farm. Libraries and commands installed
+    # through update-alternatives (libblas for numpy/pandas, cc, convert, ...)
+    # are only reachable through /etc/alternatives/<name> -> /usr/lib/...;
+    # /usr is bound, but the symlink itself lives here, so without this the
+    # loader reports "cannot open shared object file".
+    "/etc/alternatives",
+    # CA trust stores: Debian/Ubuntu keep them in /etc/ssl, Fedora/RHEL in
+    # /etc/pki. Without one of them requests/httpx fail to load a default
+    # bundle even though the certificate files themselves are under /usr.
+    "/etc/ssl",
+    "/etc/pki",
+    # Dynamic-linker cache and its configuration. Libraries installed outside
+    # the default search path are only found through these.
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    # fontconfig: ImageMagick, matplotlib and headless Chrome resolve fonts
+    # through /etc/fonts, which points at /usr/share/fonts.
+    "/etc/fonts",
+    # ImageMagick and friends consult the mime database for format detection.
+    "/etc/mime.types",
 )
 
 

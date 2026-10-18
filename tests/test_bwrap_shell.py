@@ -175,6 +175,31 @@ def test_build_bwrap_argv_uses_virtual_workspace_cwd(tmp_path: Path) -> None:
     assert argv[argv.index("--chdir") + 1] == "/.octop/workspaces/AGENT1"
 
 
+def test_build_bwrap_argv_binds_the_etc_tree_tools_need(tmp_path: Path) -> None:
+    """A Debian/Fedora host must keep working inside the jail.
+
+    ``/etc`` used to be limited to four files, so anything that resolves
+    through ``/etc/alternatives`` (libblas for numpy/pandas, ``convert``) or
+    loads a CA bundle from ``/etc/ssl`` failed inside the jail while working
+    on the host. The bind list now carries those directories too, still
+    read-only and still tolerant of hosts that do not have them.
+    """
+    argv = build_bwrap_argv(bwrap=_BWRAP, root_dir=tmp_path, command="true")
+    binds = {argv[i + 1] for i, token in enumerate(argv) if token in {"--ro-bind", "--ro-bind-try"}}
+    assert {
+        "/etc/resolv.conf",
+        "/etc/alternatives",
+        "/etc/ssl",
+        "/etc/ld.so.cache",
+        "/etc/fonts",
+    } <= binds
+    # Every /etc bind stays read-only: a writable /etc would let the agent
+    # rewrite the host's trust store and loader configuration.
+    for i, token in enumerate(argv):
+        if token == "--bind" and argv[i + 1].startswith("/etc/"):
+            pytest.fail(f"/etc path bound read-write: {argv[i + 1]}")
+
+
 def test_build_bwrap_argv_extra_binds(tmp_path: Path) -> None:
     skills = tmp_path / "ws" / "skills"
     skills.mkdir(parents=True)
