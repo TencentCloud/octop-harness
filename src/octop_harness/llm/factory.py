@@ -34,6 +34,8 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+import httpx
+
 from octop_harness.config import ModelConfig, ProviderConfig
 from octop_harness.llm.session_header import (
     aclose_session_http_clients,
@@ -279,6 +281,15 @@ def _is_codex_base_url(base_url: str | None) -> bool:
     )
 
 
+# Upper bound for one LLM HTTP request. Deliberately far above any realistic
+# completion (a long agent turn streams for minutes), but finite: without it a
+# provider that accepts the TCP connection and then never responds blocks the
+# call forever. ``httpx``'s 5s default is the other extreme and would cut off
+# normal generations, which is why the session-header clients pass
+# ``timeout=None``; this constant is the bounded middle ground.
+LLM_REQUEST_TIMEOUT = httpx.Timeout(connect=10.0, read=1800.0, write=60.0, pool=10.0)
+
+
 def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
     try:
         from langchain_openai import ChatOpenAI
@@ -297,6 +308,11 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: 
         # OpenAI endpoint; with a custom base_url (always our case) it stays
         # off and streamed AIMessages carry no usage_metadata.
         "stream_usage": provider.stream_usage,
+        # Always bounded, including when a dedicated session-header client is
+        # attached: langchain passes ``timeout=None`` through to the SDK, which
+        # means "no timeout at all" and would hang forever on a provider that
+        # accepts the connection but never answers.
+        "timeout": LLM_REQUEST_TIMEOUT,
     }
     if max_retries is not None:
         kwargs["max_retries"] = max_retries

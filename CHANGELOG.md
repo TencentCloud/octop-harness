@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- OpenAI 协议模型补上请求超时：此前工厂不传 `timeout`，langchain 以 `timeout=None` 传给 SDK，遇到「TCP 已建立但服务端不响应」的中转会永久阻塞。宿主按会话串行消费时，这类挂起会占满 worker，直到重启才恢复。现统一为 `connect=10s / read=1800s / write=60s / pool=10s`，远高于正常长回答耗时，但保证有界。
+
 ## [1.0.4] - 2026-10-16
 
 ### 新增

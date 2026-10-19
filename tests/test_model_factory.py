@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from octop_harness.config import ModelConfig, ProviderConfig
@@ -150,6 +152,85 @@ class TestBuildChatModel:
         assert instance.profile["max_input_tokens"] == 1_000_000
         assert instance.profile["context_window"] == 1_000_000
         assert instance.profile["max_output_tokens"] == 384_000
+
+    def test_openai_passes_bounded_request_timeout(self) -> None:
+        """Every request must be bounded — ``timeout=None`` hangs forever.
+
+        A provider that accepts the TCP connection and then never responds
+        blocks the call indefinitely when the SDK timeout is ``None``. This is
+        not hypothetical: it starves host worker pools that process turns
+        serially, taking the whole deployment down until a restart.
+        """
+        provider = ProviderConfig(
+            id="example",
+            base_url="https://api.example.com/v1",
+            api_key="sk-x",
+            protocol="openai",
+        )
+        model = ModelConfig(id="gpt-X")
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            build_chat_model(provider, model)
+
+        timeout = mock_init.call_args.kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.connect is not None
+        assert timeout.read is not None
+        # Generous enough for long streaming turns; not unbounded.
+        assert timeout.read >= 300
+
+    def test_openai_timeout_survives_session_header_clients(self) -> None:
+        """Dedicated httpx clients use ``timeout=None``; the SDK timeout must still apply.
+
+        ``langchain-openai`` forwards ``request_timeout`` as ``timeout=`` on the
+        OpenAI client, and the SDK only falls back to the client's own timeout
+        when that argument is *not given*. Passing ``timeout=None`` explicitly
+        therefore disables every timeout — the factory must keep providing one.
+        """
+        provider = ProviderConfig(
+            id="relay",
+            base_url="https://relay.example.com/v1",
+            api_key="sk-x",
+            protocol="openai",
+            session_header="x-session-id",
+        )
+        model = ModelConfig(id="gpt-X")
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            build_chat_model(provider, model)
+
+        kwargs = mock_init.call_args.kwargs
+        assert "http_client" in kwargs
+        assert isinstance(kwargs["timeout"], httpx.Timeout)
+        assert kwargs["timeout"].read is not None
+
+        sync_client = kwargs["http_client"]
+        async_client = kwargs["http_async_client"]
+        try:
+            # The clients themselves stay unbounded (normal generations are
+            # long); the SDK-level timeout is what bounds the request.
+            assert sync_client.timeout.read is None
+        finally:
+            sync_client.close()
+            asyncio.run(async_client.aclose())
+
+    def test_openai_timeout_applies_to_api_fallback_model(self) -> None:
+        """The Chat Completions fallback is a separate client and needs it too."""
+        provider = ProviderConfig(id="openai", base_url="https://api.example.com/v1", api_key="sk-x")
+        model = ModelConfig(id="gpt-X", api_mode="responses", api_fallback="chat_completions")
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            build_chat_model(provider, model)
+
+        assert mock_init.call_count == 2
+        for call in mock_init.call_args_list:
+            assert isinstance(call.kwargs["timeout"], httpx.Timeout)
 
     def test_openai_returns_reasoning_aware_subclass(self) -> None:
         """``protocol="openai"`` must use the reasoning_content-aware subclass."""
