@@ -79,6 +79,7 @@ _TOOLS_ALWAYS_KEPT = frozenset(
         "deepseek_search",
         "yuanbao_search",
         "searchfree_search",
+        "you_search",
     }
 )
 # Shown on the host decision card. They are not scored: a low score must not

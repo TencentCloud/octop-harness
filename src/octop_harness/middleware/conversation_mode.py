@@ -46,6 +46,7 @@ ASK_READ_TOOLS: frozenset[str] = frozenset(
         "deepseek_search",
         "yuanbao_search",
         "searchfree_search",
+        "you_search",
         "current_time",
     }
 )
