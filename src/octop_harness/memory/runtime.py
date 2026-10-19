@@ -27,6 +27,7 @@ from octop_harness.memory.store import (
 from octop_harness.middleware.memory import MemoryMiddleware
 
 if TYPE_CHECKING:
+    from octop_harness.backends.workspace import BackendWorkspace
     from octop_harness.config import HarnessAgentConfig
     from octop_harness.llm.factory import ChatModelFactory
 
@@ -47,6 +48,7 @@ class MemoryRuntime:
         config: HarnessAgentConfig,
         workspace_path: Path,
         model_factory: ChatModelFactory,
+        workspace: BackendWorkspace | None = None,
     ) -> None:
         self._config = config
         self._workspace_path = workspace_path
@@ -66,6 +68,14 @@ class MemoryRuntime:
                 llm=self._llm_client,
                 config=_extraction_service_config(config),
                 host="octop-harness",
+                manual_documents_provider=(
+                    lambda: {
+                        name: (workspace.download_bytes(name) or b"").decode("utf-8")
+                        for name in ("USER.md", "MEMORY.md")
+                    }
+                )
+                if workspace is not None
+                else None,
             )
 
     @property

@@ -342,7 +342,7 @@ def test_marker_detected_on_backend(tmp_path: Path) -> None:
     assert mw.is_bootstrapped
 
 
-def test_after_agent_writes_marker_when_user_md_updated(tmp_path: Path) -> None:
+def test_user_md_write_attempt_does_not_complete_onboarding(tmp_path: Path) -> None:
     ws = _workspace(tmp_path)
     ws.write_text(DEFAULT_BOOTSTRAP_PATH, "onboarding", force=True)
 
@@ -363,7 +363,8 @@ def test_after_agent_writes_marker_when_user_md_updated(tmp_path: Path) -> None:
     )
     mw.after_agent(state, runtime=None)
 
-    assert mw.is_bootstrapped
+    assert not mw.is_bootstrapped
+    assert not ws.exists(DEFAULT_BOOTSTRAPPED_PATH)
 
 
 def test_after_agent_does_not_write_marker_on_read_file_bootstrap_marker(tmp_path: Path) -> None:
@@ -517,3 +518,25 @@ def test_complete_storage_bootstrap_path(tmp_path: Path) -> None:
     assert "base" in joined
     assert "custom onboarding" in joined
     assert joined.find("base") < joined.find("custom onboarding")
+
+
+def test_missing_marker_is_checked_once(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path)
+    calls = 0
+    real_exists = ws.exists
+
+    def _counted(path: str) -> bool:
+        nonlocal calls
+        calls += 1
+        return real_exists(path)
+
+    ws.exists = _counted  # type: ignore[method-assign]
+    mw = BootstrapMiddleware(
+        ws,
+        bootstrap_file=DEFAULT_BOOTSTRAP_PATH,
+        bootstrap_marker=DEFAULT_BOOTSTRAPPED_PATH,
+    )
+
+    assert mw.is_bootstrapped is False
+    assert mw.is_bootstrapped is False
+    assert calls == 1

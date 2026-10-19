@@ -58,9 +58,8 @@ class TestMemoryIntegration:
             HarnessAgent(cfg)
 
         tool_names = [getattr(t, "name", "") for t in captured["tools"]]
-        # memory_save is intentionally not exposed; durable writes go through
-        # workspace markdown edits + idle distillation.
-        assert "memory_save" not in tool_names
+        # Explicit remember requests persist through the canonical service.
+        assert "memory_save" in tool_names
         assert "memory_search" in tool_names
         assert "memory_get" in tool_names
         assert "memory_store" not in tool_names

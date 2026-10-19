@@ -654,7 +654,21 @@ class TestMemoryMiddlewareWithService:
 class TestMemoryTools:
     def test_returns_recall_tools(self, service: MemoryService) -> None:
         tools = build_memory_tools(service)
-        assert {t.name for t in tools} == {"memory_search", "memory_get"}
+        assert {t.name for t in tools} == {"memory_search", "memory_get", "memory_save"}
+
+    def test_explicit_save_creates_recallable_atom_without_editing_strong_memory(
+        self,
+        service: MemoryService,
+        memory: Memory,
+        tmp_path: Path,
+    ) -> None:
+        strong = tmp_path / "MEMORY.md"
+        strong.write_text("User-maintained instructions", encoding="utf-8")
+        save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
+        result = save.invoke({"content": "Project Aurora uses PostgreSQL", "topic": "Aurora"})
+        assert "saved" in result.lower()
+        assert memory.search_atoms("PostgreSQL")
+        assert strong.read_text(encoding="utf-8") == "User-maintained instructions"
 
     def test_memory_search_empty(self, service: MemoryService) -> None:
         tools = build_memory_tools(service)

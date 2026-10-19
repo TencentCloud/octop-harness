@@ -1231,13 +1231,20 @@ class BackendWorkspace:
             roots.append((fragment, "workspace"))
         return roots
 
-    def memory_paths(self, override: Sequence[str] | None = None) -> list[str]:
+    def memory_paths(self, override: Sequence[str] | None = None, *, include_missing: bool = False) -> list[str]:
+        """Resolve unified context sources for deepagents' memory loader.
+
+        Include missing paths when assembling a graph so sources stay stable:
+        new sessions can load files created later, and restored sessions still
+        format their checkpoint snapshot after a source file is deleted.
+        The upstream loader skips missing files itself.
+        """
         names = list(DEFAULT_MEMORY_FILES) if override is None else list(override)
-        existing: list[str] = []
+        paths: list[str] = []
         for name in names:
-            if self.exists(name):
-                existing.append(self._deepagents_source_path(name))
-        return existing
+            if include_missing or self.exists(name):
+                paths.append(self._deepagents_source_path(name))
+        return paths
 
     # ----- High-level workspace operations -----
 

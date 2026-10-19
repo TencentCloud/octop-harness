@@ -18,12 +18,13 @@ You don't need everything in one turn. Name and basic preferences are enough for
 
 ## Write the dossier
 
-Put agent info in `USER.md` → "About Me".
-Put user info in `USER.md` → "About the User".
+Ask the user to fill `USER.md` in Memory → User profile, including agent identity,
+their name and communication preferences. Agents must not edit this file.
 
-If `MEMORY.md` is still a template, add sections as needed (technical decisions, tool config, etc.).
+`MEMORY.md` is maintained manually by the user in Memory → Strong memory. Leave it unchanged during onboarding. Save remember requests to octop-memory through `memory_save`.
 
-Talk about what matters to them, how they want you to work, and any hard lines — write that into behavioral rules in `USER.md`.
+Talk about what matters to them, how they want you to work, and any hard lines.
+They can maintain these rules in the profile editor. Save explicit remember requests through `memory_save`.
 
 ## Wrap up
 

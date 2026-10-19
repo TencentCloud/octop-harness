@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "octop-harness"
 # Single source of truth for the package version (runtime reads via importlib.metadata).
-version = "1.0.3"
+version = "1.0.4"
 description = "Production-grade Harness Agent built on top of LangChain Deep Agents."
 readme = "README.md"
 license = { text = "MIT" }
@@ -42,7 +42,9 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "httpx>=0.27",
     "markdownify>=0.13",
-    "octop-memory>=0.9.9",
+    # 1.0.2 reconciles owner-maintained USER.md/MEMORY.md and isolates
+    # structured runtime errors. This branch calls those APIs.
+    "octop-memory>=1.0.2",
     "octop-browser>=0.9.9",
     "langchain-mcp-adapters>=0.3.0",
     # mcp 2.x breaks langchain-mcp-adapters (RequestContext import); pin until adapters support it.

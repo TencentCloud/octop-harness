@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -1962,7 +1962,7 @@ wheels = [
 
 [[package]]
 name = "octop-harness"
-version = "1.0.3"
+version = "1.0.4"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents" },
@@ -2099,7 +2099,7 @@ requires-dist = [
     { name = "mss", marker = "extra == 'all'", specifier = ">=9.0" },
     { name = "mss", marker = "extra == 'desktop'", specifier = ">=9.0" },
     { name = "octop-browser", specifier = ">=0.9.9" },
-    { name = "octop-memory", specifier = ">=0.9.9" },
+    { name = "octop-memory", specifier = ">=1.0.2" },
     { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=0.1.16,<1.2" },
     { name = "oss2", marker = "extra == 'all'", specifier = ">=2.18" },
     { name = "oss2", marker = "extra == 'object-storage'", specifier = ">=2.18" },
@@ -2140,11 +2140,11 @@ dev = [
 
 [[package]]
 name = "octop-memory"
-version = "0.9.9"
+version = "1.0.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c9/60/e2636c772b291077d3c998fe46161bac3c5a969efe19995c5c34fb5e832b/octop_memory-0.9.9.tar.gz", hash = "sha256:ea98cde1660c1c2fd301159cbb2796de64547706ddded3564bc8d53a34d9d9e4", size = 558429, upload-time = "2026-09-24T07:40:04.292Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9b/e5/c0c9d2fcf6271bcd0711899b0d3cde1a5eceb8b2272e3a5e434ae5b49405/octop_memory-1.0.2.tar.gz", hash = "sha256:6234797fff4ea340cad2fc51b73f1e4e9931a8680ed448c1fe95d37c1e8ae961", size = 596906, upload-time = "2026-10-16T09:21:05.605Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/de/197e3822261d486874ac8033ab18edd4c238e4bc1521f395885853564241/octop_memory-0.9.9-py3-none-any.whl", hash = "sha256:0a68540d545bd3d6dcd83d8e116eebe6f88bf023e3ec35d4e70766b20b3a0e31", size = 371535, upload-time = "2026-09-24T07:39:59.48Z" },
+    { url = "https://files.pythonhosted.org/packages/91/ec/f51f5f91c1396d3f9dbdc9d4c5376fa102165c74b03df4b2f32ffbe6c601/octop_memory-1.0.2-py3-none-any.whl", hash = "sha256:e0b661883007f091c97cab4730031de87593d7bb11c94ec3d214ec37cbd71d71", size = 384679, upload-time = "2026-10-16T09:21:04.259Z" },
 ]
 
 [[package]]

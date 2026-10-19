@@ -1,14 +1,14 @@
 ---
 name: memory-management
-description: Maintain the harness memory files (USER.md, MEMORY.md, AGENTS.md) so that long-term knowledge persists across conversations.
+description: Save and recall durable knowledge through octop-memory; distinguish user-maintained MEMORY.md from workspace configuration.
 metadata:
   octop:
     label:
       zh: "记忆管理"
       en: "Memory"
     summary:
-      zh: "维护跨对话持久化的 USER、MEMORY 与 AGENTS 文件。"
-      en: "Keep USER, MEMORY, and AGENTS files durable across chats."
+      zh: "通过 octop-memory 保存与召回记忆，区分强记忆和工作区配置。"
+      en: "Save and recall octop-memory; distinguish strong memory from workspace configuration."
   harness:
     emoji: "💾"
 
@@ -16,46 +16,32 @@ metadata:
 
 # Memory Management
 
-The harness ships a set of memory files that the agent reads at the start of
-**every** conversation. Use them to store durable context that should survive
-across turns, threads, and even process restarts.
+Follow the memory rules in workspace `AGENTS.md`. Workspace context is loaded
+once per session and reused from its checkpoint; edits apply to new sessions.
 
 ## The files
 
-| File | Purpose | Update when... |
-|------|---------|----------------|
-| `USER.md` | Stable info about the human and the agent: names, roles, preferred tone, language, behavioral rules. | The user shares something personal, expresses a preference, or corrects your style. |
-| `MEMORY.md` | Project-level long-term notes: decisions, constraints, lessons, environment config. | A turn produces a fact you'll need next time. |
-| `AGENTS.md` | Project conventions (build commands, code style, repo layout). | The user clarifies how the project should be worked on. |
+| Destination | Purpose | Update through |
+|-------------|---------|----------------|
+| octop-memory | Durable facts, preferences, decisions and lessons | `memory_save`; background conversation distillation |
+| `MEMORY.md` | Strong memory always available in the session | The user edits it manually; agents leave it unchanged |
+| `USER.md` | User/agent dossier | The user edits it manually; agents are read-only, including onboarding |
+| `AGENTS.md` | Workspace configuration | An explicit configuration request |
 
-Transient day-of context (a single emotion, a passing event, the question of
-the moment) does **not** belong in any of these files — leave it in the
-conversation. Promote a fact only when you'll still need it next session.
+Do not create, edit, append to, overwrite or delete `MEMORY.md` or `USER.md` through file
+tools or shell commands. Do not use other Markdown files as a substitute for
+ordinary memory.
 
-## When to update memory
+## Saving and recalling
 
-- **Promotable signal**: the user says "remember that…", "from now on…",
-  corrects you on style, or shares contextual info you'd otherwise re-ask.
-- **Ambient signal**: you notice you keep re-deriving the same fact across
-  turns. Lift it into the appropriate memory file.
-
-Do **not** dump every chat into memory. The top-level files are read on every
-turn — bloat costs tokens for every future conversation. Only promote into
-`USER.md` / `MEMORY.md` when the fact is durable; transient context belongs
-in the conversation, not in a memory file.
-
-## How to update
-
-1. **`read_file`** the target memory file first. You're amending, not
-   recreating.
-2. **`edit_file`** for small additions: add a bullet under the right section.
-   Use **`append_file`** when you only need to add a new line at the end.
-3. Keep entries terse: 1-2 lines per fact. Use bullets, not paragraphs.
-4. Group by section (e.g. `## Coding style`, `## User preferences`). Create
-   a section before adding to it if one doesn't already exist.
-5. **Never use `write_file`** on any memory file: it overwrites everything.
-6. After updating, briefly tell the user you saved the memory and where, so
-   they can correct misinterpretations.
+1. When asked to remember something, call `memory_save` with one concise fact,
+   preserving its scope and qualifiers. Confirm only after the tool succeeds.
+2. If the tool is unavailable or fails, explain the limitation; leave workspace
+   files unchanged.
+3. Use `memory_search` for relevant history and `memory_get` to inspect sources.
+   Strong memory is already present in the session context.
+4. For an explicit `AGENTS.md` configuration edit, read the requested document
+   and edit only the relevant section.
 
 ## What not to put in memory
 
@@ -66,6 +52,5 @@ in the conversation, not in a memory file.
 
 ## Conflict handling
 
-If a new instruction contradicts an existing memory, **delete or update the
-old line** rather than appending. Two contradictory facts in memory will
-confuse you next time. When in doubt, ask the user which to keep.
+Prefer current user instructions and verified evidence over outdated stored
+facts. Leave user-maintained `MEMORY.md` edits to the user.

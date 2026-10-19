@@ -16,11 +16,12 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 
 import deepagents
-from langchain.agents.middleware import ModelRetryMiddleware, PIIMiddleware
+from deepagents.middleware.memory import MemoryMiddleware as DeepAgentsMemoryMiddleware
+from langchain.agents.middleware import PIIMiddleware
 
 from octop_harness.backends import resolve_backend, spec_supports_execution
 from octop_harness.backends.utils import DEFENSIVE_OP_ERRORS
-from octop_harness.backends.workspace import BackendWorkspace
+from octop_harness.backends.workspace import DEFAULT_MEMORY_FILES, BackendWorkspace
 from octop_harness.builtin.tools import browser_use, web_fetch
 from octop_harness.builtin.tools.ask_user import ASK_USER_TOOL_NAME, ask_user_question
 from octop_harness.builtin.tools.current_time import CurrentTimeTool
@@ -40,6 +41,7 @@ from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
 from octop_harness.middleware.mcp_tools import MCPToolMiddleware
 from octop_harness.middleware.media_offload import MediaOffloadMiddleware
+from octop_harness.middleware.model_retry import ModelRetryMiddleware
 from octop_harness.middleware.model_router import ModelRouterMiddleware
 from octop_harness.middleware.model_settings import ModelSettingsMiddleware
 from octop_harness.middleware.pii import detect_pii
@@ -177,6 +179,7 @@ class HarnessAgent:
             config=config,
             workspace_path=self._workspace_path,
             model_factory=self._model_factory,
+            workspace=self._workspace,
         )
         self._langfuse_callbacks: list[Any] | None = None
         self._protocols: dict[str, ChatProtocol] = {}
@@ -1261,10 +1264,27 @@ class HarnessAgent:
     def _init_graph(self) -> None:
         """Compile the deep-agent graph and snapshot the seed model ref."""
         # Promote empty-tuple (bootstrap suppression) to None once bootstrap completes,
-        # so memory_paths() scans the workspace for standard files (AGENTS.md, MEMORY.md, …).
+        # so the unified loader includes the standard workspace context files.
         memory_override = None if self._config.memory == () and self.is_bootstrapped() else self._config.memory
+        # Strong memory is user-owned context even when bootstrap or structured
+        # memory is disabled. Keep declared paths stable, including absent files;
+        # deepagents owns loading, session snapshots, formatting and caching.
+        memory_files = DEFAULT_MEMORY_FILES if memory_override is None else memory_override
+        memory_paths = self._workspace.memory_paths(
+            tuple(dict.fromkeys([*memory_files, "MEMORY.md", "USER.md"])), include_missing=True
+        )
         tools = self._build_tools()
-        middleware = self._build_middleware()
+        middleware = [
+            DeepAgentsMemoryMiddleware(
+                backend=self._backend,
+                sources=memory_paths,
+                # AGENTS.md owns memory policy. Suppress upstream's default
+                # edit_file learning instructions, keeping only the wrapper.
+                system_prompt="<agent_memory>\n{agent_memory}\n</agent_memory>",
+                add_cache_control=True,
+            ),
+            *self._build_middleware(),
+        ]
         if self._config.todos_enabled:
             from langchain.agents.middleware import TodoListMiddleware
 
@@ -1273,7 +1293,7 @@ class HarnessAgent:
             tools=tools,
             middleware=middleware,
             skills=self._workspace.skill_paths(extra=self._config.skills_dir),
-            memory=self._workspace.memory_paths(memory_override),
+            memory=memory_paths,
         )
         # Bound at compile time; ModelRouterMiddleware swaps on every call.
         self._seed_model_ref = self._config.pick_default_model_ref()
@@ -1447,7 +1467,8 @@ class HarnessAgent:
         skill_filter → tool_guard → filesystem_guard (outside-root soft-fail; deny
         rules when permissions + execution backend) → mcp_tools → retry →
         pii → media_offload → checkpoint_ts → memory → user middleware → team →
-        conversation_mode → tools_filter → tool search → task tool ordering → context_usage.
+        conversation_mode → tools_filter → decision (only when enabled) → tool search →
+        task tool ordering → context_usage.
 
         ``MediaOffloadMiddleware`` runs **after** PII (so PII still sees plain
         text) and **before** ``MemoryMiddleware`` so session logs store the
@@ -1486,6 +1507,7 @@ class HarnessAgent:
                 fs_permissions,
                 root_dir=root_dir,
                 workspace_dir=cfg.workspace_dir,
+                workspace=self._workspace,
             )
         )
 
@@ -1504,6 +1526,7 @@ class HarnessAgent:
                     max_retries=cfg.model_retry_max_retries,
                     initial_delay=cfg.model_retry_initial_delay,
                     max_delay=cfg.model_retry_max_delay,
+                    on_failure="error",
                 )
             )
 
@@ -1558,6 +1581,20 @@ class HarnessAgent:
 
         chain.append(ConversationModeMiddleware())
         chain.append(ToolsFilterMiddleware(config=cfg))
+
+        from octop_harness.decision import decision_active
+
+        decision = cfg.decision
+        if decision is not None and decision_active(decision):
+            from octop_harness.middleware.decision import DecisionMiddleware
+
+            chain.append(
+                DecisionMiddleware(
+                    config=decision,
+                    team=self._team_manager,
+                    language=cfg.language,
+                )
+            )
 
         # Search only the final model-visible tool set. In particular, this
         # must run after MCP and user filtering so hidden tools cannot leak

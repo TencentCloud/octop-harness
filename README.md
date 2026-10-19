@@ -80,7 +80,26 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
 - 17 user-editable provider presets, including Hunyuan, Kimi, GLM, DeepSeek, MiniMax, and Moonshot.
 
 #### Memory (tiered)
-- Each turn is captured as **L0 raw events**, then distilled asynchronously into **L2 atoms** (`AtomCard`s) and **L3 entity pages**.
+- `MEMORY.md` (strong memory) and `USER.md` (profile) are user-maintained, including
+  onboarding. Their full contents are snapshotted
+  once per session and reused from the checkpoint, even when structured memory
+  is disabled. Manual edits apply to new sessions. Agent file
+  tools cannot edit them. Hosts can expose manual editors.
+- Workspace context loading, session snapshots, prompt formatting and cache
+  breakpoints use deepagents' native `MemoryMiddleware`. Memory rules live in
+  workspace `AGENTS.md`; the existing filesystem guard enforces both documents'
+  file-tool write protection. Template updates do not overwrite existing user
+  documents; update legacy auto-writing rules in `AGENTS.md` / `USER.md` when migrating.
+- Ordinary saves and automatic promotions check current owner documents through
+  `BackendWorkspace`, without refreshing the chat snapshot. Proven conflicts
+  retire the old atom and create a replacement review candidate, retaining evidence.
+  `memory_save` reports conflicts or incomplete checks. Duplicates remain stored
+  and are suppressed against matching session context. Uncertain checks leave facts
+  active. File-tool guards complement the host's shell/OS permissions.
+- Remember requests use `memory_save(content, topic)` to persist directly through
+  octop-memory; `memory_search` / `memory_get` retrieve additional history.
+- Eligible conversation content is captured as **L0 raw events**, then distilled asynchronously into **L2 atoms** (`AtomCard`s) and **L3 entity pages**. Runtime failures are excluded; normal troubleshooting knowledge and explicit remember requests remain eligible.
+- Model failures raise after retries; retry eligibility follows LangChain's defaults, with the existing retry budget and backoff settings. Callers must handle exceptions from `call()` / streaming. Checkpoints retain failed tasks without adding a synthetic assistant reply. Hosts display errors separately; automatic team failure notifications use `configurable.octop_memory_capture_exclude=true` to keep diagnostics out of memory.
 - Powered by the octop-memory middleware; memory travels with the workspace.
 - Recall is frozen once per user turn and appended to the model-facing user message,
   keeping the system prompt stable. Checkpoints preserve recall snapshots for exact
@@ -380,6 +399,18 @@ Thanks to all contributors:
 <a href="https://github.com/TencentCloud/octop-harness/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=TencentCloud/octop-harness" />
 </a>
+
+### Channel plugins
+
+A `kind: channel` manifest may register a channel class with
+`ctx.channel("acme", AcmeChannel, label="Acme IM", fields=[...])`.
+The class must inherit the hosts gateway `BaseChannel`; factories are not
+accepted. Harness stores metadata without importing the gateway. The host
+registers implementations before constructing persisted channels. Plugin IDs
+own their kinds: updates replace the same plugin, and conflicting owners are
+rejected. Hosts must stop affected live instances before replacing or removing
+registrations. Installing this library alone does not add channels to a host
+that has not implemented the bridge.
 
 ## Persistent MCP sessions
 

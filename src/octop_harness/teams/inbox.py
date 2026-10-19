@@ -291,8 +291,9 @@ class HarnessAgentInboxManager:
                         status = "failed"
                         error_text = result_text
                         result_text = None
-                except ASYNC_DEFENSIVE_OP_ERRORS as exc:
-                    error_text = str(exc)
+                except (Exception, asyncio.CancelledError) as exc:
+                    # Provider SDK errors do not share the backend I/O error base.
+                    error_text = f"{type(exc).__name__}: {exc}"
                     status = "failed"
         finally:
             self._release_lock(self._target_locks, self._target_refs, msg.target_agent_id, target_lock)
@@ -315,7 +316,7 @@ class HarnessAgentInboxManager:
                     return
                 if reply_text is None and status == "done":
                     status = "failed"
-                    error_text = error_text or "source agent reply failed"
+                    error_text = error_text or msg.error_text or "source agent reply failed"
                 await self._finish(msg, status=status, reply_text=reply_text, error_text=error_text)
         finally:
             self._release_lock(self._source_locks, self._source_refs, source_key, source_lock)
@@ -369,10 +370,12 @@ class HarnessAgentInboxManager:
                 source="inbox",
                 thread_id=msg.source_thread_id,
                 session_key=session_key,
+                configurable={"octop_memory_capture_exclude": True} if error_text else None,
             )
             reply = await self._call_agent(msg.source_agent_id, source_req)
             return extract_call_response(reply) if isinstance(reply, dict) else ""
-        except ASYNC_DEFENSIVE_OP_ERRORS:
+        except (Exception, asyncio.CancelledError) as exc:
+            msg.error_text = f"{type(exc).__name__}: {exc}"
             logger.exception("inbox source reply failed id=%s", msg.id)
             return None
 

@@ -16,6 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve object, array and enum arguments in MCP tool schemas.
 - Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
 
+## [1.0.4] - 2026-10-16
+
+### 新增
+
+- 插件系统支持 channel 类型：插件可注册通道实现及展示元数据，宿主按注册所有权收集；同类型冲突时保留先注册的通道。
+- 可选决策模型在主模型开口前筛选技能、工具和队友；决策调用失败时保留完整目录。后续轮次打分时带上最近对话，状态预算溢出时仍保留最新消息。
+- `USER.md` 与 `MEMORY.md` 由用户手动维护，文件工具禁止 Agent 写入；首次引导只引导用户填写档案。两份文档每个会话加载一次并复用快照，手动修改对新会话生效。用户说「记住」时通过 `memory_save` 写入 octop-memory，并依赖 `octop-memory>=1.0.2`。
+- 记忆写入或晋升后与当前手动文档核对。召回按实际会话快照过滤重复；明确冲突以手动文档为准并转为候选审核，同时提示用户。
+
+### 修复
+
+- 本地 Laya 的 CPU 决策批次可能需要约二十秒，通用十五秒客户端超时会导致反复回退到未变更结果；放宽该超时以便批次完成。
+
+### 变更
+
+- 工作区上下文复用 deepagents 原生 `MemoryMiddleware` 的读取、会话快照、提示词格式和缓存断点。加载器只包裹文件内容，`MEMORY.md` 写保护并入现有 `FilesystemGuardMiddleware`，移除单独的记忆规则模块。
+- 模型重试耗尽后抛出异常（`on_failure="error"`），由 checkpoint 与宿主记录失败；沿用原有重试判定、次数与退避。团队任务捕获 SDK 异常并释放任务锁；自动失败通知不进入记忆采集。
+
 ## [1.0.3] - 2026-10-14
 
 ### 新增
@@ -29,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ChatGPT Codex 端点使用无状态流式 Responses 请求，将主系统提示词映射到 instructions，后续系统消息保留为 developer；显式 instructions 原样保留，并保留多轮工具历史；将 langchain-openai 最低版本提高至 1.3.3，避免无状态历史引用未存储条目。
 - 减少启动和对话过程中的重复诊断日志，保留需要关注的错误与告警。
+
+### 修复
+
+- shell 后端不再按宿主 locale 解码子进程输出：中文 Windows（cp936）下 `execute` 的 UTF-8 输出会被静默丢弃（`<no output>` + 退出码 0），现改为按 UTF-8 → 宿主 locale → GBK 依次解码，全都不匹配时才降级为替换字符（TencentCloud/Octop#1959）。
 
 ## [1.0.2] - 2026-10-09
 

@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from octop_harness.agent import HarnessAgent
+from octop_harness.backends.workspace import DEFAULT_MEMORY_FILES
 from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
 from octop_harness.middleware.bootstrap import BOOTSTRAP_FILENAME, BOOTSTRAPPED_MARKER
 from octop_harness.middleware.skill_filter import render_slash_skill_prompt
@@ -173,11 +174,15 @@ class TestConstruction:
 
         mw_classes = [type(m).__name__ for m in captured["middleware"]]
         assert "ModelRouterMiddleware" in mw_classes
-        # MemoryMiddleware handles both the searchable Memory store and the
-        # daily JSONL session log; both default-on so it always appears.
-        assert "MemoryMiddleware" in mw_classes
+        # The octop-memory adapter also owns the default-on JSONL session log.
+        assert "HarnessMemoryMiddleware" in [m.name for m in captured["middleware"]]
         # ModelRetry and PII (api-key redaction) are on by default.
         assert "ModelRetryMiddleware" in mw_classes
+        retry = next(m for m in captured["middleware"] if type(m).__name__ == "ModelRetryMiddleware")
+        assert retry.on_failure == "error"
+        from langchain.agents.middleware import ModelRetryMiddleware
+
+        assert retry.retry_on is ModelRetryMiddleware().retry_on
         assert "PIIMiddleware" in mw_classes
 
     def test_can_disable_model_retry_and_pii(
@@ -220,8 +225,7 @@ class TestConstruction:
         tmp_path: Path,
         mock_model_factory: Callable[[], Any],
     ) -> None:
-        """When both Memory and the JSONL session log are off, the
-        MemoryMiddleware shouldn't be installed at all."""
+        """Disabling ordinary memory and JSONL keeps only workspace context."""
         cfg = HarnessAgentConfig(
             workspace_dir=tmp_path,
             backend={"type": "filesystem", "root_dir": str(tmp_path), "virtual_mode": False},
@@ -247,7 +251,8 @@ class TestConstruction:
             HarnessAgent(cfg)
 
         mw_classes = [type(m).__name__ for m in captured["middleware"]]
-        assert "MemoryMiddleware" not in mw_classes
+        assert "HarnessMemoryMiddleware" not in [m.name for m in captured["middleware"]]
+        assert "MemoryMiddleware" in [m.name for m in captured["middleware"]]
         assert "ModelRouterMiddleware" in mw_classes
         assert "SkillFilterMiddleware" in mw_classes
         assert "ToolsFilterMiddleware" in mw_classes
@@ -374,7 +379,7 @@ class TestConstruction:
         assert "/.octop/workspaces/NBR8CP/.octop/skills" in skills
         assert not any(str(root) in path for path in skills)
 
-    def test_memory_includes_only_existing_files(
+    def test_memory_sources_include_files_created_after_graph_construction(
         self,
         cfg: HarnessAgentConfig,
         mock_model_factory: Callable[[], Any],
@@ -391,7 +396,12 @@ class TestConstruction:
             HarnessAgent(cfg)
 
         memory = captured.get("memory")
-        assert memory == [str(Path(cfg.workspace_dir) / "AGENTS.md")]
+        assert memory == [str(Path(cfg.workspace_dir) / name) for name in DEFAULT_MEMORY_FILES]
+        (Path(cfg.workspace_dir) / "MEMORY.md").write_text("new manual memory", encoding="utf-8")
+        loader = next(m for m in captured["middleware"] if m.name == "MemoryMiddleware")
+        loaded = loader.before_agent({}, MagicMock(), {})
+        assert loaded is not None
+        assert set(loaded["memory_contents"].values()) == {"# project rules", "new manual memory"}
 
 
 # ---------------------------------------------------------------------------

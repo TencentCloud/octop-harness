@@ -1,4 +1,4 @@
-"""Filesystem tool boundary: path deny rules + outside-root soft failures.
+"""Filesystem boundary: path denies, user-owned memory and soft failures.
 
 deepagents ``FilesystemMiddleware`` rejects ``permissions`` when the backend
 implements ``SandboxBackendProtocol`` (``local_shell``). Harness still needs
@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 import re
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends.utils import validate_path
 from deepagents.middleware.filesystem import FilesystemPermission
@@ -27,6 +28,9 @@ from langchain_core.messages.tool import ToolCall
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 from wcmatch import glob as wcglob
+
+if TYPE_CHECKING:
+    from octop_harness.backends.workspace import BackendWorkspace
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,11 @@ _FS_TOOL_OPS: dict[str, Literal["read", "write"]] = {
     "delete": "write",
 }
 _FS_WCMATCH_FLAGS = wcglob.BRACE | wcglob.GLOBSTAR
+_MEMORY_WRITE_TOOLS = frozenset({"write_file", "edit_file", "append_file", "delete", "delete_file", "move_file"})
+_MEMORY_READ_ONLY_MESSAGE = (
+    "{filename} is user-maintained memory. Edit it manually in the memory dashboard. "
+    "Use memory_save to remember information in octop-memory."
+)
 
 _OUTSIDE_ROOT_REMEDIATION = (
     "The path is outside this agent's storage root. "
@@ -117,6 +126,10 @@ def _tool_base_name(name: str) -> str:
     trimmed = name.strip()
     slash = trimmed.rfind("/")
     return trimmed[slash + 1 :] if slash >= 0 else trimmed
+
+
+def _normalized_memory_path(path: str) -> str:
+    return posixpath.normpath(path.strip().replace("\\", "/")).casefold()
 
 
 def _path_from_tool_args(tool_name: str, params: dict[str, Any]) -> str | None:
@@ -257,9 +270,10 @@ def _tool_call_meta(request: ToolCallRequest) -> tuple[str, str]:
 
 
 class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
-    """Filesystem tool boundary: optional deny rules + outside-root soft-fail.
+    """Filesystem tool boundary: user-owned memory, denies and soft failures.
 
-    Always safe to mount with an empty permission list (soft-fail only).
+    When a workspace is bound, MEMORY.md / USER.md writes are blocked independently of
+    optional permission rules and shell-command guard settings.
     Outside-root softening applies only to filesystem tools (``ls``,
     ``read_file``, …), not arbitrary tool ValueErrors.
     """
@@ -270,10 +284,12 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         *,
         root_dir: str | Path | None = None,
         workspace_dir: str | Path | None = None,
+        workspace: BackendWorkspace | None = None,
     ) -> None:
         self._permissions = list(permissions or ())
         self._root_dir = root_dir
         self._workspace_dir = workspace_dir
+        self._workspace = workspace
         self._rewritten_logged: set[str] = set()
 
     def _rewrite_legacy_windows_request(self, request: ToolCallRequest) -> ToolCallRequest:
@@ -318,11 +334,34 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         request.tool_call = new_call
         return request
 
+    def _memory_write_block_reason(self, tool_name: str, params: dict[str, Any]) -> str | None:
+        workspace = self._workspace
+        if workspace is None or _tool_base_name(tool_name) not in _MEMORY_WRITE_TOOLS:
+            return None
+        protected: dict[str, str] = {}
+        for filename in ("MEMORY.md", "USER.md"):
+            canonical = workspace.system_rel(filename)
+            for path in (filename, f"/{filename}", canonical, f"/{canonical}", workspace.resolve_path(filename)):
+                protected[_normalized_memory_path(path)] = filename
+        for key in ("file_path", "path", "source", "destination"):
+            raw = params.get(key)
+            if not isinstance(raw, str):
+                continue
+            matched_filename = protected.get(_normalized_memory_path(raw))
+            if matched_filename is None:
+                try:
+                    matched_filename = protected.get(_normalized_memory_path(workspace.resolve_path(raw)))
+                except (OSError, ValueError, PermissionError):
+                    continue
+            if matched_filename is not None:
+                return _MEMORY_READ_ONLY_MESSAGE.format(filename=matched_filename)
+        return None
+
     def _blocked_message(self, request: ToolCallRequest) -> ToolMessage | None:
         tool_name, call_id = _tool_call_meta(request)
         raw_args: Any = request.tool_call.get("args") or {}
         params: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
-        reason = filesystem_guard_block_reason(
+        reason = self._memory_write_block_reason(tool_name, params) or filesystem_guard_block_reason(
             self._permissions,
             tool_name=tool_name,
             params=params,

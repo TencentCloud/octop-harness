@@ -136,6 +136,22 @@ class TestBackendWorkspace:
         memory = ws.memory_paths(DEFAULT_MEMORY_FILES)
         assert memory == [str(tmp_path / "AGENTS.md")]
 
+    def test_memory_paths_can_keep_missing_sources(self, fs_backend: Any, tmp_path: Path) -> None:
+        ws = BackendWorkspace(fs_backend, tmp_path)
+        paths = ws.memory_paths(DEFAULT_MEMORY_FILES, include_missing=True)
+        assert paths == [str(tmp_path / name) for name in DEFAULT_MEMORY_FILES]
+        assert ws.memory_paths() == []
+
+    def test_missing_memory_sources_use_virtual_workspace_paths(self, tmp_path: Path) -> None:
+        from deepagents.backends import FilesystemBackend
+
+        root = tmp_path / "home"
+        workspace = root / "agents" / "example"
+        workspace.mkdir(parents=True)
+        backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
+        ws = BackendWorkspace(backend, workspace, system_files_path=".octop")
+        assert ws.memory_paths(["MEMORY.md"], include_missing=True) == ["/agents/example/MEMORY.md"]
+
     def test_init_workspace_seeds_templates(self, fs_backend: Any, tmp_path: Path) -> None:
         ws = BackendWorkspace(fs_backend, tmp_path)
         result = ws.init_workspace(language="en", include_skills=False)

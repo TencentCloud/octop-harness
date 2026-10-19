@@ -65,6 +65,40 @@ def _make_runtime(thread_id: str = "t1", user: str = "alice") -> MagicMock:
 
 
 class TestMemoryMiddleware:
+    def test_failed_team_notification_is_only_logged(
+        self, mw: MemoryMiddleware, service: _SpyService, tmp_path: Path
+    ) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        runtime = _make_runtime()
+        runtime.config["configurable"]["octop_memory_capture_exclude"] = True
+        user = HumanMessage(content="System task notification: child failed authentication (401).")
+        reply = AIMessage(content="The member failed. Please update its credentials.")
+        mw.before_model(_make_state([user]), runtime)
+        mw.after_model(_make_state([user, reply]), runtime)
+        assert service.capture_calls == []
+        assert any("401" in path.read_text() for path in (tmp_path / "logs").rglob("*.jsonl"))
+
+    def test_runtime_error_keeps_user_input_without_capturing_error(
+        self, mw: MemoryMiddleware, service: _SpyService, tmp_path: Path
+    ) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        user_msg = HumanMessage(content="记住: 排障时先检查服务状态。")
+        failure = AIMessage(
+            content="Model call failed after 3 attempts with AuthenticationError: 401 token_expired",
+            response_metadata={"octop_runtime_error": True},
+        )
+        runtime = _make_runtime()
+        mw.before_model(_make_state([user_msg]), runtime)
+        mw.after_model(_make_state([user_msg, failure]), runtime)
+
+        assert service.wait_for_capture()
+        assert service.capture_calls[0]["user"] == user_msg.content
+        assert service.capture_calls[0]["assistant"] is None
+        logs = list((tmp_path / "logs").rglob("*.jsonl"))
+        assert any("token_expired" in path.read_text() for path in logs)
+
     def test_after_model_captures_visible_turn(self, mw: MemoryMiddleware, service: _SpyService) -> None:
         from langchain_core.messages import AIMessage, HumanMessage
 

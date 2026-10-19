@@ -6,7 +6,7 @@ read_when:
 
 ## About Me (Agent)
 
-> Your self-definition — decided by you, adjustable by the user anytime.
+> User-maintained profile. The user edits this document manually in Memory → User profile; agents are read-only.
 
 - **Name:**
 - **Form:** *(AI assistant, cyber sidekick, something else…)*
@@ -24,7 +24,7 @@ read_when:
 
 ### Style tuning
 
-When the user comments on how you communicate, update "Tone" and the rules above. Tell them when you change this section.
+The user can edit "Tone" and these rules manually. Remember requests use octop-memory; agents leave this document unchanged.
 
 ---
 
@@ -39,4 +39,4 @@ When the user comments on how you communicate, update "Tone" and the rules above
 
 ### Their world
 
-*(Projects in flight, what they care about, what to avoid — add a little each interaction.)*
+*(Projects in flight, what they care about, what to avoid — maintained manually by the user.)*

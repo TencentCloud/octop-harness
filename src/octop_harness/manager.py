@@ -22,6 +22,7 @@ from octop_harness.observability.logging import (
     LogLevel,
     resolve_log_dir,
     setup_logging,
+    use_host_logging,
 )
 from octop_harness.providers import ProviderPreset, load_provider_templates
 from octop_harness.registry import AgentEntry, AgentRegistry, generate_agent_id
@@ -49,7 +50,9 @@ class HarnessAgentManager:
     (``log_dir`` / ``log_level`` / rotation), not on each agent config.
     One process should use one ``log_dir``: a later manager (or
     ``setup_logging`` call) with a different path replaces the package
-    file handler.
+    file handler. Pass ``file_logging=False`` when the host process already
+    writes a log file; records then propagate instead of opening
+    ``YYYY-MM-DD.log``.
     """
 
     def __init__(
@@ -63,6 +66,7 @@ class HarnessAgentManager:
         log_level: LogLevel | None = None,
         log_max_bytes: int = DEFAULT_LOG_MAX_BYTES,
         log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
+        file_logging: bool = True,
     ) -> None:
         from octop_harness.llm.factory import ChatModelFactory
 
@@ -72,13 +76,20 @@ class HarnessAgentManager:
         self._cancel_events: dict[tuple[str, str], asyncio.Event] = {}
         self._langfuse: LangfuseTracer | None = LangfuseTracer(langfuse) if langfuse and langfuse.configured else None
         self._security_policy: SecurityPolicy = SecurityPolicy.defaults()
-        self._log_dir = resolve_log_dir(log_dir)
-        self._log_file = setup_logging(
-            self._log_dir,
-            level=log_level,
-            max_bytes=log_max_bytes,
-            backup_count=log_backup_count,
-        )
+        self._log_dir: Path | None
+        self._log_file: Path | None
+        if file_logging:
+            self._log_dir = resolve_log_dir(log_dir)
+            self._log_file = setup_logging(
+                self._log_dir,
+                level=log_level,
+                max_bytes=log_max_bytes,
+                backup_count=log_backup_count,
+            )
+        else:
+            use_host_logging()
+            self._log_dir = None
+            self._log_file = None
         self._team = TeamManager(self._registry)
         self._team.bind_invocation_hooks(
             enrich_request=self._enrich_request,

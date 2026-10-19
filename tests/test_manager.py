@@ -1,6 +1,7 @@
 # tests/test_manager.py
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -83,6 +84,19 @@ class TestAgentManagerCRUD:
         mgr = HarnessAgentManager(log_dir=log_dir)
         assert mgr._log_dir == log_dir.resolve()
         assert log_dir.is_dir()
+
+    def test_file_logging_disabled_does_not_open_a_log_file(self, tmp_path: Path) -> None:
+        from octop_harness.observability.logging import teardown_logging
+
+        log_dir = tmp_path / "app-logs"
+        try:
+            mgr = HarnessAgentManager(log_dir=log_dir, file_logging=False)
+            assert mgr._log_file is None
+            assert mgr._log_dir is None
+            assert not log_dir.exists()
+            assert logging.getLogger("octop_harness").handlers == []
+        finally:
+            teardown_logging()
 
     def test_relative_log_dir_anchors_to_library_default(self) -> None:
         mgr = HarnessAgentManager(log_dir="nested")

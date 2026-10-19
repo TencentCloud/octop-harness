@@ -36,11 +36,43 @@ class SkillRegistration:
 
 
 @dataclass
+class ChannelRegistration:
+    """A channel class contributed by a plugin.
+
+    ``kind`` is the channel-type string persisted in the control-plane
+    database (e.g. ``"octo"``) and passed to the gateway's channel manager.
+    ``label`` / ``icon`` / ``intro_url`` are display hints for the dashboard
+    channel catalogue; ``fields`` is an optional form schema (same shape as
+    the dashboard's ``ChannelField`` dicts) so the drawer can render real
+    inputs instead of the raw-JSON fallback.
+    """
+
+    plugin_id: str
+    kind: str
+    channel_cls: Any
+    label: str = ""
+    icon: str = ""
+    intro_url: str = ""
+    fields: list[ConfigField] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        kind = str(self.kind).strip().lower()
+        if not kind:
+            raise ValueError("channel kind must not be empty")
+        self.kind = kind
+        if not isinstance(self.channel_cls, type):
+            raise ValueError("channel_cls must be a class")
+        if self.fields and not isinstance(self.fields, list):
+            raise ValueError("fields must be a list of field dicts")
+
+
+@dataclass
 class LoadedPlugin:
     manifest: PluginManifest
     source_path: Path
     tools: list[ToolRegistration] = field(default_factory=list)
     middleware: list[MiddlewareRegistration] = field(default_factory=list)
+    channels: list[ChannelRegistration] = field(default_factory=list)
     skills_dir: Path | None = None
     diagnostics: list[str] = field(default_factory=list)
     context: Any | None = None
@@ -67,6 +99,16 @@ class PluginRegistry:
         self._plugins.clear()
 
     def register(self, loaded: LoadedPlugin) -> None:
+        if any(reg.plugin_id != loaded.manifest.id for reg in loaded.channels):
+            raise ValueError("channel registration owner must match plugin ID")
+        kinds = [reg.kind for reg in loaded.channels]
+        if len(kinds) != len(set(kinds)):
+            raise ValueError("duplicate channel kind in plugin")
+        for plugin in self._plugins.values():
+            if plugin.manifest.id == loaded.manifest.id:
+                continue
+            if set(kinds).intersection(reg.kind for reg in plugin.channels):
+                raise ValueError("channel kind is already owned by another plugin")
         self._plugins[loaded.manifest.id] = loaded
 
     def unregister(self, plugin_id: str) -> LoadedPlugin | None:
@@ -85,6 +127,20 @@ class PluginRegistry:
         out: list[ToolRegistration] = []
         for plugin in self._plugins.values():
             out.extend(plugin.tools)
+        return out
+
+    def all_channels(self) -> list[ChannelRegistration]:
+        """Channel registrations from loaded plugins; register() rejects conflicting owners."""
+        out: list[ChannelRegistration] = []
+        seen: set[str] = set()
+        for plugin in self._plugins.values():
+            if plugin.manifest.kind != "channel":
+                continue
+            for reg in plugin.channels:
+                if reg.kind in seen:
+                    continue
+                seen.add(reg.kind)
+                out.append(reg)
         return out
 
     def build_middleware_chain(self, *, global_enabled: dict[str, bool] | None = None) -> list[Any]:
