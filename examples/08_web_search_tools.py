@@ -42,6 +42,7 @@ _ENV_LABELS = {
     "google": ("GOOGLE_API_KEY", "GOOGLE_CSE_ID"),
     "kimi": ("MOONSHOT_API_KEY",),
     "searchfree": (),  # zero-config public fallback
+    "you": (),  # keyless when named explicitly; YDC_API_KEY optional
 }
 
 

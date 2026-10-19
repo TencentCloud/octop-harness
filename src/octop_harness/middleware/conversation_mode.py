@@ -44,6 +44,7 @@ ASK_READ_TOOLS: frozenset[str] = frozenset(
         "google_search",
         "kimi_search",
         "searchfree_search",
+        "you_search",
         "current_time",
     }
 )

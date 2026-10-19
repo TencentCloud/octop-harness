@@ -4,7 +4,8 @@ Each provider declares a *required env-var tuple*. A provider is
 considered "available" iff every variable in its tuple is non-empty.
 Providers with an empty tuple (``()``) need no configuration and are
 therefore always available — that's the case for ``searchfree``, the
-zero-config public fallback.
+zero-config public fallback. ``you`` also needs no env vars when named
+explicitly, but only joins ``auto`` once ``YDC_API_KEY`` is set.
 
 The registry exposes two entry points:
 
@@ -33,7 +34,7 @@ import os
 from collections.abc import Iterable
 from typing import Any, Literal, cast
 
-WebSearchToolName = Literal["tavily", "brave", "google", "kimi", "searchfree"]
+WebSearchToolName = Literal["tavily", "brave", "google", "kimi", "searchfree", "you"]
 
 # ``provider name → (required env vars, lazy loader returning a langchain tool)``.
 # Loaders are deliberately lazy so importing this module is cheap.
@@ -69,6 +70,12 @@ def _load_searchfree() -> Any:
     return searchfree_search
 
 
+def _load_you() -> Any:
+    from octop_harness.builtin.tools.web_search.you import you_search
+
+    return you_search
+
+
 WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     "tavily": (("TAVILY_API_KEY",), _load_tavily),
     "brave": (("BRAVE_API_KEY",), _load_brave),
@@ -77,6 +84,16 @@ WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     # ``searchfree`` needs no env vars — empty tuple makes it always
     # available under the ``auto`` policy.
     "searchfree": ((), _load_searchfree),
+    # ``you`` works without a key when named explicitly; ``YDC_API_KEY``
+    # raises its limits. See ``_AUTO_REQUIRED_ENV`` for the ``auto`` gate.
+    "you": ((), _load_you),
+}
+
+# Providers that need no env vars when named explicitly but should only join
+# the ``auto`` policy once the user has configured them. This keeps the
+# default tool set unchanged for users who never set the variable.
+_AUTO_REQUIRED_ENV: dict[str, tuple[str, ...]] = {
+    "you": ("YDC_API_KEY",),
 }
 
 
@@ -99,8 +116,8 @@ def load_web_search_tools(
         return []
     if policy is True or policy == "auto":
         out: list[Any] = []
-        for env_vars, loader in WEB_SEARCH_PROVIDERS.values():
-            if _provider_available(env_vars):
+        for name, (env_vars, loader) in WEB_SEARCH_PROVIDERS.items():
+            if _provider_available(env_vars + _AUTO_REQUIRED_ENV.get(name, ())):
                 out.append(loader())
         return out
     if policy == "all":
