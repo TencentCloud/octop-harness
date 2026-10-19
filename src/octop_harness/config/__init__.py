@@ -762,10 +762,12 @@ class HarnessAgentConfig:
     # Auto by default: every provider whose required env vars are set is
     # loaded. ``searchfree`` (zero-config) is always included. Accepted values:
     #   - ``"auto"`` / ``True`` (default): every provider whose required env
-    #     vars are set is loaded (tavily / brave / google / kimi / searchfree).
+    #     vars are set is loaded (tavily / brave / google / kimi / searchfree,
+    #     plus ``you`` once ``YDC_API_KEY`` is set).
     #   - ``False``: no web-search tools loaded.
     #   - ``"all"``: every provider is loaded; the ones missing env vars
     #     return a plain-text error string when invoked.
+    #   - ``["you"]`` works without a key (free tier, 100 searches a day).
     #   - ``["tavily", "kimi"]``: an explicit list. Unknown names raise
     #     ``ValueError``; missing env vars raise ``RuntimeError`` so
     #     misconfiguration surfaces at agent construction time.

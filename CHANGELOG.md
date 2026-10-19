@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 新增可选的 `you` 网页搜索 provider（`you_search`）。显式启用时无需 API key（免费额度每天 100 次，按 IP 计）；设置 `YDC_API_KEY` 后使用付费端点并提高额度。仅在设置 `YDC_API_KEY` 时加入 `auto` 策略，默认工具集不变。
+
 ## [1.0.4] - 2026-10-16
 
 ### 新增
