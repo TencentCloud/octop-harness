@@ -35,6 +35,7 @@ from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.llm.session_header import session_header_scope
 from octop_harness.mcp import load_mcp_tools, mcp_tool_names, validate_mcp_default_servers
 from octop_harness.memory import MemoryRuntime
+from octop_harness.memory.policy import render_memory_policy_prompt
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
 from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
@@ -1487,6 +1488,7 @@ class HarnessAgent:
                 root_dir=root_dir,
                 workspace_dir=cfg.workspace_dir,
                 workspace=self._workspace,
+                protect_user_memory=cfg.memory_enabled,
             )
         )
 
@@ -1750,7 +1752,13 @@ class HarnessAgent:
 
         directive += f" {EXPLICIT_VIRTUAL_PATH_PROMPT}" if cfg.explicit_virtual_paths else ""
         kwargs["system_prompt"] = (
-            base_prompt + "\n\n" + directive + "\n\n" + render_slash_skill_prompt(language=cfg.language)
+            base_prompt
+            + "\n\n"
+            + directive
+            + "\n\n"
+            + render_memory_policy_prompt(language=cfg.language, memory_enabled=cfg.memory_enabled)
+            + "\n\n"
+            + render_slash_skill_prompt(language=cfg.language)
         ).strip()
         resolved_subagents = self._resolve_subagents(parent_tools=tools)
         if resolved_subagents:
