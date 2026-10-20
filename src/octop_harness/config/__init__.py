@@ -789,6 +789,11 @@ class HarnessAgentConfig:
 
     # —— Memory ——
     memory_enabled: bool = True
+    # Who may edit USER.md / MEMORY.md.
+    # ``auto`` locks them while structured memory is on and opens them when it
+    # is off. ``user`` keeps them owner-maintained. ``agent`` allows edits even
+    # while structured memory is on.
+    manual_document_policy: Literal["auto", "user", "agent"] = "auto"
     memory_backend: str | dict[str, Any] | Any = "sqlite"
     memory_backend_config: dict[str, Any] | None = None  # backend-specific settings
     memory_jsonl_enabled: bool = True
@@ -892,6 +897,10 @@ class HarnessAgentConfig:
         if self.memory_aux_extra_body is not None and not isinstance(self.memory_aux_extra_body, dict):
             raise ValueError("memory_aux_extra_body must be a dict when set")
 
+        if self.manual_document_policy not in ("auto", "user", "agent"):
+            raise ValueError(
+                f"manual_document_policy must be 'auto', 'user', or 'agent', got {self.manual_document_policy!r}",
+            )
         if self.language not in ("en", "zh"):
             raise ValueError(f"language must be 'en' or 'zh', got {self.language!r}")
         if self.tool_search_mode not in ("client", "native", "eager"):
@@ -1106,6 +1115,7 @@ class HarnessAgentConfig:
             "bootstrap_file": _path_to_str(self.bootstrap_file) if self.bootstrap_file else None,
             "bootstrap_marker": _path_to_str(self.bootstrap_marker) if self.bootstrap_marker else None,
             "memory_enabled": self.memory_enabled,
+            "manual_document_policy": self.manual_document_policy,
             "memory_backend_config": (
                 dict(self.memory_backend_config) if self.memory_backend_config is not None else None
             ),
