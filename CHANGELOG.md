@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 提前结束 agent 流（例如 human-in-the-loop 暂停）时关闭内层异步生成器，避免 `harness_session_id` 在另一个 context 里 reset 并打出 `ContextVar ... created in a different Context`（#89）。
 ### 变更
 
 - 记忆规则从工作区 `AGENTS.md` 模板移到编译期系统提示。结构化记忆开启时，Agent 用 `memory_save`，`USER.md` / `MEMORY.md` 只读；关闭时改为直接编辑这两份文件，删除和移动仍被拦住。`manual_document_policy` 可改成始终由用户维护，或即使记忆开启也允许 Agent 修改。已有工作区里的旧记忆段保留，系统提示优先于它们。

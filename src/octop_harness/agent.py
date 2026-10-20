@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import TracebackType
@@ -401,7 +401,7 @@ class HarnessAgent:
         self,
         source: AsyncIterator[Any],
         cancel_event: asyncio.Event,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Yield from *source* until *cancel_event* is set.
 
         Unlike a plain ``async for`` + flag check between chunks, this preempts a
@@ -482,7 +482,7 @@ class HarnessAgent:
         *,
         protocol: str | None = None,
         **kwargs: Any,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Stream protocol-formatted chunks from the graph.
 
         Yields dict chunks in the protocol's native format:
@@ -495,7 +495,7 @@ class HarnessAgent:
         req = ChatRequest.coerce(request)
         ctx = build_runtime_ctx(self, req)
 
-        async def _stream(prepared: ChatRequest) -> AsyncIterator[Any]:
+        async def _stream(prepared: ChatRequest) -> AsyncGenerator[Any, None]:
             messages, config, proto = self._prepare_call(prepared, protocol)
             thread_id = prepared.thread_id or ""
             cancel_event = asyncio.Event()
@@ -503,11 +503,14 @@ class HarnessAgent:
                 self._cancel_events[thread_id] = cancel_event
             try:
                 with session_header_scope(prepared.thread_id):
-                    async for chunk in self._iter_until_cancelled(
-                        proto.stream(messages, config, **kwargs),
-                        cancel_event,
-                    ):
-                        yield chunk
+                    async with contextlib.aclosing(
+                        self._iter_until_cancelled(
+                            proto.stream(messages, config, **kwargs),
+                            cancel_event,
+                        )
+                    ) as chunks:
+                        async for chunk in chunks:
+                            yield chunk
             finally:
                 if thread_id:
                     self._cancel_events.pop(thread_id, None)
@@ -536,7 +539,7 @@ class HarnessAgent:
         decisions: list[dict[str, Any]],
         *,
         protocol: str | None = None,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Resume a paused human-in-the-loop interrupt for *thread_id*."""
         proto = self._get_protocol(protocol)
         resume_stream = getattr(proto, "resume_stream", None)
@@ -546,8 +549,9 @@ class HarnessAgent:
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         async with self._invocation():
             with session_header_scope(thread_id):
-                async for chunk in resume_stream(thread_id, decisions, config):
-                    yield chunk
+                async with contextlib.aclosing(resume_stream(thread_id, decisions, config)) as chunks:
+                    async for chunk in chunks:
+                        yield chunk
 
     async def stream_events(
         self,
