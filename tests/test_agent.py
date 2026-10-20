@@ -21,6 +21,7 @@ import pytest
 from octop_harness.agent import HarnessAgent
 from octop_harness.backends.workspace import DEFAULT_MEMORY_FILES
 from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
+from octop_harness.memory.policy import render_memory_policy_prompt
 from octop_harness.middleware.bootstrap import BOOTSTRAP_FILENAME, BOOTSTRAPPED_MARKER
 from octop_harness.middleware.skill_filter import render_slash_skill_prompt
 from octop_harness.observability.logging import _HANDLER_NAME, _log_agent_id
@@ -1650,7 +1651,21 @@ class TestAgentVisibleWorkspaceDir:
             HarnessAgent(cfg)
             prompt = create.call_args.kwargs["system_prompt"]
         assert render_slash_skill_prompt(language=cfg.language) in prompt
+        assert render_memory_policy_prompt(language=cfg.language, memory_enabled=False) in prompt
         assert "SKILL.md" in prompt
+
+    def test_compiled_system_prompt_uses_memory_save_when_memory_is_on(
+        self,
+        cfg: HarnessAgentConfig,
+        mock_model_factory: Callable[[], Any],
+        stub_create_deep_agent: Any,
+    ) -> None:
+        enabled = replace(cfg, memory_enabled=True, language="en")
+        with mock_model_factory(), stub_create_deep_agent as create:
+            HarnessAgent(enabled)
+            prompt = create.call_args.kwargs["system_prompt"]
+        assert render_memory_policy_prompt(language="en", memory_enabled=True) in prompt
+        assert "Structured memory is off" not in prompt
 
 
 class TestExplicitVirtualPathTool:
