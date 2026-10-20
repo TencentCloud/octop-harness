@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ChatGPT Codex 端点使用无状态流式 Responses 请求，将主系统提示词映射到 instructions，后续系统消息保留为 developer；显式 instructions 原样保留，并保留多轮工具历史；将 langchain-openai 最低版本提高至 1.3.3，避免无状态历史引用未存储条目。
 - 减少启动和对话过程中的重复诊断日志，保留需要关注的错误与告警。
 
+### 修复
+
+- shell 后端不再按宿主 locale 解码子进程输出：中文 Windows（cp936）下 `execute` 的 UTF-8 输出会被静默丢弃（`<no output>` + 退出码 0），现改为按 UTF-8 → 宿主 locale → GBK 依次解码，全都不匹配时才降级为替换字符（TencentCloud/Octop#1959）。
+
 ## [1.0.2] - 2026-10-09
 
 ### 修复
