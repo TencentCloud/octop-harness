@@ -76,6 +76,8 @@ _TOOLS_ALWAYS_KEPT = frozenset(
         "brave_search",
         "google_search",
         "kimi_search",
+        "deepseek_search",
+        "yuanbao_search",
         "searchfree_search",
     }
 )

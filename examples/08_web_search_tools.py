@@ -11,7 +11,7 @@ Walks through the four configuration policies for
     4. ``"all"`` — debugging mode; every provider is registered, the
        ones missing env vars return a plain-text error on invocation.
 
-We do NOT make real Tavily / Brave / Google / Kimi network calls in
+We do NOT make real Tavily / Brave / Google / Kimi / Yuanbao network calls in
 this demo: each script run prints whether the tool would be available
 given the current shell environment, plus a short demonstration of the
 error-handling path.
@@ -41,6 +41,7 @@ _ENV_LABELS = {
     "brave": ("BRAVE_API_KEY",),
     "google": ("GOOGLE_API_KEY", "GOOGLE_CSE_ID"),
     "kimi": ("MOONSHOT_API_KEY",),
+    "yuanbao": ("TENCENTCLOUD_WSA_APIKEY",),
     "searchfree": (),  # zero-config public fallback
 }
 
