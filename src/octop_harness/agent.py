@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -36,6 +36,7 @@ from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.llm.session_header import session_header_scope
 from octop_harness.mcp import load_mcp_tools, mcp_tool_names, validate_mcp_default_servers
 from octop_harness.memory import MemoryRuntime
+from octop_harness.memory.policy import manual_documents_locked, render_memory_policy_prompt
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
 from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
@@ -402,7 +403,7 @@ class HarnessAgent:
         self,
         source: AsyncIterator[Any],
         cancel_event: asyncio.Event,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Yield from *source* until *cancel_event* is set.
 
         Unlike a plain ``async for`` + flag check between chunks, this preempts a
@@ -483,7 +484,7 @@ class HarnessAgent:
         *,
         protocol: str | None = None,
         **kwargs: Any,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Stream protocol-formatted chunks from the graph.
 
         Yields dict chunks in the protocol's native format:
@@ -496,7 +497,7 @@ class HarnessAgent:
         req = ChatRequest.coerce(request)
         ctx = build_runtime_ctx(self, req)
 
-        async def _stream(prepared: ChatRequest) -> AsyncIterator[Any]:
+        async def _stream(prepared: ChatRequest) -> AsyncGenerator[Any, None]:
             messages, config, proto = self._prepare_call(prepared, protocol)
             thread_id = prepared.thread_id or ""
             cancel_event = asyncio.Event()
@@ -505,16 +506,19 @@ class HarnessAgent:
                 self._hitl_resume_configs.pop(thread_id, None)
             try:
                 with session_header_scope(prepared.thread_id):
-                    async for chunk in self._iter_until_cancelled(
-                        proto.stream(messages, config, **kwargs),
-                        cancel_event,
-                    ):
-                        if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
-                            self._hitl_resume_configs[thread_id] = {
-                                **config,
-                                "configurable": deepcopy(config["configurable"]),
-                            }
-                        yield chunk
+                    async with contextlib.aclosing(
+                        self._iter_until_cancelled(
+                            proto.stream(messages, config, **kwargs),
+                            cancel_event,
+                        )
+                    ) as chunks:
+                        async for chunk in chunks:
+                            if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
+                                self._hitl_resume_configs[thread_id] = {
+                                    **config,
+                                    "configurable": deepcopy(config["configurable"]),
+                                }
+                            yield chunk
             finally:
                 if thread_id:
                     self._cancel_events.pop(thread_id, None)
@@ -543,7 +547,7 @@ class HarnessAgent:
         decisions: list[dict[str, Any]],
         *,
         protocol: str | None = None,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Resume a paused interrupt, retaining its process-local request scope.
 
         The host must authorize the caller before resuming. User identity, tool
@@ -560,10 +564,11 @@ class HarnessAgent:
         paused = False
         async with self._invocation():
             with session_header_scope(thread_id):
-                async for chunk in resume_stream(thread_id, decisions, config):
-                    if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
-                        paused = True
-                    yield chunk
+                async with contextlib.aclosing(resume_stream(thread_id, decisions, config)) as chunks:
+                    async for chunk in chunks:
+                        if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
+                            paused = True
+                        yield chunk
         if not paused:
             self._hitl_resume_configs.pop(thread_id, None)
 
@@ -1508,6 +1513,10 @@ class HarnessAgent:
                 root_dir=root_dir,
                 workspace_dir=cfg.workspace_dir,
                 workspace=self._workspace,
+                protect_user_memory=manual_documents_locked(
+                    memory_enabled=cfg.memory_enabled,
+                    policy=cfg.manual_document_policy,
+                ),
             )
         )
 
@@ -1771,7 +1780,17 @@ class HarnessAgent:
 
         directive += f" {EXPLICIT_VIRTUAL_PATH_PROMPT}" if cfg.explicit_virtual_paths else ""
         kwargs["system_prompt"] = (
-            base_prompt + "\n\n" + directive + "\n\n" + render_slash_skill_prompt(language=cfg.language)
+            base_prompt
+            + "\n\n"
+            + directive
+            + "\n\n"
+            + render_memory_policy_prompt(
+                language=cfg.language,
+                memory_enabled=cfg.memory_enabled,
+                policy=cfg.manual_document_policy,
+            )
+            + "\n\n"
+            + render_slash_skill_prompt(language=cfg.language)
         ).strip()
         resolved_subagents = self._resolve_subagents(parent_tools=tools)
         if resolved_subagents:

@@ -21,6 +21,7 @@ import pytest
 from octop_harness.agent import HarnessAgent
 from octop_harness.backends.workspace import DEFAULT_MEMORY_FILES
 from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
+from octop_harness.memory.policy import render_memory_policy_prompt
 from octop_harness.middleware.bootstrap import BOOTSTRAP_FILENAME, BOOTSTRAPPED_MARKER
 from octop_harness.middleware.skill_filter import render_slash_skill_prompt
 from octop_harness.observability.logging import _HANDLER_NAME, _log_agent_id
@@ -1650,7 +1651,21 @@ class TestAgentVisibleWorkspaceDir:
             HarnessAgent(cfg)
             prompt = create.call_args.kwargs["system_prompt"]
         assert render_slash_skill_prompt(language=cfg.language) in prompt
+        assert render_memory_policy_prompt(language=cfg.language, memory_enabled=False) in prompt
         assert "SKILL.md" in prompt
+
+    def test_compiled_system_prompt_uses_memory_save_when_memory_is_on(
+        self,
+        cfg: HarnessAgentConfig,
+        mock_model_factory: Callable[[], Any],
+        stub_create_deep_agent: Any,
+    ) -> None:
+        enabled = replace(cfg, memory_enabled=True, language="en")
+        with mock_model_factory(), stub_create_deep_agent as create:
+            HarnessAgent(enabled)
+            prompt = create.call_args.kwargs["system_prompt"]
+        assert render_memory_policy_prompt(language="en", memory_enabled=True) in prompt
+        assert "Structured memory is off" not in prompt
 
 
 class TestExplicitVirtualPathTool:
@@ -1699,25 +1714,35 @@ class TestExplicitVirtualPathTool:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("close_on_pause", [False, True])
 async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
     cfg: HarnessAgentConfig,
     mock_model_factory: Callable[[], Any],
     stub_create_deep_agent: Any,
+    close_on_pause: bool,
 ) -> None:
+    import contextlib
     from copy import deepcopy
     from types import SimpleNamespace
 
     seen: list[dict[str, Any]] = []
+    closed: list[str] = []
 
     async def stream(messages: Any, config: dict[str, Any], **kwargs: Any) -> Any:
-        yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+        try:
+            yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+        finally:
+            closed.append("stream")
 
     async def resume(thread_id: str, decisions: Any, config: dict[str, Any]) -> Any:
         seen.append(deepcopy(config["configurable"]))
-        if len(seen) == 1:
-            yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
-        else:
-            yield {"type": "token", "content": "done"}
+        try:
+            if len(seen) == 1:
+                yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+            else:
+                yield {"type": "token", "content": "done"}
+        finally:
+            closed.append("resume")
 
     with mock_model_factory(), stub_create_deep_agent:
         agent = HarnessAgent(cfg)
@@ -1732,13 +1757,20 @@ async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
     )
     expected = request.to_runnable_config()["configurable"]
     try:
-        chunks = [c async for c in agent.stream(request)]
-        assert len(chunks) == 1
-        assert chunks[0]["type"] == "hitl_required"
+        async with contextlib.aclosing(agent.stream(request)) as initial:
+            chunks = [await anext(initial)] if close_on_pause else [c async for c in initial]
+        assert closed == ["stream"]
+        assert [chunk["type"] for chunk in chunks] == ["hitl_required"]
         # A different thread's user and connector must not overwrite this pause.
         other = ChatRequest(messages="other", thread_id="other-thread", user="8", mcp_servers=["other"])
         _ = [c async for c in agent.stream(other)]
-        _ = [c async for c in agent.resume_hitl("design-thread", [{"type": "approve"}])]
+        nested = agent.resume_hitl("design-thread", [{"type": "approve"}])
+        if close_on_pause:
+            assert (await anext(nested))["type"] == "hitl_required"
+            await nested.aclose()
+        else:
+            _ = [c async for c in nested]
+        assert closed == ["stream", "stream", "resume"]
         _ = [c async for c in agent.resume_hitl("design-thread", [{"type": "approve"}])]
         assert seen == [expected, expected]
         assert "design-thread" not in agent._hitl_resume_configs

@@ -17,6 +17,7 @@ from octop_harness.builtin.tools.web_search._registry import (
     _provider_available,
 )
 from octop_harness.builtin.tools.web_search.brave import brave_search
+from octop_harness.builtin.tools.web_search.deepseek import deepseek_search
 from octop_harness.builtin.tools.web_search.google import google_search
 from octop_harness.builtin.tools.web_search.kimi import kimi_search
 from octop_harness.builtin.tools.web_search.searchfree import searchfree_search
@@ -29,7 +30,7 @@ from octop_harness.builtin.tools.web_search.tavily import tavily_search
 
 class TestRegistry:
     def test_known_providers(self) -> None:
-        assert set(WEB_SEARCH_PROVIDERS) == {"tavily", "brave", "google", "kimi", "searchfree"}
+        assert set(WEB_SEARCH_PROVIDERS) == {"tavily", "brave", "deepseek", "google", "kimi", "searchfree"}
 
     def test_provider_available_all_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("FOO", "x")
@@ -51,7 +52,14 @@ class TestRegistry:
 class TestLoadWebSearchTools:
     @pytest.fixture(autouse=True)
     def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in ("TAVILY_API_KEY", "BRAVE_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CSE_ID", "MOONSHOT_API_KEY"):
+        for var in (
+            "TAVILY_API_KEY",
+            "BRAVE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_CSE_ID",
+            "MOONSHOT_API_KEY",
+        ):
             monkeypatch.delenv(var, raising=False)
 
     def test_false_returns_empty(self) -> None:
@@ -67,11 +75,17 @@ class TestLoadWebSearchTools:
 
     def test_auto_loads_only_configured_providers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TAVILY_API_KEY", "tav")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "deep")
         monkeypatch.setenv("MOONSHOT_API_KEY", "kim")
         loaded = load_web_search_tools("auto")
         names = {t.name for t in loaded}
         # ``searchfree`` rides along regardless because its tuple is empty.
-        assert names == {"tavily_search", "kimi_search", "searchfree_search"}
+        assert names == {
+            "tavily_search",
+            "deepseek_search",
+            "kimi_search",
+            "searchfree_search",
+        }
 
     def test_all_loads_every_provider(self) -> None:
         loaded = load_web_search_tools("all")
@@ -79,6 +93,7 @@ class TestLoadWebSearchTools:
         assert names == {
             "tavily_search",
             "brave_search",
+            "deepseek_search",
             "google_search",
             "kimi_search",
             "searchfree_search",
@@ -207,6 +222,133 @@ class TestBraveSearch:
         with patch.dict(sys.modules, {"langchain_community.tools": None}):
             result = await brave_search.ainvoke({"query": "x"})
         assert "langchain-community" in result
+
+
+# ---------------------------------------------------------------------------
+# deepseek_search
+# ---------------------------------------------------------------------------
+
+
+class TestDeepSeekSearch:
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_returns_error(self) -> None:
+        result = await deepseek_search.ainvoke({"query": "x"})
+        assert "DEEPSEEK_API_KEY" in result
+
+    @pytest.mark.asyncio
+    async def test_calls_search_api_with_bounded_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
+        captured: dict[str, Any] = {}
+
+        class _Response:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "results": [
+                        {
+                            "title": "DeepSeek",
+                            "url": "https://example.com",
+                            "summary": "A result",
+                            "content": "",
+                        }
+                    ]
+                }
+
+        class _Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                captured["client"] = kwargs
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, Any],
+            ) -> _Response:
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["payload"] = json
+                return _Response()
+
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _Client):
+            result = await deepseek_search.ainvoke({"query": "agent search", "count": 3})
+
+        assert json.loads(result)[0]["url"] == "https://example.com"
+        assert captured["url"] == "https://api.deepseek.com/v1/tools/search"
+        assert captured["headers"]["Authorization"] == "Bearer secret"
+        assert captured["payload"] == {
+            "query": "agent search",
+            "count": 3,
+            "need_content": False,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ({"query": ""}, "1 to 128"),
+            ({"query": "x" * 129}, "1 to 128"),
+            ({"query": "x", "count": 0}, "between 1 and 50"),
+            ({"query": "x", "count": 51}, "between 1 and 50"),
+        ],
+    )
+    async def test_rejects_invalid_parameters(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        payload: dict[str, Any],
+        message: str,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
+        result = await deepseek_search.ainvoke(payload)
+        assert message in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [(401, "authentication failed"), (402, "insufficient balance"), (429, "rate limit")],
+    )
+    async def test_maps_actionable_http_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        status: int,
+        message: str,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
+
+        class _Response:
+            status_code = status
+
+        class _Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(self, *args: Any, **kwargs: Any) -> _Response:
+                return _Response()
+
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _Client):
+            result = await deepseek_search.ainvoke({"query": "x"})
+        assert message in result
 
 
 # ---------------------------------------------------------------------------
