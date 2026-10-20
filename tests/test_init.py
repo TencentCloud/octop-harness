@@ -130,6 +130,23 @@ class TestInitWorkspaceInstanceMethod:
         assert blocked.status == "error"
         assert "workspace path" in str(blocked.content)
 
+        agent._config.memory_enabled = False
+        agent._config.manual_document_policy = "user"
+        with patch("deepagents.create_deep_agent", return_value=MagicMock()) as create:
+            agent._init_graph()
+        guard = next(m for m in create.call_args.kwargs["middleware"] if m.name == "FilesystemGuardMiddleware")
+        kept = guard.wrap_tool_call(request, MagicMock())
+        assert isinstance(kept, ToolMessage) and kept.status == "error"
+        assert "memory_save" in str(kept.content)
+
+        agent._config.memory_enabled = True
+        agent._config.manual_document_policy = "agent"
+        with patch("deepagents.create_deep_agent", return_value=MagicMock()) as create:
+            agent._init_graph()
+        guard = next(m for m in create.call_args.kwargs["middleware"] if m.name == "FilesystemGuardMiddleware")
+        opened = MagicMock(return_value=ToolMessage(content="edited", tool_call_id="edit-1"))
+        assert guard.wrap_tool_call(request, opened).content == "edited"
+
     def test_agents_template_leaves_memory_policy_to_the_runtime_prompt(self) -> None:
         for language in ("zh", "en"):
             agents = dict(iter_md_template_files(language))["AGENTS.md"].decode("utf-8")

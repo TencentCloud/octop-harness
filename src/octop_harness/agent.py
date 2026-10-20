@@ -35,7 +35,7 @@ from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.llm.session_header import session_header_scope
 from octop_harness.mcp import load_mcp_tools, mcp_tool_names, validate_mcp_default_servers
 from octop_harness.memory import MemoryRuntime
-from octop_harness.memory.policy import render_memory_policy_prompt
+from octop_harness.memory.policy import manual_documents_locked, render_memory_policy_prompt
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
 from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
@@ -1488,7 +1488,10 @@ class HarnessAgent:
                 root_dir=root_dir,
                 workspace_dir=cfg.workspace_dir,
                 workspace=self._workspace,
-                protect_user_memory=cfg.memory_enabled,
+                protect_user_memory=manual_documents_locked(
+                    memory_enabled=cfg.memory_enabled,
+                    policy=cfg.manual_document_policy,
+                ),
             )
         )
 
@@ -1756,7 +1759,11 @@ class HarnessAgent:
             + "\n\n"
             + directive
             + "\n\n"
-            + render_memory_policy_prompt(language=cfg.language, memory_enabled=cfg.memory_enabled)
+            + render_memory_policy_prompt(
+                language=cfg.language,
+                memory_enabled=cfg.memory_enabled,
+                policy=cfg.manual_document_policy,
+            )
             + "\n\n"
             + render_slash_skill_prompt(language=cfg.language)
         ).strip()

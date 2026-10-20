@@ -8,6 +8,10 @@ changes, so it is the instruction the model should follow.
 
 from __future__ import annotations
 
+from typing import Literal
+
+ManualDocumentPolicy = Literal["auto", "user", "agent"]
+
 _PRIORITY_ZH = "本段优先于工作区 AGENTS.md、BOOTSTRAP.md、记忆技能, 以及 USER.md / MEMORY.md 里关于如何更新记忆的说明。"
 _PRIORITY_EN = (
     "This section overrides memory-update instructions in workspace AGENTS.md, "
@@ -99,8 +103,112 @@ _EN_OFF = "\n".join(
 )
 
 
-def render_memory_policy_prompt(*, language: str, memory_enabled: bool) -> str:
+_ZH_USER_ONLY = "\n".join(
+    (
+        "## 记忆",
+        "",
+        _PRIORITY_ZH,
+        "",
+        "结构化记忆已关闭, 这两份文档仍由你手动维护, Agent 只读。",
+        "不要调用 memory_save、memory_search 或 memory_get, 也不要修改 USER.md 或 MEMORY.md。",
+        "需要改档案或强记忆时, 请用户到记忆页编辑。",
+        "每个会话开始时加载一次全文, 之后复用该快照; 修改对新会话生效。",
+    )
+)
+
+_ZH_AGENT_WITH_MEMORY = "\n".join(
+    (
+        "## 记忆",
+        "",
+        _PRIORITY_ZH,
+        "",
+        "结构化记忆已开启, 同时允许修改 USER.md 和 MEMORY.md。",
+        "用户说「记住」时仍调用 memory_save, 成功后才能确认已记住。",
+        "不要用改这两份文件代替 memory_save。",
+        "只有用户明确要求修改档案或强记忆时, 才用 edit_file 或 write_file 改对应文件。",
+        "先读再改。不要删除或移动这两个文件; 清空时写入空内容。",
+        "手动文档优先于召回记忆。发现冲突要告诉用户, 不能把冲突的旧记忆当作当前事实。",
+        "密码、密钥、Token 不进入记忆。临时闲聊留给后台提炼。",
+        "每个会话开始时加载一次全文, 之后复用该快照; 文件修改对新会话生效。",
+    )
+)
+
+_EN_USER_ONLY = "\n".join(
+    (
+        "## Memory",
+        "",
+        _PRIORITY_EN,
+        "",
+        "Structured memory is off, and USER.md / MEMORY.md stay user-maintained. Agents are read-only.",
+        "Do not call memory_save, memory_search, or memory_get, and do not edit USER.md or MEMORY.md.",
+        "When the profile or strong memory should change, ask the user to edit it on the memory page.",
+        "Each session loads the full text once and then reuses that snapshot; edits apply to new sessions.",
+    )
+)
+
+_EN_AGENT_WITH_MEMORY = "\n".join(
+    (
+        "## Memory",
+        "",
+        _PRIORITY_EN,
+        "",
+        "Structured memory is on, and edits to USER.md and MEMORY.md are also allowed.",
+        "When the user asks you to remember something, still call memory_save and "
+        "confirm only after it succeeds. Do not edit those files instead of memory_save.",
+        "Edit USER.md or MEMORY.md only when the user explicitly asks to change the "
+        "profile or strong memory. Read the file first. Do not delete or move either "
+        "file; clear one by writing empty content.",
+        "Manual documents outrank recalled memory. Tell the user about conflicts, and "
+        "do not present a conflicting old memory as a current fact.",
+        "Do not store passwords, keys, or tokens. Leave transient chat to background distillation.",
+        "Each session loads the full text once and then reuses that snapshot; file edits apply to new sessions.",
+    )
+)
+
+
+_ZH_PROMPTS = {
+    "on": _ZH_ON,
+    "off": _ZH_OFF,
+    "user": _ZH_USER_ONLY,
+    "agent": _ZH_AGENT_WITH_MEMORY,
+}
+_EN_PROMPTS = {
+    "on": _EN_ON,
+    "off": _EN_OFF,
+    "user": _EN_USER_ONLY,
+    "agent": _EN_AGENT_WITH_MEMORY,
+}
+
+
+def manual_documents_locked(*, memory_enabled: bool, policy: str) -> bool:
+    """Whether agent file tools must leave USER.md and MEMORY.md unchanged.
+
+    ``auto`` follows structured memory: locked while it is on, editable when it
+    is off. ``user`` keeps the files owner-maintained. ``agent`` allows edits
+    even while structured memory is on.
+    """
+    if policy == "user":
+        return True
+    if policy == "agent":
+        return False
+    return memory_enabled
+
+
+def render_memory_policy_prompt(
+    *,
+    language: str,
+    memory_enabled: bool,
+    policy: str = "auto",
+) -> str:
     """Return the memory policy for the compiled system prompt."""
-    if language == "en":
-        return _EN_ON if memory_enabled else _EN_OFF
-    return _ZH_ON if memory_enabled else _ZH_OFF
+    locked = manual_documents_locked(memory_enabled=memory_enabled, policy=policy)
+    if locked and memory_enabled:
+        key = "on"
+    elif locked:
+        key = "user"
+    elif memory_enabled:
+        key = "agent"
+    else:
+        key = "off"
+    prompts = _EN_PROMPTS if language == "en" else _ZH_PROMPTS
+    return prompts[key]

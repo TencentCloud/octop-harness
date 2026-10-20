@@ -84,9 +84,11 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
   session and reused from the checkpoint. Edits apply to new sessions. With
   structured memory on, the user maintains both files, agent file tools are
   read-only, and remember requests use `memory_save`. With structured memory
-  off, the agent edits both files directly; delete and move stay blocked. The
-  compiled system prompt owns this policy and overrides older rules left in
-  workspace `AGENTS.md`.
+  off, the agent edits both files directly; delete and move stay blocked.
+  `manual_document_policy` defaults to `auto` and follows that switch; `user`
+  keeps the files owner-maintained, and `agent` allows edits even while
+  structured memory is on. The compiled system prompt owns this policy and
+  overrides older rules left in workspace `AGENTS.md`.
 - Workspace context loading, session snapshots, prompt formatting and cache
   breakpoints use deepagents' native `MemoryMiddleware`. Template updates do
   not overwrite existing user documents.
