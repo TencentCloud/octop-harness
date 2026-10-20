@@ -226,7 +226,7 @@ Optional dependency extras (install only what you need; missing extras fail at u
 | `bedrock` | AWS Bedrock provider |
 | `object-storage` | Tencent COS + Alibaba OSS + Huawei OBS SDKs |
 | `desktop` | Desktop screenshot / input (`mss`, `pynput`, `pillow`) |
-| `web-search-all` | All web-search backends (Tavily / Brave / Google) |
+| `web-search-all` | Optional web-search SDKs (Tavily / Brave / Google). DeepSeek uses core HTTP support. |
 | `remote-backends` | Postgres workspace backend (`psycopg`). S3 uses the bundled boto3 backend. |
 | `observability` | Langfuse |
 | `acp` | ACP agent runner |
