@@ -1711,3 +1711,70 @@ class TestExplicitVirtualPathTool:
             assert "virtual_to_native_path" not in built_names
             prompt = create.call_args.kwargs["system_prompt"]
             assert "execute/shell is not rewritten" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_on_pause", [False, True])
+async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], Any],
+    stub_create_deep_agent: Any,
+    close_on_pause: bool,
+) -> None:
+    import contextlib
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    seen: list[dict[str, Any]] = []
+    closed: list[str] = []
+
+    async def stream(messages: Any, config: dict[str, Any], **kwargs: Any) -> Any:
+        try:
+            yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+        finally:
+            closed.append("stream")
+
+    async def resume(thread_id: str, decisions: Any, config: dict[str, Any]) -> Any:
+        seen.append(deepcopy(config["configurable"]))
+        try:
+            if len(seen) == 1:
+                yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+            else:
+                yield {"type": "token", "content": "done"}
+        finally:
+            closed.append("resume")
+
+    with mock_model_factory(), stub_create_deep_agent:
+        agent = HarnessAgent(cfg)
+    agent._protocols["langgraph"] = SimpleNamespace(stream=stream, resume_stream=resume)  # type: ignore[assignment]
+    request = ChatRequest(
+        messages="design",
+        thread_id="design-thread",
+        user="7",
+        agent_id="designer",
+        mcp_servers=["open-design__one"],
+        configurable={"locale": "zh", "session_key": "session", "knowledge_base_ids": ["kb"]},
+    )
+    expected = request.to_runnable_config()["configurable"]
+    try:
+        async with contextlib.aclosing(agent.stream(request)) as initial:
+            chunks = [await anext(initial)] if close_on_pause else [c async for c in initial]
+        assert closed == ["stream"]
+        assert [chunk["type"] for chunk in chunks] == ["hitl_required"]
+        # A different thread's user and connector must not overwrite this pause.
+        other = ChatRequest(messages="other", thread_id="other-thread", user="8", mcp_servers=["other"])
+        _ = [c async for c in agent.stream(other)]
+        nested = agent.resume_hitl("design-thread", [{"type": "approve"}])
+        if close_on_pause:
+            assert (await anext(nested))["type"] == "hitl_required"
+            await nested.aclose()
+        else:
+            _ = [c async for c in nested]
+        assert closed == ["stream", "stream", "resume"]
+        _ = [c async for c in agent.resume_hitl("design-thread", [{"type": "approve"}])]
+        assert seen == [expected, expected]
+        assert "design-thread" not in agent._hitl_resume_configs
+        assert "other-thread" in agent._hitl_resume_configs
+    finally:
+        await agent.aclose()
+    assert agent._hitl_resume_configs == {}
