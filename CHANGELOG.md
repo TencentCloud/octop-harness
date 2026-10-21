@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - 提前结束 agent 流（例如 human-in-the-loop 暂停）时关闭内层异步生成器，避免 `harness_session_id` 在另一个 context 里 reset 并打出 `ContextVar ... created in a different Context`（#89）。
-- 修复 `MCPToolMiddleware` 持有 server 名单构造期快照的问题：改为每轮实时读取 `mcp_server_configs`，运行时动态挂载（`append_mcp_tools` 后原地写入 config）的 MCP server 不再被每轮工具过滤清零；默认路径（未选 MCP 的 turn）行为不变。`server_names` 参数放宽为 `Mapping | AbstractSet` 以支持活引用。
+- 修复 `MCPToolMiddleware` 持有 server 名单构造期快照的问题：改为每轮实时读取 `mcp_server_configs`，运行时动态挂载（`append_mcp_tools` 后原地写入 config）的 MCP server 不再被每轮工具过滤清零；默认路径（未选 MCP 的 turn）行为不变。`server_names` 参数放宽为 `Mapping | AbstractSet` 以支持活引用（#93）。
 
 ### 变更
 
