@@ -22,6 +22,7 @@ from octop_harness.builtin.tools.web_search.google import google_search
 from octop_harness.builtin.tools.web_search.kimi import kimi_search
 from octop_harness.builtin.tools.web_search.searchfree import searchfree_search
 from octop_harness.builtin.tools.web_search.tavily import tavily_search
+from octop_harness.builtin.tools.web_search.yuanbao import yuanbao_search
 
 # ---------------------------------------------------------------------------
 # Registry — provider lookup, env-var gating, policy dispatch
@@ -30,7 +31,16 @@ from octop_harness.builtin.tools.web_search.tavily import tavily_search
 
 class TestRegistry:
     def test_known_providers(self) -> None:
-        assert set(WEB_SEARCH_PROVIDERS) == {"tavily", "brave", "deepseek", "google", "kimi", "searchfree"}
+        assert set(WEB_SEARCH_PROVIDERS) == {
+            "tavily",
+            "brave",
+            "deepseek",
+            "google",
+            "kimi",
+            "yuanbao",
+            "searchfree",
+            "you",
+        }
 
     def test_provider_available_all_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("FOO", "x")
@@ -59,6 +69,8 @@ class TestLoadWebSearchTools:
             "GOOGLE_API_KEY",
             "GOOGLE_CSE_ID",
             "MOONSHOT_API_KEY",
+            "TENCENTCLOUD_WSA_APIKEY",
+            "YDC_API_KEY",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -96,8 +108,18 @@ class TestLoadWebSearchTools:
             "deepseek_search",
             "google_search",
             "kimi_search",
+            "yuanbao_search",
             "searchfree_search",
+            "you_search",
         }
+
+    def test_auto_includes_you_only_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert "you_search" not in {t.name for t in load_web_search_tools("auto")}
+        monkeypatch.setenv("YDC_API_KEY", "ydc")
+        assert "you_search" in {t.name for t in load_web_search_tools("auto")}
+
+    def test_explicit_you_works_without_key(self) -> None:
+        assert [t.name for t in load_web_search_tools(["you"])] == ["you_search"]
 
     def test_explicit_list_loads_named_providers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TAVILY_API_KEY", "tav")
@@ -454,6 +476,137 @@ class TestKimiSearch:
 
 
 # ---------------------------------------------------------------------------
+# yuanbao_search
+# ---------------------------------------------------------------------------
+
+
+class TestYuanbaoSearch:
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TENCENTCLOUD_WSA_APIKEY", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_returns_error(self) -> None:
+        result = await yuanbao_search.ainvoke({"query": "x"})
+        assert "TENCENTCLOUD_WSA_APIKEY" in result
+
+    @pytest.mark.asyncio
+    async def test_parses_stringified_pages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TENCENTCLOUD_WSA_APIKEY", "sk-test")
+        captured: dict[str, Any] = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                page = json.dumps(
+                    {
+                        "title": "三星堆",
+                        "url": "https://example.com",
+                        "passage": "摘要",
+                        "site": "示例",
+                        "date": "2024-06-07",
+                        "score": 0.9,
+                        "content": "long body",
+                    },
+                    ensure_ascii=False,
+                )
+                return {"Response": {"Pages": [page], "Query": "三星堆"}}
+
+        class _FakeClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _FakeClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                """No-op."""
+
+            async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _Resp:
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["json"] = json
+                return _Resp()
+
+        from octop_harness.builtin.tools.web_search import yuanbao as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _FakeClient):
+            result = await yuanbao_search.ainvoke({"query": "三星堆", "max_results": 5})
+        assert captured["url"].endswith("/SearchPro")
+        assert captured["headers"]["Authorization"] == "Bearer sk-test"
+        assert captured["json"] == {"Query": "三星堆", "Cnt": 10}
+        assert json.loads(result) == [
+            {
+                "title": "三星堆",
+                "url": "https://example.com",
+                "snippet": "摘要",
+                "site": "示例",
+                "date": "2024-06-07",
+                "score": 0.9,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_api_error_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TENCENTCLOUD_WSA_APIKEY", "sk-test")
+
+        class _Resp:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                return {"Response": {"Error": {"Code": "UnauthorizedOperation", "Message": "bad key"}}}
+
+        class _FakeClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _FakeClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                """No-op."""
+
+            async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _Resp:
+                return _Resp()
+
+        from octop_harness.builtin.tools.web_search import yuanbao as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _FakeClient):
+            result = await yuanbao_search.ainvoke({"query": "hi"})
+        assert "authentication failed" in result
+
+    @pytest.mark.asyncio
+    async def test_http_error_returns_plain_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TENCENTCLOUD_WSA_APIKEY", "sk-test")
+
+        class _Resp:
+            status_code = 503
+
+            def json(self) -> dict[str, Any]:
+                return {}
+
+        class _FakeClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _FakeClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                """No-op."""
+
+            async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _Resp:
+                return _Resp()
+
+        from octop_harness.builtin.tools.web_search import yuanbao as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _FakeClient):
+            result = await yuanbao_search.ainvoke({"query": "hi"})
+        assert "HTTP 503" in result
+
+
+# ---------------------------------------------------------------------------
 # searchfree (zero-config public fallback)
 # ---------------------------------------------------------------------------
 
@@ -636,3 +789,124 @@ def test_load_web_search_tools_invokes_lazy_loader_only_when_needed() -> None:
     tools = load_web_search_tools("all")
     assert any(t.name == "tavily_search" for t in tools)
     assert "langchain_tavily" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# you_search (keyless by default, YDC_API_KEY optional)
+# ---------------------------------------------------------------------------
+
+
+class _YouResp:
+    def __init__(self, status_code: int = 200, body: Any = None, headers: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.headers = headers or {}
+
+    def json(self) -> Any:
+        return self._body
+
+
+def _you_client(resp: _YouResp, calls: list[dict[str, Any]]) -> type:
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            """No-op."""
+
+        async def get(self, url: str, params: dict[str, Any], headers: dict[str, str]) -> _YouResp:
+            calls.append({"method": "GET", "url": url, "params": params, "headers": headers})
+            return resp
+
+        async def post(self, url: str, json: dict[str, Any], headers: dict[str, str]) -> _YouResp:
+            calls.append({"method": "POST", "url": url, "json": json, "headers": headers})
+            return resp
+
+    return _FakeClient
+
+
+_YOU_BODY = {
+    "results": {
+        "web": [
+            {
+                "url": "https://example.com",
+                "title": "Example",
+                "description": "desc",
+                "snippets": ["s1"],
+                "page_age": "2026-01-01T00:00:00",
+            }
+        ]
+    }
+}
+
+
+class TestYouSearch:
+    @pytest.fixture(autouse=True)
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("YDC_API_KEY", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_keyless_uses_free_endpoint(self) -> None:
+        from octop_harness.builtin.tools.web_search import you as mod
+
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_YOU_BODY), calls)):
+            result = await mod.you_search.ainvoke({"query": "hello", "max_results": 3})
+        assert calls[0]["method"] == "GET"
+        assert calls[0]["url"] == mod.FREE_ENDPOINT
+        assert calls[0]["params"] == {"query": "hello", "count": 3}
+        assert calls[0]["headers"]["User-Agent"] == "youdotcom-integration/tencentcloud-octop-harness"
+        assert "X-API-Key" not in calls[0]["headers"]
+        assert json.loads(result) == [
+            {
+                "title": "Example",
+                "url": "https://example.com",
+                "description": "desc",
+                "snippets": ["s1"],
+                "page_age": "2026-01-01T00:00:00",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_key_uses_keyed_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import you as mod
+
+        monkeypatch.setenv("YDC_API_KEY", "ydc-test")
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_YOU_BODY), calls)):
+            await mod.you_search.ainvoke({"query": "hello"})
+        assert calls[0]["method"] == "POST"
+        assert calls[0]["url"] == mod.KEYED_ENDPOINT
+        assert calls[0]["json"] == {"query": "hello", "count": 5}
+        assert calls[0]["headers"]["X-API-Key"] == "ydc-test"
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_returns_plain_text(self) -> None:
+        from octop_harness.builtin.tools.web_search import you as mod
+
+        resp = _YouResp(status_code=429, headers={"Retry-After": "30"})
+        with patch.object(mod.httpx, "AsyncClient", _you_client(resp, [])):
+            result = await mod.you_search.ainvoke({"query": "hi"})
+        assert "HTTP 429" in result
+        assert "Retry after 30s" in result
+        assert "YDC_API_KEY" in result
+
+    @pytest.mark.asyncio
+    async def test_bad_key_returns_plain_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import you as mod
+
+        monkeypatch.setenv("YDC_API_KEY", "bad")
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(status_code=401), [])):
+            result = await mod.you_search.ainvoke({"query": "hi"})
+        assert "HTTP 401" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_results(self) -> None:
+        from octop_harness.builtin.tools.web_search import you as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body={"results": {"web": []}}), [])):
+            result = await mod.you_search.ainvoke({"query": "hi"})
+        assert result == "No results found."

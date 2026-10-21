@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `ManagedMCPClient` for persistent, task-owned MCP sessions and resources.
+- Add optional `you` web-search provider (`you_search`). Explicit `["you"]` works without an API key (free tier, 100/day per IP); set `YDC_API_KEY` for the keyed endpoint and higher limits. Joins `auto` only when `YDC_API_KEY` is set, so the default tool set is unchanged.
+
+### Fixed
+
+- Preserve object, array and enum arguments in MCP tool schemas.
+- Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
+
 ### 修复
 
 - 提前结束 agent 流（例如 human-in-the-loop 暂停）时关闭内层异步生成器，避免 `harness_session_id` 在另一个 context 里 reset 并打出 `ContextVar ... created in a different Context`（#89）。

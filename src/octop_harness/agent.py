@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
@@ -183,6 +184,7 @@ class HarnessAgent:
         )
         self._langfuse_callbacks: list[Any] | None = None
         self._protocols: dict[str, ChatProtocol] = {}
+        self._hitl_resume_configs: dict[str, dict[str, Any]] = {}
         # Optional hook called once immediately after bootstrap completes.
         # Set by the caller (e.g. Orca) to trigger a full config reload.
         self.on_bootstrap_complete: Callable[[], None] | None = None
@@ -501,6 +503,7 @@ class HarnessAgent:
             cancel_event = asyncio.Event()
             if thread_id:
                 self._cancel_events[thread_id] = cancel_event
+                self._hitl_resume_configs.pop(thread_id, None)
             try:
                 with session_header_scope(prepared.thread_id):
                     async with contextlib.aclosing(
@@ -510,6 +513,11 @@ class HarnessAgent:
                         )
                     ) as chunks:
                         async for chunk in chunks:
+                            if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
+                                self._hitl_resume_configs[thread_id] = {
+                                    **config,
+                                    "configurable": deepcopy(config["configurable"]),
+                                }
                             yield chunk
             finally:
                 if thread_id:
@@ -540,18 +548,29 @@ class HarnessAgent:
         *,
         protocol: str | None = None,
     ) -> AsyncGenerator[Any, None]:
-        """Resume a paused human-in-the-loop interrupt for *thread_id*."""
+        """Resume a paused interrupt, retaining its process-local request scope.
+
+        The host must authorize the caller before resuming. User identity, tool
+        selections and other config belong to the paused request, not a different
+        thread's most recent invocation. A new stream replaces that thread's scope.
+        """
         proto = self._get_protocol(protocol)
         resume_stream = getattr(proto, "resume_stream", None)
         if resume_stream is None:
             msg = f"Protocol {proto.name!r} does not support HITL resume"
             raise ValueError(msg)
-        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+        config = dict(self._hitl_resume_configs.get(thread_id, {"configurable": {"thread_id": thread_id}}))
+        config["configurable"] = deepcopy(config["configurable"])
+        paused = False
         async with self._invocation():
             with session_header_scope(thread_id):
                 async with contextlib.aclosing(resume_stream(thread_id, decisions, config)) as chunks:
                     async for chunk in chunks:
+                        if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
+                            paused = True
                         yield chunk
+        if not paused:
+            self._hitl_resume_configs.pop(thread_id, None)
 
     async def stream_events(
         self,
@@ -1002,6 +1021,7 @@ class HarnessAgent:
         """
         if self._defer_close_while_busy():
             return
+        self._hitl_resume_configs.clear()
         if self._owns_model_factory:
             self._model_factory.close()
         self._memory_runtime.close()
@@ -1019,6 +1039,7 @@ class HarnessAgent:
         """
         if self._defer_close_while_busy():
             return
+        self._hitl_resume_configs.clear()
         if self._owns_model_factory:
             await self._model_factory.aclose()
         self._memory_runtime.close()
