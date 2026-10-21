@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 记忆抽取、晋升、页面重写与手动文档核对等旁路模型调用经工作线程继承 LangGraph 运行配置，其原始输出（如文档核对 JSON）会混入 `messages` 流并作为助手正文发给用户。旁路调用现在标记 `lc_source=memory_aux`，协议层据此从流中过滤，内部调用也不再计入用户轮次的 usage。
+
 ### Added
 
 - Add `ManagedMCPClient` for persistent, task-owned MCP sessions and resources.

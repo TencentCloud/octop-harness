@@ -64,18 +64,20 @@ class _FakeModel:
         self._content = content
         self.bind_calls: list[dict[str, Any]] = []
         self.invoke_messages: list[Any] | None = None
+        self.invoke_config: dict[str, Any] | None = None
 
     def bind(self, **kwargs: Any) -> _FakeModel:
         self.bind_calls.append(kwargs)
         return self
 
-    def invoke(self, messages: list[Any]) -> _FakeMsg:
+    def invoke(self, messages: list[Any], config: dict[str, Any] | None = None) -> _FakeMsg:
         self.invoke_messages = messages
+        self.invoke_config = config
         return _FakeMsg(self._content)
 
 
 class _BadModel(_FakeModel):
-    def invoke(self, messages: list[Any]) -> _FakeMsg:
+    def invoke(self, messages: list[Any], config: dict[str, Any] | None = None) -> _FakeMsg:
         raise RuntimeError("boom")
 
 
@@ -185,7 +187,7 @@ class TestHarnessAgentLLMClient:
             """Mirrors openai.BadRequestError — not a RuntimeError/OSError."""
 
         class _ExpiredModel(_FakeModel):
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], config: dict[str, Any] | None = None) -> _FakeMsg:
                 raise _SubscriptionExpiredError("InvalidSubscription")
 
         client = HarnessAgentLLMClient(_Factory(_ExpiredModel()), default_model="p/m")
@@ -197,7 +199,7 @@ class TestHarnessAgentLLMClient:
             pass
 
         class _ExpiredModel(_FakeModel):
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], config: dict[str, Any] | None = None) -> _FakeMsg:
                 raise _SubscriptionExpiredError("InvalidSubscription")
 
         factory = _MapFactory(
@@ -217,7 +219,7 @@ class TestHarnessAgentLLMClient:
 
     def test_failed_aux_falls_back_to_default_when_no_current_model(self) -> None:
         class _ExpiredModel(_FakeModel):
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], config: dict[str, Any] | None = None) -> _FakeMsg:
                 raise RuntimeError("400")
 
         factory = _MapFactory(
@@ -252,7 +254,7 @@ class TestHarnessAgentLLMClient:
 
     def test_fallback_also_failing_still_wraps(self) -> None:
         class _ExpiredModel(_FakeModel):
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], config: dict[str, Any] | None = None) -> _FakeMsg:
                 raise RuntimeError("still-dead")
 
         factory = _MapFactory(

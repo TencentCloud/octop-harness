@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.runnables.config import var_child_runnable_config
 
 from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
 from octop_harness.llm.factory import ChatModelFactory
@@ -150,3 +152,53 @@ def test_model_cache_invalidation_removes_memory_variant(provider_wide: bool) ->
     assert factory.get_chat_model("local/Qwen3", max_retries=0) is not memory
     assert factory.get_chat_model("other/gpt-4.1", max_retries=0) is other
     factory.close()
+
+
+class _RecordingFactory:
+    """Minimal factory stub that returns one recording chat model."""
+
+    def __init__(self, model: Any) -> None:
+        self.model = model
+
+    def get_chat_model(self, ref: str, **kwargs: Any) -> Any:
+        del ref, kwargs
+        return self.model
+
+
+class _RecordingChatModel(FakeListChatModel):
+    """FakeList that records the run config of every invocation."""
+
+    last_config: dict[str, Any] | None = None
+
+    def bind(self, **kwargs: Any) -> _RecordingChatModel:
+        del kwargs
+        return self
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        self.last_config = kwargs.get("config")
+        return super().invoke(*args, **kwargs)
+
+
+def test_aux_model_calls_are_tagged_as_internal() -> None:
+    """Memory aux calls must be identifiable so the graph stream can drop them."""
+    model = _RecordingChatModel(responses=["ok"])
+    client = HarnessAgentLLMClient(_RecordingFactory(model), default_model="local/Qwen3")
+
+    assert client.call_llm("probe") == "ok"
+    assert model.last_config is not None
+    assert model.last_config["metadata"]["lc_source"] == "memory_aux"
+
+
+def test_aux_model_calls_keep_ambient_metadata() -> None:
+    """The marker is added on top of the inherited run metadata, not instead of it."""
+    model = _RecordingChatModel(responses=["ok"])
+    client = HarnessAgentLLMClient(_RecordingFactory(model), default_model="local/Qwen3")
+    token = var_child_runnable_config.set({"metadata": {"langgraph_node": "tools", "session_id": "s1"}})
+    try:
+        assert client.call_llm("probe") == "ok"
+    finally:
+        var_child_runnable_config.reset(token)
+
+    assert model.last_config is not None
+    assert model.last_config["metadata"]["session_id"] == "s1"
+    assert model.last_config["metadata"]["lc_source"] == "memory_aux"
