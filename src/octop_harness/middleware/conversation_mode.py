@@ -43,6 +43,8 @@ ASK_READ_TOOLS: frozenset[str] = frozenset(
         "brave_search",
         "google_search",
         "kimi_search",
+        "deepseek_search",
+        "yuanbao_search",
         "searchfree_search",
         "current_time",
     }

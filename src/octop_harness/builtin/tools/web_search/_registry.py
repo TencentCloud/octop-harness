@@ -33,7 +33,7 @@ import os
 from collections.abc import Iterable
 from typing import Any, Literal, cast
 
-WebSearchToolName = Literal["tavily", "brave", "deepseek", "google", "kimi", "searchfree"]
+WebSearchToolName = Literal["tavily", "brave", "deepseek", "google", "kimi", "yuanbao", "searchfree"]
 
 # ``provider name → (required env vars, lazy loader returning a langchain tool)``.
 # Loaders are deliberately lazy so importing this module is cheap.
@@ -69,6 +69,12 @@ def _load_kimi() -> Any:
     return kimi_search
 
 
+def _load_yuanbao() -> Any:
+    from octop_harness.builtin.tools.web_search.yuanbao import yuanbao_search
+
+    return yuanbao_search
+
+
 def _load_searchfree() -> Any:
     from octop_harness.builtin.tools.web_search.searchfree import searchfree_search
 
@@ -81,6 +87,7 @@ WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     "deepseek": (("DEEPSEEK_API_KEY",), _load_deepseek),
     "google": (("GOOGLE_API_KEY", "GOOGLE_CSE_ID"), _load_google),
     "kimi": (("MOONSHOT_API_KEY",), _load_kimi),
+    "yuanbao": (("TENCENTCLOUD_WSA_APIKEY",), _load_yuanbao),
     # ``searchfree`` needs no env vars — empty tuple makes it always
     # available under the ``auto`` policy.
     "searchfree": ((), _load_searchfree),

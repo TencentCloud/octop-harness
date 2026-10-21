@@ -762,7 +762,7 @@ class HarnessAgentConfig:
     # Auto by default: every provider whose required env vars are set is
     # loaded. ``searchfree`` (zero-config) is always included. Accepted values:
     #   - ``"auto"`` / ``True`` (default): every provider whose required env
-    #     vars are set is loaded (tavily / brave / deepseek / google / kimi / searchfree).
+    #     vars are set is loaded (tavily / brave / deepseek / google / kimi / yuanbao / searchfree).
     #   - ``False``: no web-search tools loaded.
     #   - ``"all"``: every provider is loaded; the ones missing env vars
     #     return a plain-text error string when invoked.
