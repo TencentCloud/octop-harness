@@ -8,6 +8,7 @@ import inspect
 import logging
 import re
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -305,7 +306,7 @@ def filter_tools_for_mcp_servers(
     tools: list[Any],
     *,
     mcp_tool_names: frozenset[str],
-    server_names: frozenset[str],
+    server_names: AbstractSet[str],
     active_servers: list[str] | None,
 ) -> list[Any]:
     """Filter *tools* for the MCP servers active on this model call.

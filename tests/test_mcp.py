@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -466,3 +467,56 @@ class TestMCPToolMiddleware:
 
             mw.wrap_model_call(req, handler)
         assert captured["names"] == ["builtin", "math_add"]
+
+    def test_live_server_names_after_dynamic_append(self, sample_tools: list[MagicMock]) -> None:
+        """Servers mounted after construction (dict mutated in place) stay visible.
+
+        Regression test: the middleware used to snapshot ``frozenset(
+        cfg.mcp_server_configs)`` at construction, so a server attached at
+        runtime via ``append_mcp_tools`` + in-place ``mcp_server_configs[name]``
+        was treated as unknown and its tools were silently dropped every turn.
+        """
+        configs: dict[str, dict[str, Any]] = {"github": {}}
+        mw = MCPToolMiddleware(
+            server_names=configs,
+            mcp_tool_names=frozenset({"github_search", "math_add", "custom_srv_tool"}),
+            default_servers=None,
+        )
+        # Simulate the runtime mount: the caller's dict gains a new entry and
+        # the compiled tool list gains the new server's prefixed tools.
+        configs["custom_srv"] = {}
+        tools = [*sample_tools, _named_tool("custom_srv_tool")]
+        with self._runnable_config({"mcp_servers": ["custom_srv"]}):
+            req = self._request(tools)
+            captured: dict[str, list[str]] = {}
+
+            def handler(r: ModelRequest) -> ModelResponse:
+                captured["names"] = [t.name for t in r.tools]
+                return ModelResponse(result=[])
+
+            mw.wrap_model_call(req, handler)
+        assert captured["names"] == ["builtin", "custom_srv_tool"]
+
+    def test_default_path_with_dict_server_names_strips_mcp(self, sample_tools: list[MagicMock]) -> None:
+        """Default path (no ``mcp_servers``) works with a live dict and no opt-in.
+
+        Guards the scope of ``known``: it must be computed unconditionally in
+        ``_apply_filter`` — the ``filter_tools_for_mcp_servers`` call references
+        it even when ``active is None``, and an in-block definition used to
+        raise ``NameError`` on every turn without an MCP opt-in.
+        """
+        mw = MCPToolMiddleware(
+            server_names={"github": {}, "math": {}},
+            mcp_tool_names=frozenset({"github_search", "math_add"}),
+            default_servers=None,
+        )
+        with self._runnable_config({}):
+            req = self._request(list(sample_tools))
+            captured: dict[str, list[str]] = {}
+
+            def handler(r: ModelRequest) -> ModelResponse:
+                captured["names"] = [t.name for t in r.tools]
+                return ModelResponse(result=[])
+
+            mw.wrap_model_call(req, handler)
+        assert captured["names"] == ["builtin"]
