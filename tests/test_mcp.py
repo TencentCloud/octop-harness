@@ -380,26 +380,26 @@ class TestMcpArgsModel:
 
             async def get_tools(self) -> list[MagicMock]:
                 tool = MagicMock()
-                tool.name = "honcho.create_conclusions"
+                tool.name = "docs.create_document"
                 tool.coroutine = None
                 tool.args_schema = {
                     "type": "object",
-                    "required": ["conclusions"],
+                    "required": ["items"],
                     "properties": {
-                        "conclusions": {"type": "array", "items": {"type": "string"}},
-                        "peer_card": {"type": "array", "items": {"type": "string"}},
+                        "items": {"type": "array", "items": {"type": "string"}},
+                        "tags": {"type": "array", "items": {"type": "string"}},
                         "filters": {"type": "object", "additionalProperties": True},
                     },
                 }
                 return [tool]
 
         monkeypatch.setattr("octop_harness.mcp.MultiServerMCPClient", _Client)
-        tools = await aload_mcp_tools({"honcho": {"transport": "http", "url": "http://honcho"}})
+        tools = await aload_mcp_tools({"docs": {"transport": "http", "url": "http://docs"}})
         schema = tools[0].args_schema
         assert isinstance(schema, dict)
         props = schema["properties"]
-        assert props["conclusions"]["type"] == "array"
-        assert props["conclusions"]["items"] == {"type": "string"}
+        assert props["items"]["type"] == "array"
+        assert props["items"]["items"] == {"type": "string"}
         assert props["filters"]["type"] == "object"
 
     @pytest.mark.asyncio
@@ -423,13 +423,13 @@ class TestMcpArgsModel:
             async def get_tools(self) -> list[BaseTool]:
                 return [
                     StructuredTool(
-                        name="honcho_create_conclusions",
-                        description="create conclusions",
+                        name="docs_create_document",
+                        description="create document",
                         args_schema={
                             "type": "object",
-                            "required": ["conclusions"],
+                            "required": ["items"],
                             "properties": {
-                                "conclusions": {"type": "array", "items": {"type": "string"}},
+                                "items": {"type": "array", "items": {"type": "string"}},
                             },
                         },
                         coroutine=_run,
@@ -437,9 +437,9 @@ class TestMcpArgsModel:
                 ]
 
         monkeypatch.setattr("octop_harness.mcp.MultiServerMCPClient", _Client)
-        tools = await aload_mcp_tools({"honcho": {"transport": "http", "url": "http://honcho"}})
-        await tools[0].ainvoke({"conclusions": ["a", "b"]})
-        assert captured["arguments"] == {"conclusions": ["a", "b"]}
+        tools = await aload_mcp_tools({"docs": {"transport": "http", "url": "http://docs"}})
+        await tools[0].ainvoke({"items": ["a", "b"]})
+        assert captured["arguments"] == {"items": ["a", "b"]}
 
 
 class TestMergeMcpServerConfigs:
