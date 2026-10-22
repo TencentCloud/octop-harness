@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.runnables.config import var_child_runnable_config
+from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import ValidationError
 
 from octop_harness.mcp import (
@@ -162,6 +164,35 @@ class TestAloadMcpToolPostprocess:
 
 
 class TestMcpArgsModel:
+    @pytest.mark.parametrize(
+        ("spec", "expected_annotation"),
+        [
+            ({"type": "array", "items": {"type": "string"}}, list[str]),
+            ({"type": "array", "items": {"type": "integer"}}, list[int]),
+            ({"type": "array", "items": {"type": "object"}}, list[dict[str, Any]]),
+            ({"type": "array"}, list[Any]),
+            ({"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "null"}]}}, list[Any]),
+            ({"type": "object"}, dict[str, Any]),
+            ({"type": "string"}, str),
+            ({"type": "integer"}, int),
+            ({"type": "number"}, float),
+            ({"type": "boolean"}, bool),
+        ],
+    )
+    def test_maps_json_schema_types_to_annotations(
+        self,
+        spec: dict[str, Any],
+        expected_annotation: Any,
+    ) -> None:
+        """``array``/``object`` must not be downgraded to ``str``.
+
+        A downgraded ``str`` makes the call unsatisfiable on both sides: the
+        MCP server rejects the downgraded shape, and the Pydantic model
+        rejects the correct one.
+        """
+        model = mcp_args_model("t", {"type": "object", "properties": {"value": spec}, "required": ["value"]})
+        assert model.model_fields["value"].annotation == expected_annotation
+
     def test_preserves_design_inputs(self) -> None:
         schema = {
             "type": "object",
@@ -332,6 +363,83 @@ class TestMcpArgsModel:
         assert isinstance(schema, type)
         assert "search_key" in schema.model_fields
         assert schema.model_fields["search_key"].is_required()
+
+    @pytest.mark.asyncio
+    async def test_keeps_array_and_object_params_unconverted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A tool taking an array/object keeps its raw JSON Schema.
+
+        Converting such a schema to a Pydantic model loses nested constraints
+        (``items``, ``additionalProperties``, ``$ref``) that the MCP server
+        still validates against. Keeping the raw schema is what lets the
+        model send the declared shape instead of a downgraded ``str``.
+        """
+
+        class _Client:
+            def __init__(self, configs: dict[str, object], **kwargs: object) -> None:
+                del configs, kwargs
+
+            async def get_tools(self) -> list[MagicMock]:
+                tool = MagicMock()
+                tool.name = "honcho.create_conclusions"
+                tool.coroutine = None
+                tool.args_schema = {
+                    "type": "object",
+                    "required": ["conclusions"],
+                    "properties": {
+                        "conclusions": {"type": "array", "items": {"type": "string"}},
+                        "peer_card": {"type": "array", "items": {"type": "string"}},
+                        "filters": {"type": "object", "additionalProperties": True},
+                    },
+                }
+                return [tool]
+
+        monkeypatch.setattr("octop_harness.mcp.MultiServerMCPClient", _Client)
+        tools = await aload_mcp_tools({"honcho": {"transport": "http", "url": "http://honcho"}})
+        schema = tools[0].args_schema
+        assert isinstance(schema, dict)
+        props = schema["properties"]
+        assert props["conclusions"]["type"] == "array"
+        assert props["conclusions"]["items"] == {"type": "string"}
+        assert props["filters"]["type"] == "object"
+
+    @pytest.mark.asyncio
+    async def test_array_param_reaches_the_mcp_server_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An array argument must arrive at the MCP server as an array.
+
+        Before the fix the argument was downgraded to ``str``, so binding the
+        array raised a validation error before the call ever reached the
+        server — while the server itself expects an array.
+        """
+        captured: dict[str, object] = {}
+
+        async def _run(**arguments: object) -> dict[str, object]:
+            captured["arguments"] = arguments
+            return arguments
+
+        class _Client:
+            def __init__(self, configs: dict[str, object], **kwargs: object) -> None:
+                del configs, kwargs
+
+            async def get_tools(self) -> list[BaseTool]:
+                return [
+                    StructuredTool(
+                        name="honcho_create_conclusions",
+                        description="create conclusions",
+                        args_schema={
+                            "type": "object",
+                            "required": ["conclusions"],
+                            "properties": {
+                                "conclusions": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                        coroutine=_run,
+                    )
+                ]
+
+        monkeypatch.setattr("octop_harness.mcp.MultiServerMCPClient", _Client)
+        tools = await aload_mcp_tools({"honcho": {"transport": "http", "url": "http://honcho"}})
+        await tools[0].ainvoke({"conclusions": ["a", "b"]})
+        assert captured["arguments"] == {"conclusions": ["a", "b"]}
 
 
 class TestMergeMcpServerConfigs:
