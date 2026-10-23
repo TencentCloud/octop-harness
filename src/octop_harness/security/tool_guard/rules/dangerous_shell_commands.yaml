@@ -308,3 +308,116 @@
     - "^\\s*#"
   description: "Command uses Zsh-specific builtins that can bypass security checks"
   remediation: "Block Zsh module/builtin commands. These provide raw file I/O, network, and execution capabilities that bypass normal permission checks."
+
+# =========================================================================
+# Windows & PowerShell Detection Rules
+# =========================================================================
+# The catalog above is shell-agnostic. The rules below cover Windows hosts
+# where commands arrive through PowerShell or through signed Windows
+# binaries that are routinely abused as execution proxies (LOLBins).
+# GuardRule compiles every pattern with re.IGNORECASE, so no inline (?i).
+
+# ── PowerShell: encoded & download-and-execute ─────────────────
+- id: TOOL_CMD_PS_ENCODED_COMMAND
+  tools: [bash, execute]
+  params: [command]
+  category: code_execution
+  severity: CRITICAL
+  patterns:
+    - "\\b(?:powershell|pwsh)(?:\\.exe)?\\b[^\\n]*\\s-(?:e|ec|en|enc|enco|encodedcommand)\\s+[A-Za-z0-9+/=]{16,}"
+    - "\\bFromBase64String\\s*\\("
+  description: "Detects PowerShell encoded-command execution, where a base64 blob hides the real script from review"
+  remediation: "Block execution. Ask the user for the decoded script before running anything."
+
+# ── PowerShell: in-memory download-and-execute ─────────────────
+- id: TOOL_CMD_PS_DOWNLOAD_EXEC
+  tools: [bash, execute]
+  params: [command]
+  category: code_execution
+  severity: CRITICAL
+  patterns:
+    - "\\b(?:iex|invoke-expression)\\b"
+    - "\\b(?:downloadstring|downloaddata|downloadfile)\\s*\\("
+    - "\\b(?:invoke-webrequest|iwr)\\b[^\\n]*\\|\\s*(?:iex|invoke-expression)"
+  description: "Detects in-memory PowerShell download-and-execute (IEX with WebClient or Invoke-WebRequest)"
+  remediation: "Block execution. Agents must not pipe remote content into an interpreter."
+
+# ── PowerShell: reverse shell ──────────────────────────────────
+- id: TOOL_CMD_PS_REVERSE_SHELL
+  tools: [bash, execute]
+  params: [command]
+  category: network_abuse
+  severity: CRITICAL
+  patterns:
+    - "\\bNet\\.Sockets\\.TCPClient\\b"
+    - "\\b(?:powershell|pwsh)(?:\\.exe)?\\b[^\\n]*-e\\s+cmd\\b"
+  description: "Detects PowerShell reverse shells built on .NET TCPClient or 'powershell -e cmd'"
+  remediation: "Block operation. Agents do not need to bind interactive shells to network sockets."
+
+# ── PowerShell: hidden window / policy bypass ──────────────────
+- id: TOOL_CMD_PS_HIDDEN_WINDOW
+  tools: [bash, execute]
+  params: [command]
+  category: code_execution
+  severity: HIGH
+  patterns:
+    - "\\s-(?:w|windowstyle)\\s+hidden\\b"
+    - "\\s-(?:nop|noprofile)\\b[^\\n]*\\s-(?:ep|executionpolicy)\\s+(?:bypass|unrestricted)"
+  description: "Detects PowerShell launched with a hidden window or with execution-policy bypass flags"
+  remediation: "Confirm with user. Hidden window combined with policy bypass is a common evasion pattern."
+
+# ── Windows: signed-binary proxy execution (LOLBins) ────────────
+- id: TOOL_CMD_WIN_LOLBIN_EXEC
+  tools: [bash, execute]
+  params: [command]
+  category: code_execution
+  severity: HIGH
+  patterns:
+    - "\\bmshta(?:\\.exe)?\\b"
+    - "\\bcertutil(?:\\.exe)?\\b[^\\n]*\\s-(?:urlcache|decode|decodehex)\\b"
+    - "\\bregsvr32(?:\\.exe)?\\b[^\\n]*\\/i:https?://"
+    - "\\bbitsadmin(?:\\.exe)?\\b[^\\n]*\\/transfer\\b"
+  description: "Detects signed-binary proxy execution via mshta, certutil, regsvr32, or bitsadmin"
+  remediation: "Confirm with user. These LOLBins are routinely abused to fetch or run remote payloads."
+
+# ── Windows: persistence ───────────────────────────────────────
+- id: TOOL_CMD_WIN_PERSISTENCE
+  tools: [bash, execute]
+  params: [command]
+  category: privilege_escalation
+  severity: HIGH
+  patterns:
+    - "\\bschtasks(?:\\.exe)?\\b[^\\n]*\\/create\\b"
+    - "\\breg(?:\\.exe)?\\s+add\\b[^\\n]*\\\\CurrentVersion\\\\Run\\b"
+    - "\\bsc(?:\\.exe)?\\s+create\\b"
+    - "\\bNew-Service\\b"
+  description: "Detects Windows persistence through scheduled tasks, Run keys, or new services"
+  remediation: "Block operation. Persistence changes are outside normal agent scope."
+
+# ── Windows: credential access ─────────────────────────────────
+- id: TOOL_CMD_WIN_CREDENTIAL_DUMP
+  tools: [bash, execute]
+  params: [command]
+  category: credential_exposure
+  severity: CRITICAL
+  patterns:
+    - "\\bsekurlsa\\b"
+    - "\\blsass(?:\\.exe)?\\b"
+    - "\\bcomsvcs(?:\\.dll)?\\b[^\\n]*\\bMiniDump\\b"
+    - "\\bprocdump(?:\\.exe)?\\b[^\\n]*\\s-ma\\b"
+  description: "Detects LSASS memory dumping or credential-theft tooling (mimikatz, comsvcs, procdump)"
+  remediation: "Block operation. Credential dumping is never a legitimate agent action."
+
+# ── Windows: security-control & audit tampering ─────────────────
+- id: TOOL_CMD_WIN_DEFENSE_TAMPER
+  tools: [bash, execute]
+  params: [command]
+  category: code_execution
+  severity: CRITICAL
+  patterns:
+    - "\\bSet-MpPreference\\b[^\\n]*-Disable\\w+"
+    - "\\bAdd-MpPreference\\b[^\\n]*-Exclusion"
+    - "\\bwevtutil(?:\\.exe)?\\s+cl\\b"
+    - "\\bClear-EventLog\\b"
+  description: "Detects Defender or event-log tampering: disabling protection, adding exclusions, or clearing logs"
+  remediation: "Block operation. Disabling security controls or wiping logs destroys audit evidence."

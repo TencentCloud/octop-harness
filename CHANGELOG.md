@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 记忆规则从工作区 `AGENTS.md` 模板移到编译期系统提示。结构化记忆开启时，Agent 用 `memory_save`，`USER.md` / `MEMORY.md` 只读；关闭时改为直接编辑这两份文件，删除和移动仍被拦住。`manual_document_policy` 可改成始终由用户维护，或即使记忆开启也允许 Agent 修改。已有工作区里的旧记忆段保留，系统提示优先于它们。
 
+### 新增
+
+- `dangerous_shell_commands.yaml` 增加 8 条 Windows / PowerShell 检测规则：PowerShell 编码命令与内存下载执行（`TOOL_CMD_PS_ENCODED_COMMAND` / `TOOL_CMD_PS_DOWNLOAD_EXEC`）、.NET TCPClient 反向 shell（`TOOL_CMD_PS_REVERSE_SHELL`）、隐藏窗口与执行策略绕过（`TOOL_CMD_PS_HIDDEN_WINDOW`）、mshta / certutil / regsvr32 / bitsadmin 代理执行（`TOOL_CMD_WIN_LOLBIN_EXEC`）、计划任务与 Run 键持久化（`TOOL_CMD_WIN_PERSISTENCE`）、LSASS 凭据转储（`TOOL_CMD_WIN_CREDENTIAL_DUMP`）、Defender 与事件日志篡改（`TOOL_CMD_WIN_DEFENSE_TAMPER`），覆盖此前规则集零覆盖的 Windows 平台命令。
+
 ## [1.0.4] - 2026-10-16
 
 ### 新增
