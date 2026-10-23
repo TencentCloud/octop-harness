@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP tool failures that escape `ToolNode` (`McpError`, and output-schema `RuntimeError` such as `total` being the string `"1"`) become a failed tool result so the turn continues. An output-schema failure does not ask the model to edit arguments that were already accepted.
 - Preserve object, array and enum arguments in MCP tool schemas.
 - Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
 
