@@ -33,6 +33,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
+from langchain_core.runnables.config import ensure_config
 from octop_memory.ports.llm import LLMClientError, LLMTier
 
 from octop_harness.llm.invoke_helpers import bind_call_options, build_text_messages, stringify_content
@@ -48,6 +49,12 @@ _REASONING_MODEL_RE = re.compile(
     r"(qwen3|qwen-3|qwq)",
     re.IGNORECASE,
 )
+
+# Marker for out-of-band memory calls (extract / promotion / page regen /
+# manual-document compare). The protocol layer drops ``messages`` stream events
+# carrying this ``lc_source`` (see ``protocols.langgraph._INTERNAL_LC_SOURCES``).
+AUX_LC_SOURCE = "memory_aux"
+
 ThinkingMode = Literal["auto", "off", "on"]
 
 
@@ -246,7 +253,7 @@ class HarnessAgentLLMClient:
 
         for attempt in range(self._max_retries + 1):
             try:
-                response = bound_model.invoke(messages)
+                response = bound_model.invoke(messages, config=_aux_invoke_config())
                 return stringify_content(response.content)
             except Exception as exc:
                 if attempt < self._max_retries and _is_transient(exc):
@@ -265,6 +272,21 @@ class HarnessAgentLLMClient:
                     f"chat model {ref!r} failed for tier={tier!r}: {type(exc).__name__}: {detail}",
                 ) from exc
         raise AssertionError("unreachable")
+
+
+def _aux_invoke_config() -> dict[str, Any]:
+    """Return a run config that marks this auxiliary call as internal.
+
+    Memory calls run inside the agent turn — usually from a worker thread,
+    which inherits the ambient LangGraph run config via contextvars. LangGraph
+    therefore reports their tokens on the same ``messages`` stream as the
+    user-facing model, which leaks raw extractor / comparison JSON into the
+    chat reply. Inherited metadata is preserved for tracing, and ``lc_source``
+    stamps the call so the protocol layer can drop it.
+    """
+    metadata = dict(ensure_config().get("metadata") or {})
+    metadata["lc_source"] = AUX_LC_SOURCE
+    return {"metadata": metadata}
 
 
 def _is_transient(exc: BaseException) -> bool:

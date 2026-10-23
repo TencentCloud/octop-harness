@@ -14,16 +14,18 @@ from octop_harness.protocols.base import ChatProtocol
 from octop_harness.protocols.think_splitter import ThinkSplitter
 from octop_harness.usage import normalize_usage_metadata
 
-_INTERNAL_LC_SOURCES = frozenset({"summarization"})
+_INTERNAL_LC_SOURCES = frozenset({"summarization", "memory_aux"})
 
 
 def _is_internal_model_stream(metadata: Any) -> bool:
     """Return whether a LangGraph message stream belongs to an internal LLM call.
 
     LangChain tags conversation-compaction calls with
-    ``metadata["lc_source"] == "summarization"``.  LangGraph's ``messages``
-    stream includes those nested model tokens alongside the user-facing model
-    response, so they must be removed before protocol consumers see them.
+    ``metadata["lc_source"] == "summarization"``; ``HarnessAgentLLMClient`` tags
+    memory extraction / promotion / manual-document calls with
+    ``metadata["lc_source"] == "memory_aux"``.  LangGraph's ``messages`` stream
+    includes those nested model tokens alongside the user-facing model response,
+    so they must be removed before protocol consumers see them.
     """
     return isinstance(metadata, dict) and metadata.get("lc_source") in _INTERNAL_LC_SOURCES
 
