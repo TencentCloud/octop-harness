@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve object, array and enum arguments in MCP tool schemas.
 - Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
+- Read a workspace `.env` that is not valid UTF-8 as unreadable instead of raising: a file saved in another encoding (e.g. GBK on Windows) aborted agent spawn and every Docker sandbox execution.
 
 ### 修复
 
