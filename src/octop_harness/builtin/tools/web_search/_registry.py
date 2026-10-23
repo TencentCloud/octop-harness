@@ -35,7 +35,17 @@ import os
 from collections.abc import Iterable
 from typing import Any, Literal, cast
 
-WebSearchToolName = Literal["tavily", "brave", "deepseek", "google", "kimi", "yuanbao", "searchfree", "you"]
+WebSearchToolName = Literal[
+    "tavily",
+    "brave",
+    "deepseek",
+    "deepseek_fetch",
+    "google",
+    "kimi",
+    "yuanbao",
+    "searchfree",
+    "you",
+]
 
 # ``provider name → (required env vars, lazy loader returning a langchain tool)``.
 # Loaders are deliberately lazy so importing this module is cheap.
@@ -57,6 +67,12 @@ def _load_deepseek() -> Any:
     from octop_harness.builtin.tools.web_search.deepseek import deepseek_search
 
     return deepseek_search
+
+
+def _load_deepseek_fetch() -> Any:
+    from octop_harness.builtin.tools.web_search.deepseek import deepseek_fetch
+
+    return deepseek_fetch
 
 
 def _load_google() -> Any:
@@ -93,6 +109,9 @@ WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     "tavily": (("TAVILY_API_KEY",), _load_tavily),
     "brave": (("BRAVE_API_KEY",), _load_brave),
     "deepseek": (("DEEPSEEK_API_KEY",), _load_deepseek),
+    # Fetch shares the search tool's key; a separate name so callers can
+    # request page extraction without the search tool in the same agent.
+    "deepseek_fetch": (("DEEPSEEK_API_KEY",), _load_deepseek_fetch),
     "google": (("GOOGLE_API_KEY", "GOOGLE_CSE_ID"), _load_google),
     "kimi": (("MOONSHOT_API_KEY",), _load_kimi),
     "yuanbao": (("TENCENTCLOUD_WSA_APIKEY",), _load_yuanbao),
