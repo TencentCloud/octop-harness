@@ -175,6 +175,7 @@ class TestConstruction:
 
         mw_classes = [type(m).__name__ for m in captured["middleware"]]
         assert "ModelRouterMiddleware" in mw_classes
+        assert "McpToolErrorMiddleware" in mw_classes
         # The octop-memory adapter also owns the default-on JSONL session log.
         assert "HarnessMemoryMiddleware" in [m.name for m in captured["middleware"]]
         # ModelRetry and PII (api-key redaction) are on by default.

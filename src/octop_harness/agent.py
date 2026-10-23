@@ -40,6 +40,7 @@ from octop_harness.memory.policy import manual_documents_locked, render_memory_p
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
 from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
+from octop_harness.middleware.mcp_tool_error import McpToolErrorMiddleware
 from octop_harness.middleware.mcp_tools import MCPToolMiddleware
 from octop_harness.middleware.media_offload import MediaOffloadMiddleware
 from octop_harness.middleware.model_retry import ModelRetryMiddleware
@@ -1469,9 +1470,9 @@ class HarnessAgent:
         """Assemble the middleware chain in declared execution order.
 
         Order: bootstrap (front-loaded) → router → model_settings → session_header →
-        skill_filter → tool_guard → filesystem_guard (outside-root soft-fail; deny
-        rules when permissions + execution backend) → mcp_tools → retry →
-        pii → media_offload → checkpoint_ts → memory → user middleware → team →
+        skill_filter → mcp_tool_error → tool_guard → filesystem_guard (outside-root
+        soft-fail; deny rules when permissions + execution backend) → mcp_tools →
+        retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
         conversation_mode → tools_filter → decision (only when enabled) → tool search →
         task tool ordering → context_usage.
 
@@ -1488,6 +1489,7 @@ class HarnessAgent:
             ModelSettingsMiddleware(),
             SessionHeaderMiddleware(),
             SkillFilterMiddleware(config=cfg),
+            McpToolErrorMiddleware(),
         ]
 
         if cfg.tool_guard_enabled:
