@@ -17,7 +17,7 @@ from octop_harness.builtin.tools.web_search._registry import (
     _provider_available,
 )
 from octop_harness.builtin.tools.web_search.brave import brave_search
-from octop_harness.builtin.tools.web_search.deepseek import deepseek_search
+from octop_harness.builtin.tools.web_search.deepseek import deepseek_fetch, deepseek_search
 from octop_harness.builtin.tools.web_search.google import google_search
 from octop_harness.builtin.tools.web_search.kimi import kimi_search
 from octop_harness.builtin.tools.web_search.searchfree import searchfree_search
@@ -35,6 +35,7 @@ class TestRegistry:
             "tavily",
             "brave",
             "deepseek",
+            "deepseek_fetch",
             "google",
             "kimi",
             "yuanbao",
@@ -95,6 +96,7 @@ class TestLoadWebSearchTools:
         assert names == {
             "tavily_search",
             "deepseek_search",
+            "deepseek_fetch",
             "kimi_search",
             "searchfree_search",
         }
@@ -106,6 +108,7 @@ class TestLoadWebSearchTools:
             "tavily_search",
             "brave_search",
             "deepseek_search",
+            "deepseek_fetch",
             "google_search",
             "kimi_search",
             "yuanbao_search",
@@ -371,6 +374,138 @@ class TestDeepSeekSearch:
         with patch.object(mod.httpx, "AsyncClient", _Client):
             result = await deepseek_search.ainvoke({"query": "x"})
         assert message in result
+
+
+# ---------------------------------------------------------------------------
+# deepseek_fetch
+# ---------------------------------------------------------------------------
+
+
+class TestDeepSeekFetch:
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_returns_error(self) -> None:
+        result = await deepseek_fetch.ainvoke({"url": "https://example.com"})
+        assert "DEEPSEEK_API_KEY" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_title_and_markdown_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
+        captured: dict[str, Any] = {}
+
+        class _Response:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                return {"title": "Example", "content": "# Example\n\nBody."}
+
+        class _Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                captured["client"] = kwargs
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, Any],
+            ) -> _Response:
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["payload"] = json
+                return _Response()
+
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _Client):
+            result = await deepseek_fetch.ainvoke({"url": "https://example.com/article"})
+
+        assert json.loads(result) == {"title": "Example", "content": "# Example\n\nBody."}
+        assert captured["url"] == "https://api.deepseek.com/v1/tools/fetch"
+        assert captured["headers"]["Authorization"] == "Bearer secret"
+        assert captured["payload"] == {"url": "https://example.com/article"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status_code", "message"),
+        [
+            (401, "authentication failed"),
+            (402, "insufficient balance"),
+            (429, "rate limit"),
+            (404, "HTTP 404"),
+        ],
+    )
+    async def test_http_errors_are_surfaced(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        status_code: int,
+        message: str,
+    ) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
+
+        class _Response:
+            def __init__(self, code: int) -> None:
+                self.status_code = code
+
+            def json(self) -> dict[str, Any]:
+                return {}
+
+        class _Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(self, url: str, **kwargs: Any) -> _Response:
+                return _Response(status_code)
+
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _Client):
+            result = await deepseek_fetch.ainvoke({"url": "https://example.com/404"})
+        assert message in result
+
+    @pytest.mark.asyncio
+    async def test_empty_content_is_an_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
+
+        class _Response:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                return {"title": "", "content": ""}
+
+        class _Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(self, url: str, **kwargs: Any) -> _Response:
+                return _Response()
+
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _Client):
+            result = await deepseek_fetch.ainvoke({"url": "https://example.com"})
+        assert "no usable content" in result
 
 
 # ---------------------------------------------------------------------------
