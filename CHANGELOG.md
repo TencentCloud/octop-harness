@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
 
 ### 修复
+- `tools_disabled` 现在在工具调用派发时也会被强制拦截：即使模型仍具名调用被禁用的工具（内置与 MCP 工具均适用），`ToolsFilterMiddleware` 会在执行前返回错误结果、不再真正执行，与「未知工具名」的拒绝方式一致（#2267）
 
 - 提前结束 agent 流（例如 human-in-the-loop 暂停）时关闭内层异步生成器，避免 `harness_session_id` 在另一个 context 里 reset 并打出 `ContextVar ... created in a different Context`（#89）。
 

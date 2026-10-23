@@ -7,7 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, ToolMessage
+from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from octop_harness.config import HarnessAgentConfig
 from octop_harness.middleware.tools_filter import ToolsFilterMiddleware
@@ -110,3 +111,57 @@ class TestToolsFilterMiddleware:
         cfg.tools_disabled = frozenset({"web_fetch"})
         mw.wrap_model_call(self._request(tools), handler)
         assert captured["names"] == ["ls"]
+
+    def _tool_call_request(self, name: str, call_id: str = "call_1") -> ToolCallRequest:
+        return ToolCallRequest(
+            tool_call={"name": name, "id": call_id, "args": {}},
+            tool=None,
+            state={},
+            runtime=MagicMock(),
+        )
+
+    async def _noop_handler(self, request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(content="ran", tool_call_id=str(request.tool_call.get("id", "")))
+
+    @pytest.mark.asyncio
+    async def test_empty_disabled_passes_tool_call_through(self) -> None:
+        mw = self._middleware()
+        result = await mw.awrap_tool_call(
+            self._tool_call_request("execute"), self._noop_handler
+        )
+        assert result.status != "error"
+        assert result.content == "ran"
+
+    @pytest.mark.asyncio
+    async def test_rejects_disabled_tool_call(self) -> None:
+        mw = self._middleware(disabled=frozenset({"execute"}))
+        called: dict[str, bool] = {"hit": False}
+
+        async def handler(request: ToolCallRequest) -> ToolMessage:
+            called["hit"] = True
+            return ToolMessage(content="ran", tool_call_id="call_1")
+
+        result = await mw.awrap_tool_call(
+            self._tool_call_request("execute"), handler
+        )
+        assert called["hit"] is False
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "disabled" in result.content
+
+    @pytest.mark.asyncio
+    async def test_allows_enabled_tool_call(self) -> None:
+        mw = self._middleware(disabled=frozenset({"execute"}))
+        result = await mw.awrap_tool_call(
+            self._tool_call_request("read_file", call_id="call_2"), self._noop_handler
+        )
+        assert result.status != "error"
+        assert result.content == "ran"
+
+    @pytest.mark.asyncio
+    async def test_rejects_disabled_namespaced_tool_call(self) -> None:
+        mw = self._middleware(disabled=frozenset({"mcp__weather"}))
+        result = await mw.awrap_tool_call(
+            self._tool_call_request("mcp__weather", call_id="call_3"), self._noop_handler
+        )
+        assert result.status == "error"
