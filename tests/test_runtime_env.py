@@ -6,6 +6,7 @@ from pathlib import Path
 
 from octop_harness.runtime_env import (
     is_protected_env_key,
+    load_dotenv_path,
     merge_host_stdio_env,
     overlay_env,
     parse_env_text,
@@ -100,3 +101,17 @@ def test_merge_host_stdio_env_is_subset_not_full_host(monkeypatch: object) -> No
     assert env["TAVILY_API_KEY"] == "from-spec"
     assert "HOST_SECRET" not in env
     assert "PATH" in env or "HOME" in env
+
+
+def test_load_dotenv_path_skips_undecodable_file(tmp_path: Path) -> None:
+    readable = tmp_path / "readable"
+    readable.mkdir()
+    (readable / ".env").write_text("API_KEY=plain\n", encoding="utf-8")
+    assert load_dotenv_path(readable / ".env") == {"API_KEY": "plain"}
+
+    # A `.env` that is not valid UTF-8 (e.g. written as GBK by zh-CN Windows editors)
+    # raises UnicodeDecodeError, which is a ValueError, not the OSError the guard caught.
+    undecodable = tmp_path / "undecodable"
+    undecodable.mkdir()
+    (undecodable / ".env").write_bytes("API_KEY=你好\n".encode("gbk"))
+    assert load_dotenv_path(undecodable / ".env") == {}
