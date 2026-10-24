@@ -62,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - shell 后端不再按宿主 locale 解码子进程输出：中文 Windows（cp936）下 `execute` 的 UTF-8 输出会被静默丢弃（`<no output>` + 退出码 0），现改为按 UTF-8 → 宿主 locale → GBK 依次解码，全都不匹配时才降级为替换字符（TencentCloud/Octop#1959）。
 
+### 修复
+
+- 火山方舟单张生图不再发送 `sequential_image_generation`，修复 Seedream 5.0 pro / flash（`doubao-seedream-5-0-pro-260628` / `doubao-seedream-5-0-flash-260915`）返回 `InvalidParameter` 的问题；这两个模型不支持组图，`count > 1` 时在本地直接返回 `unsupported_input` 校验错误。
+
 ## [1.0.2] - 2026-10-09
 
 ### 修复
