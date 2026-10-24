@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add `ManagedMCPClient` for persistent, task-owned MCP sessions and resources.
 - Add optional `you` web-search provider (`you_search`). Explicit `["you"]` works without an API key (free tier, 100/day per IP); set `YDC_API_KEY` for the keyed endpoint and higher limits. Joins `auto` only when `YDC_API_KEY` is set, so the default tool set is unchanged.
+- Add optional `deepseek_fetch` web-search provider: DeepSeek's first-party Fetch endpoint (`POST /v1/tools/fetch`) returns a single page's body as Markdown (`{title, content}`), reusing `DEEPSEEK_API_KEY`. Registered next to `deepseek_search` so callers can request page extraction without the search tool.
 
 ### Fixed
 
