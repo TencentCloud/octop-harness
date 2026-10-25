@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import (
     AIMessage,
@@ -47,6 +47,8 @@ class ChatRequest:
             disables all skills). ``None`` (default) leaves the full skill set.
         conversation_mode: Optional turn permission mode (``ask`` / ``plan`` /
             ``craft``). Ask/Plan force ``skills=[]`` and hide MCP tools.
+        allowed_tools: Optional per-invocation tool ceiling. None inherits permissions;
+            an empty list disables tools; explicit names only narrow permissions.
         agent_id: Optional agent identifier recorded in
             ``RunnableConfig.configurable`` (e.g. for logging middleware).
         configurable: Extra ``RunnableConfig.configurable`` entries.
@@ -68,6 +70,7 @@ class ChatRequest:
     metadata: dict[str, Any] | None = None
     callbacks: list[Any] | None = None
     recursion_limit: int | None = None
+    allowed_tools: list[str] | None = None
 
     # Track whether thread_id was auto-generated so that callers (and the
     # agent) can distinguish "user didn't care" from "user explicitly chose this id".
@@ -90,7 +93,9 @@ class ChatRequest:
         if isinstance(request, str):
             return cls(messages=request)
         if isinstance(request, dict):
-            return cls(**request)
+            kwargs = dict(request)
+            allowed_tools = normalize_allowed_tools(cast(object, kwargs.pop("allowed_tools", None)))
+            return cls(**kwargs, allowed_tools=allowed_tools)
         raise TypeError(
             f"Cannot coerce {type(request).__name__} to ChatRequest; expected ChatRequest, str, or dict.",
         )
@@ -135,6 +140,14 @@ class ChatRequest:
             configurable["conversation_mode"] = parse_conversation_mode(self.conversation_mode)
         if self.configurable:
             configurable.update(self.configurable)
+        allowed = normalize_allowed_tools(self.allowed_tools)
+        configured = normalize_allowed_tools(configurable.get("allowed_tools"))
+        if allowed is not None:
+            configurable["allowed_tools"] = (
+                allowed if configured is None else [name for name in allowed if name in configured]
+            )
+        elif configured is not None:
+            configurable["allowed_tools"] = configured
         _restrict_ask_plan_config(configurable)
 
         config: dict[str, Any] = {"configurable": configurable}
@@ -156,6 +169,19 @@ def _assign_if_not_none(target: dict[str, Any], **values: object) -> None:
     for key, value in values.items():
         if value is not None:
             target[key] = value
+
+
+def normalize_allowed_tools(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("allowed_tools must be a list of non-empty tool names or None")
+    names: list[str] = []
+    for name in cast(list[object], value):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("allowed_tools must be a list of non-empty tool names or None")
+        names.append(name.strip())
+    return list(dict.fromkeys(names))
 
 
 def _restrict_ask_plan_config(configurable: dict[str, Any]) -> None:

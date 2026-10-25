@@ -11,9 +11,10 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1754,6 +1755,7 @@ async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
         user="7",
         agent_id="designer",
         mcp_servers=["open-design__one"],
+        allowed_tools=["ask_user_question"],
         configurable={"locale": "zh", "session_key": "session", "knowledge_base_ids": ["kb"]},
     )
     expected = request.to_runnable_config()["configurable"]
@@ -1779,3 +1781,25 @@ async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
     finally:
         await agent.aclose()
     assert agent._hitl_resume_configs == {}
+
+
+@pytest.mark.parametrize("auto_load", [False, True])
+def test_managed_subagents_receive_turn_tool_filter(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], AbstractContextManager[MagicMock]],
+    stub_create_deep_agent: AbstractContextManager[MagicMock],
+    auto_load: bool,
+) -> None:
+    from octop_harness.middleware.tools_filter import ToolsFilterMiddleware
+
+    cfg.subagents_auto_load = auto_load
+    cfg.subagents = [
+        {"name": "reader", "description": "Read public files", "system_prompt": "Read only requested files."}
+    ]
+    with mock_model_factory(), stub_create_deep_agent as create, HarnessAgent(cfg):
+        assert create.call_args is not None
+        specs = cast(list[dict[str, object]], create.call_args.kwargs["subagents"])
+        spec = next(spec for spec in specs if spec["name"] == "reader")
+        middleware = spec["middleware"]
+        assert isinstance(middleware, list)
+        assert any(isinstance(item, ToolsFilterMiddleware) for item in cast(list[object], middleware))
