@@ -263,6 +263,18 @@ async for chunk in agent.stream(request):
     print(chunk.delta, end="")
 ```
 
+### Per-invocation tool permissions
+
+Pass `ChatRequest(messages="Hello", allowed_tools=[])` for a chat-only turn, or
+an exact tool-name list such as `["web_fetch"]` to narrow that invocation.
+`None` keeps existing behavior. This ceiling intersects configured permissions
+and Ask/Plan restrictions, filters the final tool catalog, and rejects forbidden
+tool calls before execution. Managed subagents and in-process HITL resumes retain
+the request scope; concurrent requests do not mutate the agent configuration.
+Hosts must derive the ceiling from trusted authorization data. Custom tools and
+precompiled subagents remain responsible for operations they perform internally.
+Tool permissions do not remove private memory already included in model context.
+
 ### Progressive tool loading
 
 Large, low-frequency tool sets can be hidden until the model needs them. The
@@ -433,3 +445,9 @@ async with ManagedMCPClient({"transport": "stdio", "command": "my-mcp", "args": 
 Explicit `await client.aclose()` is also supported. Closed or disconnected clients
 must be replaced; writes are never retried automatically. Default MCP tool loading
 remains stateless.
+
+For Octop group-chat protection, deploy this capability together with a gateway
+that emits `InboundMessage.allowed_tools` and an Octop version that forwards it.
+The Octop release must upgrade both SDKs; older gateways silently lack the field,
+while older harness versions reject the new request parameter. Source integration
+tests are distinct from acceptance with the released, locked dependency set.

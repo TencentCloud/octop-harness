@@ -93,6 +93,27 @@ class TestCoerce:
 
 
 class TestToRunnableConfig:
+    def test_existing_positional_agent_id_argument_is_preserved(self) -> None:
+        request = ChatRequest("hello", "thread", "user", "source", "model", None, False, None, None, "agent")
+        assert request.agent_id == "agent"
+        assert request.allowed_tools is None
+
+    @pytest.mark.parametrize("allowed", [[], ["web_fetch"]])
+    def test_turn_tool_ceiling_cannot_be_widened_by_configurable(self, allowed: list[str]) -> None:
+        cfg = ChatRequest(
+            messages="hello", allowed_tools=allowed, configurable={"allowed_tools": ["web_fetch", "execute"]}
+        ).to_runnable_config()
+        assert cfg["configurable"]["allowed_tools"] == allowed
+
+    def test_tool_ceiling_preserves_explicit_empty_list(self) -> None:
+        cfg = ChatRequest(messages="hello", allowed_tools=[]).to_runnable_config()
+        assert cfg["configurable"]["allowed_tools"] == []
+
+    @pytest.mark.parametrize("value", ["read_file", [""], [1]])
+    def test_malformed_tool_ceiling_is_rejected(self, value: object) -> None:
+        with pytest.raises(ValueError, match="allowed_tools"):
+            _ = ChatRequest.coerce({"messages": "hello", "allowed_tools": value}).to_runnable_config()
+
     def test_minimal(self) -> None:
         cfg = ChatRequest(messages="hi", thread_id="t1").to_runnable_config()
         assert cfg["configurable"] == {"thread_id": "t1"}

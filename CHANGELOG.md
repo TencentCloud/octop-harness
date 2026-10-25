@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `ChatRequest.allowed_tools` as an optional per-invocation ceiling, enforced at model and tool-execution boundaries and inherited by managed subagents. Existing requests retain their tool behavior.
 - Add `ManagedMCPClient` for persistent, task-owned MCP sessions and resources.
 - Add optional `you` web-search provider (`you_search`). Explicit `["you"]` works without an API key (free tier, 100/day per IP); set `YDC_API_KEY` for the keyed endpoint and higher limits. Joins `auto` only when `YDC_API_KEY` is set, so the default tool set is unchanged.
 
