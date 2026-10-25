@@ -54,6 +54,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Every OpenAI-compatible request must have a finite upper bound. langchain-openai
+# leaves ``request_timeout`` at ``None`` by default, and the OpenAI SDK treats
+# ``timeout=None`` as "never time out" (not "use the default"). A provider that
+# accepts the TCP connection but never responds then pins a gateway worker
+# forever, which exhausts the small worker pool and hangs every agent (#2241).
+# 600s is a conservative cap: long reasoning turns still finish, but a silent
+# provider can no longer hang a worker indefinitely.
+_DEFAULT_REQUEST_TIMEOUT_S = 600.0
+
 
 class ChatModelFactory:
     """Lazily builds and caches ``BaseChatModel`` instances.
@@ -297,6 +306,10 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: 
         # OpenAI endpoint; with a custom base_url (always our case) it stays
         # off and streamed AIMessages carry no usage_metadata.
         "stream_usage": provider.stream_usage,
+        # Bound every request so a silent provider cannot hang the worker
+        # forever (#2241). langchain-openai's ``timeout`` alias maps to
+        # ``request_timeout``, which the OpenAI SDK forwards to httpx.
+        "timeout": _DEFAULT_REQUEST_TIMEOUT_S,
     }
     if max_retries is not None:
         kwargs["max_retries"] = max_retries

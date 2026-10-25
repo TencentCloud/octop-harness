@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve object, array and enum arguments in MCP tool schemas.
 - Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
 
+- Bound OpenAI-compatible chat-model requests with a default 600s timeout. `langchain-openai` leaves `request_timeout=None`, which the OpenAI SDK treats as "never time out" (not "use the default"), so a provider that accepts the connection but never responds can pin a gateway worker indefinitely and leave every agent unresponsive until restart (#2241).
 ### 修复
 
 - 提前结束 agent 流（例如 human-in-the-loop 暂停）时关闭内层异步生成器，避免 `harness_session_id` 在另一个 context 里 reset 并打出 `ContextVar ... created in a different Context`（#89）。
