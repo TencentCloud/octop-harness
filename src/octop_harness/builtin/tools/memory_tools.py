@@ -117,6 +117,7 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
         Use when the user asks you to remember something. Store one concise
         fact per call; only confirm remembering after this tool succeeds.
         MEMORY.md and USER.md are user-maintained and must be left unchanged.
+        Manual-document review progress is informational; reported conflicts need user review.
 
         Args:
             content: The fact to remember, preserving its scope and qualifiers.
@@ -136,9 +137,7 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
                 "Tell the user about the conflict; do not claim it is confirmed. Manual documents take priority."
             )
         if isinstance(review, dict) and review.get("status") != "complete":
-            return (
-                "Memory saved to octop-memory, but manual-document review is incomplete. Tell the user it needs review."
-            )
+            return f"Memory saved to octop-memory. Manual-document review status: {review.get('status', 'unknown')}."
         return "Memory saved to octop-memory."
 
     return [memory_search, memory_get, memory_save]  # type: ignore[list-item]

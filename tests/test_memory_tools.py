@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from octop_harness.builtin.tools.memory_tools import build_memory_tools
 
 
@@ -35,9 +37,35 @@ class _FakeService:
 class TestBuildMemoryTools:
     def test_memory_save_reports_a_manual_document_conflict(self) -> None:
         service = _FakeService()
-        service.save_result.metadata = {"manual_document_conflict": True}
+        service.save_result.metadata = {
+            "manual_document_conflict": True,
+            "manual_document_review": {"status": "partial"},
+        }
         save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
-        assert "review candidate" in save.invoke({"content": "A conflicting fact"})
+        result = save.invoke({"content": "A conflicting fact"})
+
+        assert "review candidate" in result
+        assert "Tell the user about the conflict" in result
+        assert "do not claim it is confirmed" in result
+
+    @pytest.mark.parametrize("status", ["partial", "uncertain", "stale", "not_checked", "failed"])
+    def test_memory_save_reports_review_progress_without_requesting_user_action(self, status: str) -> None:
+        service = _FakeService()
+        service.save_result.metadata = {"manual_document_review": {"status": status}}
+        save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
+
+        result = save.invoke({"content": "User prefers dark mode"})
+
+        assert "tell the user" not in result.lower()
+        assert result.startswith("Memory saved to octop-memory.")
+        assert f"review status: {status}" in result
+
+    def test_memory_save_with_completed_review_confirms_the_save(self) -> None:
+        service = _FakeService()
+        service.save_result.metadata = {"manual_document_review": {"status": "complete"}}
+        save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
+
+        assert save.invoke({"content": "User prefers dark mode"}) == "Memory saved to octop-memory."
 
     def test_returns_recall_tools(self) -> None:
         tools = build_memory_tools(_FakeService())  # type: ignore[arg-type]
