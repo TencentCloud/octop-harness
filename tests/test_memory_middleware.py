@@ -598,6 +598,23 @@ class TestIdleMaintenance:
         finally:
             mw.shutdown()
 
+    def test_schedule_manual_review_runs_one_background_batch(self, service: _SpyService) -> None:
+        seen: dict[str, int] = {}
+        done = threading.Event()
+
+        def review(*, max_atoms: int = 100) -> None:
+            seen["max_atoms"] = max_atoms
+            done.set()
+
+        service.review_new_memory = review  # type: ignore[attr-defined]
+        mw = MemoryMiddleware(service=service, jsonl_enabled=False, maintenance_interval_seconds=0)  # type: ignore[arg-type]
+        try:
+            mw.schedule_manual_review()
+            assert done.wait(2)
+            assert seen["max_atoms"] == 20
+        finally:
+            mw.shutdown()
+
 
 class TestChatModelCallback:
     def test_after_model_notifies_live_chat_model(self, service: _SpyService) -> None:
