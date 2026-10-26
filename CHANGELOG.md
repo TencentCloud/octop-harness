@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 变更
+
+- `desktop` 与 `all` 的 Pillow 下限改为 `>=13.0.0`，避开 12.3.0 及更早版本的图片解码漏洞。
+
 ## [1.0.5] - 2026-10-24
 
 ### 新增
