@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from octop_harness.config import ModelConfig, ProviderConfig
+from octop_harness.llm.http_timeout import LLM_HTTP_TIMEOUT
 from octop_harness.llm.session_header import (
     aclose_session_http_clients,
     attach_session_http_clients,
@@ -326,6 +327,11 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: 
         # default httpx client (which other providers reuse).
         session_clients = session_http_clients(provider.session_header)
         kwargs["http_client"], kwargs["http_async_client"] = session_clients
+    # Always pass timeout to the SDK. With a custom http_client, OpenAI still
+    # honors the ChatOpenAI ``timeout`` kwarg on each request; omitting it (or
+    # passing None) writes four None timeouts onto the request and ignores the
+    # client's Timeout(read=...).
+    kwargs["timeout"] = LLM_HTTP_TIMEOUT
     instance: BaseChatModel = cls(**kwargs)
     instance._harness_codex = is_codex  # type: ignore[attr-defined]
 
@@ -882,6 +888,8 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retrie
     # Enable extended thinking when model.thinking is explicitly True.
     if model.thinking is True:
         kwargs["thinking"] = {"type": "adaptive"}
+    # ChatAnthropic's ``timeout`` (default_request_timeout) is a plain float.
+    kwargs["timeout"] = LLM_HTTP_TIMEOUT.read
     instance_a: BaseChatModel = ChatAnthropic(**kwargs)
     if provider.session_header:
         bind_anthropic_session_header(instance_a, provider.session_header)
