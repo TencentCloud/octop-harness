@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pin replies and visible thinking to the configured language, after workspace memory.
 - Add `ManagedMCPClient` for persistent, task-owned MCP sessions and resources.
 - Add optional `you` web-search provider (`you_search`). Explicit `["you"]` works without an API key (free tier, 100/day per IP); set `YDC_API_KEY` for the keyed endpoint and higher limits. Joins `auto` only when `YDC_API_KEY` is set, so the default tool set is unchanged.
 
@@ -17,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP tool failures that escape `ToolNode` (`McpError`, and output-schema `RuntimeError` such as `total` being the string `"1"`) become a failed tool result so the turn continues. An output-schema failure does not ask the model to edit arguments that were already accepted.
 - Preserve object, array and enum arguments in MCP tool schemas.
 - Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
+- Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
+- Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
 
 ### 修复
 
@@ -25,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 变更
 
 - 记忆规则从工作区 `AGENTS.md` 模板移到编译期系统提示。结构化记忆开启时，Agent 用 `memory_save`，`USER.md` / `MEMORY.md` 只读；关闭时改为直接编辑这两份文件，删除和移动仍被拦住。`manual_document_policy` 可改成始终由用户维护，或即使记忆开启也允许 Agent 修改。已有工作区里的旧记忆段保留，系统提示优先于它们。
+- `HttpDecisionClient` 在非 strict 模式下，传输或 HTTP 失败重试后抛出 `DecisionRequestError`，不再返回空结果。成功但解析不出概率时仍返回空 map。
 
 ## [1.0.4] - 2026-10-16
 

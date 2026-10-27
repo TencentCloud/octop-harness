@@ -14,6 +14,7 @@ from octop_harness.agent import HarnessAgent, InitResult
 from octop_harness.backends.workspace import DEFAULT_MEMORY_FILES
 from octop_harness.builtin.templates import iter_md_template_files
 from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
+from octop_harness.memory.policy import memory_system_prompt, render_reply_language_prompt
 from octop_harness.middleware.bootstrap import BOOTSTRAP_FILENAME, BOOTSTRAPPED_MARKER
 
 # Expected templates in zh/ directory (SOUL.md is memory-only, not seeded by init).
@@ -76,6 +77,14 @@ def agent(cfg: HarnessAgentConfig) -> HarnessAgent:
         return HarnessAgent(cfg)
 
 
+def test_reply_language_follows_memory_body() -> None:
+    """The language rule is after workspace files, inside the memory block."""
+    wrapped = memory_system_prompt(language="zh").format(agent_memory="SOUL in English")
+    assert wrapped.index("SOUL in English") < wrapped.index("简体中文")
+    assert render_reply_language_prompt(language="en") in memory_system_prompt(language="en")
+    assert "{agent_memory}" in memory_system_prompt(language="en")
+
+
 class TestInitWorkspaceInstanceMethod:
     def test_completed_bootstrap_restores_all_workspace_context(self, agent: HarnessAgent) -> None:
         agent._config.memory = ()
@@ -86,7 +95,7 @@ class TestInitWorkspaceInstanceMethod:
             agent._init_graph()
         loader = next(m for m in create.call_args.kwargs["middleware"] if type(m) is DeepAgentsMemoryMiddleware)
         assert loader.sources == create.call_args.kwargs["memory"]
-        assert loader.system_prompt == "<agent_memory>\n{agent_memory}\n</agent_memory>"
+        assert loader.system_prompt == memory_system_prompt(language="zh")
         loaded = loader.before_agent({}, MagicMock(), {})
         assert loaded is not None
         assert set(loaded["memory_contents"].values()) == {"working instructions", "user-owned strong memory"}
