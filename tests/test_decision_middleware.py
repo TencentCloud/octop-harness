@@ -13,7 +13,7 @@ from langgraph.config import var_child_runnable_config
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from octop_harness.decision import decision_active, parse_probabilities
-from octop_harness.decision.client import _timeout_for
+from octop_harness.decision.client import _ATTEMPTS, DecisionRequestError, HttpDecisionClient, _timeout_for
 from octop_harness.decision.config import DecisionConfig
 from octop_harness.decision.select import Candidate, keep_confident, lexical_shortlist
 from octop_harness.middleware.decision import DecisionMiddleware
@@ -36,8 +36,11 @@ class _Scorer:
 
 
 @contextmanager
-def _configurable(**kwargs: object):
-    token = var_child_runnable_config.set({"configurable": kwargs})
+def _configurable(*, run_id: str = "", **kwargs: object):
+    config: dict[str, object] = {"configurable": kwargs}
+    if run_id:
+        config["run_id"] = run_id
+    token = var_child_runnable_config.set(config)
     try:
         yield
     finally:
@@ -69,6 +72,13 @@ def _tool(name: str, description: str = "") -> MagicMock:
     tool.name = name
     tool.description = description or name
     return tool
+
+
+def _note(request: ModelRequest) -> str:
+    if not request.messages:
+        return ""
+    content = request.messages[-1].content
+    return content if isinstance(content, str) else str(content)
 
 
 def _config(**overrides: Any) -> DecisionConfig:
@@ -201,11 +211,15 @@ def test_middleware_drops_skill_definitions_and_keeps_that_cut() -> None:
         model_settings={},
     )
     first = mw.wrap_model_call(request, lambda item: item)
-    assert "pdf" in first.system_message.content
+    assert "**How to Use Skills" in first.system_message.content
     assert "xlsx" not in first.system_message.content
+    assert "- **pdf**:" not in first.system_message.content
+    assert "pdf" in _note(first)
+    assert "xlsx" not in _note(first)
     assert [row["name"] for row in first.state["skills_metadata"]] == ["pdf"]
     second = mw.wrap_model_call(request, lambda item: item)
-    assert "xlsx" not in second.system_message.content
+    assert second.system_message.content == first.system_message.content
+    assert "xlsx" not in _note(second)
     assert scorer.calls == 1
 
 
@@ -263,7 +277,7 @@ def test_low_tool_scores_keep_capability_tools() -> None:
     events: list[dict[str, Any]] = []
 
     def reply(item: ModelRequest) -> ModelResponse:
-        events.append({"tools": [tool.name for tool in item.tools]})
+        events.append({"tools": [tool.name for tool in item.tools], "note": _note(item)})
         return ModelResponse(result=[AIMessage(content="好")])
 
     first = mw.wrap_model_call(request, reply)
@@ -273,7 +287,9 @@ def test_low_tool_scores_keep_capability_tools() -> None:
         "execute",
         "browser_use",
         "send_file_to_user",
+        "call_deferred_tool",
     ]
+    assert "misc_0" not in events[0]["note"]
     part = first.result[0].additional_kwargs["octop_decision"]["parts"][0]
     assert part == {"kind": "tool", "kept": []}
     scorer.probabilities = {"tool:browser_use": 0.95}
@@ -284,6 +300,7 @@ def test_low_tool_scores_keep_capability_tools() -> None:
         "execute",
         "browser_use",
         "send_file_to_user",
+        "call_deferred_tool",
     ]
     assert scorer.calls == 1
 
@@ -294,7 +311,9 @@ def test_unscored_tools_stay_in_the_catalog() -> None:
     scorer = _Scorer({"tool:not-asked": 0.2})
     mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
     out = mw.wrap_model_call(_request(tools=tools, text="读取 pdf 合同"), lambda item: item)
-    assert [tool.name for tool in out.tools] == [tool.name for tool in tools]
+    assert [tool.name for tool in out.tools] == ["call_deferred_tool"]
+    assert "read_pdf" in _note(out)
+    assert "misc_0" in _note(out)
 
 
 def test_middleware_keeps_tools_it_already_allowed_this_turn() -> None:
@@ -304,13 +323,14 @@ def test_middleware_keeps_tools_it_already_allowed_this_turn() -> None:
     mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
     request = _request(tools=tools, text="读取 pdf 合同")
     first = mw.wrap_model_call(request, lambda item: item)
-    assert "read_pdf" in [tool.name for tool in first.tools]
-    assert "plugin_browser" not in [tool.name for tool in first.tools]
+    assert [tool.name for tool in first.tools] == ["call_deferred_tool"]
+    assert "read_pdf" in _note(first)
+    assert "plugin_browser" not in _note(first)
     scorer.probabilities = {"tool:plugin_browser": 0.93}
     second = mw.wrap_model_call(request, lambda item: item)
-    names = [tool.name for tool in second.tools]
-    assert "read_pdf" in names
-    assert "plugin_browser" not in names
+    assert [tool.name for tool in second.tools] == ["call_deferred_tool"]
+    assert _note(second) == _note(first)
+    assert second.system_message.content == first.system_message.content
     assert scorer.calls == 1
 
 
@@ -329,7 +349,11 @@ def test_question_budget_keeps_unasked_catalog_entries() -> None:
     assert sum(item_id.startswith("tool:") for item_id in asked) == 10
     assert "tool:read_file" not in asked
     assert [row["name"] for row in out.state["skills_metadata"]] == ["skill-0", "skill-10", "skill-11"]
-    assert [tool.name for tool in out.tools] == ["read_file", "tool-0", "tool-10", "tool-11"]
+    assert [tool.name for tool in out.tools] == ["read_file", "call_deferred_tool"]
+    assert "- tool-0:" in _note(out)
+    assert "- tool-10:" in _note(out)
+    assert "- tool-11:" in _note(out)
+    assert "- tool-1:" not in _note(out)
 
 
 def test_turn_cache_drops_the_oldest_entry() -> None:
@@ -382,7 +406,7 @@ def test_later_user_turn_sends_prior_conversation_to_the_decision_model() -> Non
     assert "按刚才说的做" in scorer.state
     assert "草稿已经写好了" in scorer.state
     assert "smtp_submit" in [item_id.split(":", 1)[1] for item_id, _ in scorer.statements]
-    assert "smtp_submit" in [tool.name for tool in out.tools]
+    assert "smtp_submit" in _note(out)
 
 
 def test_decision_state_keeps_the_latest_ask_when_history_overflows() -> None:
@@ -408,7 +432,9 @@ def test_middleware_keeps_only_confident_tools() -> None:
     scorer = _Scorer({"tool:read_pdf": 0.91})
     mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
     out = mw.wrap_model_call(_request(tools=tools, text="读取 pdf 合同"), lambda request: request)
-    assert [tool.name for tool in out.tools] == ["read_pdf"]
+    assert [tool.name for tool in out.tools] == ["call_deferred_tool"]
+    assert "read_pdf" in _note(out)
+    assert "misc_0" not in _note(out)
 
 
 def test_middleware_pins_members_and_blocks_the_rest() -> None:
@@ -425,7 +451,8 @@ def test_middleware_pins_members_and_blocks_the_rest() -> None:
     )
     with _configurable(peer_invoke_mode="async", user=1, agent_id="host", thread_id="room-1"):
         hinted = mw.wrap_model_call(_request(text="请安排人查一下资料"), lambda request: request)
-        assert "研究员" in str(hinted.system_message.content)
+        assert hinted.system_message.content == "base"
+        assert "研究员" in _note(hinted)
         listed = mw.wrap_tool_call(
             ToolCallRequest(
                 tool_call={"name": "agent_list", "args": {}, "id": "l1"},
@@ -463,7 +490,8 @@ def test_team_host_without_request_mode_still_pins_members() -> None:
     mw = DecisionMiddleware(config=_config(skills=False, tools=False), team=team, scorer=scorer)
     with _configurable(user=1, agent_id="host", thread_id="room-1"):
         hinted = mw.wrap_model_call(_request(text="请安排人查一下资料"), lambda request: request)
-    assert "研究员" in str(hinted.system_message.content)
+    assert hinted.system_message.content == "base"
+    assert "研究员" in _note(hinted)
     assert scorer.calls == 1
 
 
@@ -526,7 +554,7 @@ def test_followup_scores_the_next_member_not_the_one_who_just_finished() -> None
     seen: dict[str, str] = {}
 
     def reply(item: ModelRequest) -> ModelResponse:
-        seen["system"] = str(item.system_message.content)
+        seen["note"] = _note(item)
         return ModelResponse(result=[AIMessage(content="好")])
 
     with _configurable(
@@ -545,8 +573,8 @@ def test_followup_scores_the_next_member_not_the_one_who_just_finished() -> None
         "result:sufficient",
         "member:agent-writer",
     ]
-    assert "写作者" in seen["system"]
-    assert "研究员" not in seen["system"].split("这轮只派给")[-1]
+    assert "写作者" in seen["note"]
+    assert "研究员" not in seen["note"].split("这轮只派给")[-1]
     parts = out.result[0].additional_kwargs["octop_decision"]["parts"]
     assert parts[0]["kind"] == "result"
     assert parts[1]["kind"] == "tool"
@@ -590,7 +618,7 @@ def test_followup_low_scores_close_dispatch() -> None:
     seen: dict[str, str] = {}
 
     def reply(item: ModelRequest) -> ModelResponse:
-        seen["system"] = str(item.system_message.content)
+        seen["note"] = _note(item)
         seen["tools"] = [tool.name for tool in item.tools]
         return ModelResponse(result=[AIMessage(content="好")])
 
@@ -612,7 +640,7 @@ def test_followup_low_scores_close_dispatch() -> None:
             ),
             lambda _request: ToolMessage(content="ok", tool_call_id="a1"),
         )
-    assert "不必再派工" in seen["system"]
+    assert "不必再派工" in seen["note"]
     assert seen["tools"] == ["ask_agent", "agent_list", "current_time"]
     assert blocked.status == "error"
     parts = out.result[0].additional_kwargs["octop_decision"]["parts"]
@@ -642,7 +670,7 @@ def test_followup_evaluates_result_when_no_member_remains() -> None:
     seen: dict[str, str] = {}
 
     def reply(item: ModelRequest) -> ModelResponse:
-        seen["system"] = str(item.system_message.content)
+        seen["note"] = _note(item)
         return ModelResponse(result=[AIMessage(content="好")])
 
     with _configurable(
@@ -655,7 +683,7 @@ def test_followup_evaluates_result_when_no_member_remains() -> None:
     ):
         out = mw.wrap_model_call(request, reply)
     assert [item_id for item_id, _ in scorer.statements] == ["result:sufficient"]
-    assert "结果已经足够" in seen["system"]
+    assert "结果已经足够" in seen["note"]
     parts = out.result[0].additional_kwargs["octop_decision"]["parts"]
     assert parts == [
         {
@@ -726,6 +754,210 @@ async def test_empty_score_does_not_change_the_request(
     assert events == [{"kind": "decision", "model": "laya", "empty": True, "parts": []}]
 
 
+class _FailingScorer:
+    def score(self, *, state: str, statements: list[tuple[str, str]]) -> dict[str, float]:
+        raise DecisionRequestError("http://127.0.0.1:9/v1/decisions", "ConnectError")
+
+    async def score_async(self, *, state: str, statements: list[tuple[str, str]]) -> dict[str, float]:
+        raise DecisionRequestError("http://127.0.0.1:9/v1/decisions", "ConnectError")
+
+
+@pytest.mark.asyncio
+async def test_failed_decision_request_keeps_catalog_and_reports_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {
+        "skills_metadata": [
+            {"name": "pdf", "description": "读取 pdf"},
+            {"name": "xlsx", "description": "表格"},
+        ]
+    }
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: events.append)
+    mw = DecisionMiddleware(config=_config(tools=False, team=False), scorer=_FailingScorer())
+    seen: list[ModelRequest] = []
+
+    async def reply(request: ModelRequest) -> ModelResponse:
+        seen.append(request)
+        return ModelResponse(result=[AIMessage(content="好")])
+
+    out = await mw.awrap_model_call(_request(state=state), reply)
+    assert [row["name"] for row in seen[0].state["skills_metadata"]] == ["pdf", "xlsx"]
+    assert events == [
+        {
+            "kind": "decision",
+            "model": "laya",
+            "empty": True,
+            "parts": [],
+            "error": "request_failed",
+            "detail": "ConnectError",
+        }
+    ]
+    stamped = out.result[0].additional_kwargs["octop_decision"]
+    assert stamped["error"] == "request_failed"
+    assert stamped["detail"] == "ConnectError"
+
+
+def test_provider_native_tools_stay_callable_and_are_not_scored() -> None:
+    native = {"type": "function", "function": {"name": "web_search", "description": "搜索网页", "parameters": {}}}
+    tools: list[Any] = [_tool(f"misc_{index}", "unrelated") for index in range(8)]
+    tools.append(native)
+    scorer = _Scorer({f"tool:misc_{index}": 0.1 for index in range(8)})
+    mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
+    out = mw.wrap_model_call(_request(tools=tools, text="搜索网页"), lambda item: item)
+    assert native in out.tools
+    assert "tool:web_search" not in {item_id for item_id, _text in scorer.statements}
+
+
+def test_deferred_catalogs_stay_with_their_run() -> None:
+    pdf = _tool("read_pdf", "读取 pdf")
+    sheet = _tool("read_sheet", "读取表格")
+    tools_pdf = [*(_tool(f"misc_{index}", "unrelated") for index in range(8)), pdf]
+    tools_sheet = [*(_tool(f"misc_{index}", "unrelated") for index in range(8)), sheet]
+    mw = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({"tool:read_pdf": 0.95, "tool:read_sheet": 0.95}),
+    )
+    with _configurable(run_id="run-a", thread_id="room"):
+        mw.wrap_model_call(_request(tools=tools_pdf, text="读取 pdf"), lambda item: item)
+    with _configurable(run_id="run-b", thread_id="room"):
+        mw.wrap_model_call(_request(tools=tools_sheet, text="读取表格"), lambda item: item)
+
+    def forward(name: str, *, run_id: str) -> ToolMessage:
+        def handler(item: ToolCallRequest) -> ToolMessage:
+            return ToolMessage(content=item.tool_call["name"], name=str(item.tool_call["name"]), tool_call_id="c")
+
+        with _configurable(run_id=run_id, thread_id="room"):
+            result = mw.wrap_tool_call(
+                ToolCallRequest(
+                    tool_call={"name": "call_deferred_tool", "args": {"name": name, "arguments": {}}, "id": "c"},
+                    tool=None,  # type: ignore[arg-type]
+                    state={},  # type: ignore[arg-type]
+                    runtime=None,  # type: ignore[arg-type]
+                ),
+                handler,
+            )
+        assert isinstance(result, ToolMessage)
+        return result
+
+    assert forward("read_pdf", run_id="run-a").content == "read_pdf"
+    assert forward("read_pdf", run_id="run-b").status == "error"
+    assert forward("read_sheet", run_id="run-b").content == "read_sheet"
+
+
+def test_laya_keeps_its_read_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    seen: dict[str, httpx.Timeout] = {}
+
+    def post(*_args: object, **kwargs: object) -> httpx.Response:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        seen["timeout"] = timeout
+        request = httpx.Request("POST", "http://127.0.0.1:9/v1/decisions")
+        return httpx.Response(200, json={"answers": {"skill:pdf": {"noul": 0.8}}}, request=request)
+
+    monkeypatch.setattr(httpx, "post", post)
+    client = HttpDecisionClient(endpoint="http://127.0.0.1:9/v1/decisions", provider="laya")
+    assert client.score(state="读 pdf", statements=[("skill:pdf", "需要 pdf")]) == {"skill:pdf": 0.8}
+    assert seen["timeout"].read == pytest.approx(60, abs=1)
+
+    def remote_post(*_args: object, **kwargs: object) -> httpx.Response:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        seen["remote"] = timeout
+        request = httpx.Request("POST", "http://127.0.0.1:9/v1/decisions")
+        return httpx.Response(200, json={"answers": {}}, request=request)
+
+    monkeypatch.setattr(httpx, "post", remote_post)
+    remote = HttpDecisionClient(endpoint="http://127.0.0.1:9/v1/decisions")
+    assert remote.score(state="读 pdf", statements=[("skill:pdf", "需要 pdf")]) == {}
+    assert seen["remote"].read == pytest.approx(5, abs=0.5)
+
+
+def test_decision_client_retries_transport_errors_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    calls = {"n": 0}
+
+    def post(*_args: object, **_kwargs: object) -> object:
+        calls["n"] += 1
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr("octop_harness.decision.client.time.sleep", lambda _delay: None)
+    client = HttpDecisionClient(endpoint="http://127.0.0.1:9/v1/decisions", provider="laya")
+    with pytest.raises(DecisionRequestError):
+        client.score(state="读 pdf", statements=[("skill:pdf", "需要 pdf")])
+    assert calls["n"] == _ATTEMPTS
+
+
+def test_decision_client_strict_mode_raises_the_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    def post(*_args: object, **_kwargs: object) -> object:
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx, "post", post)
+    client = HttpDecisionClient(endpoint="http://127.0.0.1:9/v1/decisions")
+    with pytest.raises(httpx.ConnectError):
+        client.score(state="读 pdf", statements=[("skill:pdf", "需要 pdf")], strict=True)
+
+
+@pytest.mark.asyncio
+async def test_decision_client_async_retries_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    calls = {"n": 0}
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, *_args: object, **_kwargs: object) -> object:
+            calls["n"] += 1
+            raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    client = HttpDecisionClient(endpoint="http://127.0.0.1:9/v1/decisions")
+    with pytest.raises(DecisionRequestError):
+        await client.score_async(state="读 pdf", statements=[("skill:pdf", "需要 pdf")])
+    assert calls["n"] == _ATTEMPTS
+    calls["n"] = 0
+    with pytest.raises(httpx.ConnectError):
+        await client.score_async(state="读 pdf", statements=[("skill:pdf", "需要 pdf")], strict=True)
+    assert calls["n"] == 1
+
+
+def test_decision_request_error_is_public() -> None:
+    from octop_harness import decision as decision_api
+
+    assert decision_api.DecisionRequestError is DecisionRequestError
+
+
+def test_decision_client_does_not_retry_a_client_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    calls = {"n": 0}
+
+    def post(*_args: object, **_kwargs: object) -> httpx.Response:
+        calls["n"] += 1
+        request = httpx.Request("POST", "http://127.0.0.1:9/v1/decisions")
+        return httpx.Response(400, request=request)
+
+    monkeypatch.setattr(httpx, "post", post)
+    client = HttpDecisionClient(endpoint="http://127.0.0.1:9/v1/decisions")
+    with pytest.raises(DecisionRequestError):
+        client.score(state="读 pdf", statements=[("skill:pdf", "需要 pdf")])
+    assert calls["n"] == 1
+
+
 def test_middleware_reports_tokens_kept_out_while_the_model_runs() -> None:
     from octop_harness.context_usage import pending_decision_saved
 
@@ -765,3 +997,117 @@ def test_middleware_stamps_the_reply_once_per_turn() -> None:
     second = mw.wrap_model_call(request, reply)
     assert "octop_decision" not in second.result[0].additional_kwargs
     assert scorer.calls == 1
+
+
+def test_turn_selection_does_not_change_the_cached_prefix() -> None:
+    prompt = (
+        "persona\n"
+        "**Available Skills:**\n"
+        "\n"
+        "- **pdf**: 读取 pdf\n"
+        "- **xlsx**: 表格\n"
+        "\n"
+        "**How to Use Skills (Progressive Disclosure):**\n"
+        "tail\n"
+    )
+    tools = [_tool("read_file", "读取文件"), _tool("read_pdf", "读取 pdf"), _tool("plugin_browser", "打开网页")]
+    state = {
+        "skills_metadata": [
+            {"name": "pdf", "description": "读取 pdf"},
+            {"name": "xlsx", "description": "表格"},
+        ]
+    }
+    scorer = _Scorer({"skill:pdf": 0.95, "skill:xlsx": 0.1, "tool:read_pdf": 0.95, "tool:plugin_browser": 0.1})
+    mw = DecisionMiddleware(config=_config(team=False, tool_min_count=2), scorer=scorer)
+
+    def make(messages: list[Any]) -> ModelRequest:
+        return ModelRequest(
+            model=MagicMock(),
+            messages=messages,
+            system_message=SystemMessage(content=prompt),
+            tool_choice=None,
+            tools=list(tools),
+            response_format=None,
+            state=dict(state),
+            runtime=MagicMock(),
+            model_settings={},
+        )
+
+    first = mw.wrap_model_call(make([HumanMessage(content="读 pdf")]), lambda item: item)
+    scorer.probabilities = {"skill:pdf": 0.1, "skill:xlsx": 0.95, "tool:read_pdf": 0.1, "tool:plugin_browser": 0.95}
+    second = mw.wrap_model_call(
+        make(
+            [
+                HumanMessage(content="读 pdf"),
+                AIMessage(content="好"),
+                HumanMessage(content="打开网页"),
+            ]
+        ),
+        lambda item: item,
+    )
+    assert first.system_message.content == second.system_message.content
+    assert "tail" in first.system_message.content
+    assert "- **pdf**:" not in first.system_message.content
+    assert (
+        [tool.name for tool in first.tools]
+        == [tool.name for tool in second.tools]
+        == [
+            "read_file",
+            "call_deferred_tool",
+        ]
+    )
+    assert "pdf" in _note(first) and "xlsx" not in _note(first)
+    assert "read_pdf" in _note(first) and "plugin_browser" not in _note(first)
+    assert "xlsx" in _note(second) and "plugin_browser" in _note(second)
+    assert scorer.calls == 2
+
+
+def test_deferred_tool_call_forwards_to_the_selected_tool() -> None:
+    tools = [_tool(f"misc_{index}", "unrelated") for index in range(8)]
+    real = _tool("read_pdf", "读取 pdf")
+    tools.append(real)
+    mw = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({"tool:read_pdf": 0.95}),
+    )
+    mw.wrap_model_call(_request(tools=tools, text="读取 pdf 合同"), lambda item: item)
+    seen: dict[str, Any] = {}
+
+    def handler(item: ToolCallRequest) -> ToolMessage:
+        seen["name"] = item.tool_call["name"]
+        seen["args"] = item.tool_call["args"]
+        seen["tool"] = item.tool
+        return ToolMessage(content="ok", name=str(item.tool_call["name"]), tool_call_id=str(item.tool_call["id"]))
+
+    out = mw.wrap_tool_call(
+        ToolCallRequest(
+            tool_call={
+                "name": "call_deferred_tool",
+                "args": {"name": "read_pdf", "arguments": {"path": "a.pdf"}},
+                "id": "c1",
+            },
+            tool=None,  # type: ignore[arg-type]
+            state={},  # type: ignore[arg-type]
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        handler,
+    )
+    assert seen["name"] == "read_pdf"
+    assert seen["args"] == {"path": "a.pdf"}
+    assert seen["tool"] is real
+    assert isinstance(out, ToolMessage)
+    assert out.name == "call_deferred_tool"
+    assert out.tool_call_id == "c1"
+    assert out.content == "ok"
+
+    missing = mw.wrap_tool_call(
+        ToolCallRequest(
+            tool_call={"name": "call_deferred_tool", "args": {"name": "misc_0", "arguments": {}}, "id": "c2"},
+            tool=None,  # type: ignore[arg-type]
+            state={},  # type: ignore[arg-type]
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        handler,
+    )
+    assert isinstance(missing, ToolMessage)
+    assert missing.status == "error"

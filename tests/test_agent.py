@@ -1590,6 +1590,7 @@ class TestAgentVisibleWorkspaceDir:
             assert "Keep routine filesystem tool paths" in prompt
             assert "/.octop/workspaces/J1BT2X/notes.txt" in prompt
             assert "Do not treat `/` as the workspace" in prompt
+            assert "path='/' searches from the backend root" in prompt
             assert str(host_ws) not in prompt
 
     def test_scoped_host_workspace_still_presents_rootfs_path(
@@ -1779,3 +1780,42 @@ async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
     finally:
         await agent.aclose()
     assert agent._hitl_resume_configs == {}
+
+
+def test_summarization_factory_patch_is_exclusive() -> None:
+    import threading
+
+    from deepagents import graph
+
+    from octop_harness.agent import _patched_summarization_factory
+
+    original = graph.create_summarization_middleware
+    first_in = threading.Event()
+    release_first = threading.Event()
+    second_waiting = threading.Event()
+    second_in = threading.Event()
+
+    def hold(entered: threading.Event, release: threading.Event | None) -> None:
+        def wrapper(*_args: object, **_kwargs: object) -> object:
+            return original(*_args, **_kwargs)
+
+        if release is None:
+            second_waiting.set()
+        with _patched_summarization_factory(wrapper):
+            entered.set()
+            if release is not None:
+                assert release.wait(timeout=2)
+            assert graph.create_summarization_middleware is wrapper
+
+    first = threading.Thread(target=hold, args=(first_in, release_first))
+    second = threading.Thread(target=hold, args=(second_in, None))
+    first.start()
+    assert first_in.wait(timeout=2)
+    second.start()
+    assert second_waiting.wait(timeout=2)
+    assert not second_in.wait(timeout=0.05)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert second_in.is_set()
+    assert graph.create_summarization_middleware is original

@@ -194,6 +194,28 @@ def manual_documents_locked(*, memory_enabled: bool, policy: str) -> bool:
     return memory_enabled
 
 
+def render_reply_language_prompt(*, language: str) -> str:
+    """Stable reply-and-thinking language rule.
+
+    Appended after workspace memory (``SOUL.md`` / ``AGENTS.md``) so it
+    outranks those files. It lives in that same memory block, which already
+    carries the prompt-cache breakpoint, so the cached prefix before the
+    block stays unchanged.
+    """
+    if language == "en":
+        return (
+            "Use English for replies and for thinking the user can see, "
+            "ahead of skill files and persona text in any other language. "
+            "Keep code, commands, error text, and tool names unchanged."
+        )
+    return "回复和思考过程使用简体中文, 优先于技能文件和人设里的其他语言。代码、命令、报错原文和工具名保持原样。"
+
+
+def memory_system_prompt(*, language: str) -> str:
+    """Deep Agents memory wrapper plus the reply-language rule."""
+    return "<agent_memory>\n{agent_memory}\n</agent_memory>\n\n" + render_reply_language_prompt(language=language)
+
+
 def render_memory_policy_prompt(
     *,
     language: str,

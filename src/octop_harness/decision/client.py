@@ -2,12 +2,16 @@
 
 The body matches the OpenRouter decisions API (also used by Jev): ``questions``
 is a map of noul items, and each answer's ``noul`` field is P(yes). A transport
-or parse failure returns an empty map so the caller keeps the current catalog.
+or HTTP failure is retried, then raised so the caller can say the catalog was
+left unchanged. A successful body that parses to nothing stays an empty map.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -16,6 +20,37 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = httpx.Timeout(15.0)
 _LAYA_TIMEOUT = httpx.Timeout(60.0)
+_ATTEMPTS = 3
+_RETRY_DELAY_S = 0.2
+# Remote scoring must not stall a chat turn. Local Laya keeps its own read budget.
+_REMOTE_BUDGET_S = 5.0
+
+
+class DecisionRequestError(Exception):
+    """The decision endpoint failed after retries. The catalog stays unchanged."""
+
+    def __init__(self, endpoint: str, detail: str) -> None:
+        self.endpoint = endpoint
+        self.detail = detail
+        super().__init__(detail)
+
+
+def _retryable(exc: BaseException) -> bool:
+    """Connection drops and 5xx are worth another try. A 4xx or bad body is not."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, httpx.TransportError)
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """A user-safe failure reason; do not expose URLs or response bodies."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.TransportError):
+        return type(exc).__name__
+    return "invalid response"
 
 
 def _timeout_for(provider: str) -> httpx.Timeout:
@@ -113,20 +148,19 @@ class HttpDecisionClient:
     def score(self, *, state: str, statements: list[tuple[str, str]], strict: bool = False) -> dict[str, float]:
         if not statements or not self._endpoint:
             return {}
-        try:
+        deadline = time.monotonic() + self._request_budget_s()
+
+        def call() -> dict[str, float]:
             response = httpx.post(
                 self._endpoint,
                 json=self._body(state, statements),
                 headers=self._headers(),
-                timeout=self._timeout,
+                timeout=self._remaining_timeout(deadline),
             )
             response.raise_for_status()
             return parse_probabilities(response.json())
-        except Exception:
-            logger.warning("decision request failed endpoint=%s", self._endpoint, exc_info=True)
-            if strict:
-                raise
-            return {}
+
+        return self._run(call, strict=strict, pause=time.sleep, deadline=deadline)
 
     async def score_async(
         self,
@@ -137,8 +171,10 @@ class HttpDecisionClient:
     ) -> dict[str, float]:
         if not statements or not self._endpoint:
             return {}
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
+        deadline = time.monotonic() + self._request_budget_s()
+
+        async def call() -> dict[str, float]:
+            async with httpx.AsyncClient(timeout=self._remaining_timeout(deadline)) as client:
                 response = await client.post(
                     self._endpoint,
                     json=self._body(state, statements),
@@ -146,11 +182,77 @@ class HttpDecisionClient:
                 )
             response.raise_for_status()
             return parse_probabilities(response.json())
-        except Exception:
-            logger.warning("decision request failed endpoint=%s", self._endpoint, exc_info=True)
-            if strict:
-                raise
-            return {}
+
+        return await self._run_async(call, strict=strict, deadline=deadline)
+
+    def _run(
+        self,
+        call: Callable[[], dict[str, float]],
+        *,
+        strict: bool,
+        pause: Callable[[float], None],
+        deadline: float,
+    ) -> dict[str, float]:
+        last: BaseException | None = None
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                return call()
+            except Exception as exc:
+                last = exc
+                if strict or not _retryable(exc) or attempt == _ATTEMPTS:
+                    self._log_failure(attempt, exc, final=True)
+                    if strict:
+                        raise
+                    raise DecisionRequestError(self._endpoint, _failure_detail(exc)) from exc
+                self._log_failure(attempt, exc, final=False)
+                pause(min(_RETRY_DELAY_S, self._remaining_seconds(deadline)))
+        raise DecisionRequestError(self._endpoint, _failure_detail(last or RuntimeError())) from last
+
+    async def _run_async(
+        self,
+        call: Callable[[], Awaitable[dict[str, float]]],
+        *,
+        strict: bool,
+        deadline: float,
+    ) -> dict[str, float]:
+        last: BaseException | None = None
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                return await call()
+            except Exception as exc:
+                last = exc
+                if strict or not _retryable(exc) or attempt == _ATTEMPTS:
+                    self._log_failure(attempt, exc, final=True)
+                    if strict:
+                        raise
+                    raise DecisionRequestError(self._endpoint, _failure_detail(exc)) from exc
+                self._log_failure(attempt, exc, final=False)
+                await asyncio.sleep(min(_RETRY_DELAY_S, self._remaining_seconds(deadline)))
+        raise DecisionRequestError(self._endpoint, _failure_detail(last or RuntimeError())) from last
+
+    def _request_budget_s(self) -> float:
+        read = self._timeout.read
+        limit = float(read) if isinstance(read, int | float) else _REMOTE_BUDGET_S
+        if self._provider == "laya":
+            return limit
+        return min(limit, _REMOTE_BUDGET_S)
+
+    def _remaining_seconds(self, deadline: float) -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def _remaining_timeout(self, deadline: float) -> httpx.Timeout:
+        connect_timeout = self._timeout.connect or _REMOTE_BUDGET_S
+        return httpx.Timeout(max(0.001, min(self._remaining_seconds(deadline), float(connect_timeout))))
+
+    def _log_failure(self, attempt: int, exc: BaseException, *, final: bool) -> None:
+        logger.warning(
+            "decision request failed endpoint=%s attempt=%s/%s error=%s",
+            self._endpoint,
+            attempt,
+            _ATTEMPTS,
+            type(exc).__name__,
+            exc_info=final,
+        )
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
