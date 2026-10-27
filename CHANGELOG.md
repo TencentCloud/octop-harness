@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP tool failures that escape `ToolNode` (`McpError`, and output-schema `RuntimeError` such as `total` being the string `"1"`) become a failed tool result so the turn continues. An output-schema failure does not ask the model to edit arguments that were already accepted.
 - Preserve object, array and enum arguments in MCP tool schemas.
 - Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
+- Docker sandbox 相对路径映射改为只剥离字面 `./` 前缀，`.env`、`.octop/.env` 等以点开头的文件名不再丢失前导点；工作区 `.env` 重新能被 dotenv 加载器发现并注入命令执行环境。
 
 ### 修复
 
