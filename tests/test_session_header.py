@@ -11,6 +11,7 @@ import pytest
 
 from octop_harness.config import ModelConfig, ProviderConfig
 from octop_harness.llm.factory import _get_reasoning_aware_chat_openai, build_chat_model
+from octop_harness.llm.http_timeout import LLM_HTTP_TIMEOUT
 from octop_harness.llm.session_header import (
     attach_session_http_clients,
     close_session_http_clients,
@@ -187,6 +188,11 @@ async def test_openai_factory_passes_dedicated_clients_when_session_header_set()
     try:
         assert isinstance(sync_client, httpx.Client)
         assert isinstance(async_client, httpx.AsyncClient)
+        assert sync_client.timeout == LLM_HTTP_TIMEOUT
+        # SDK request timeout must be set even with a custom http_client;
+        # otherwise OpenAI writes timeout=None onto the request and ignores
+        # the client's Timeout.
+        assert kwargs["timeout"] == LLM_HTTP_TIMEOUT
         request = httpx.Request("POST", "https://opencode.ai/zen/go/v1/chat/completions")
         with session_header_scope("chat-thread"):
             _apply_request_hooks(sync_client, request)
@@ -212,6 +218,23 @@ def test_openai_factory_skips_dedicated_clients_without_session_header() -> None
     kwargs = mock_init.call_args.kwargs
     assert "http_client" not in kwargs
     assert "http_async_client" not in kwargs
+    assert kwargs["timeout"] == LLM_HTTP_TIMEOUT
+
+
+def test_anthropic_factory_sets_explicit_timeout() -> None:
+    pytest.importorskip("langchain_anthropic")
+    from langchain_anthropic import ChatAnthropic
+
+    provider = ProviderConfig(
+        id="anthropic",
+        protocol="anthropic",
+        base_url="https://api.anthropic.com",
+        api_key="sk",
+    )
+    with patch.object(ChatAnthropic, "__init__", return_value=None) as mock_init:
+        build_chat_model(provider, ModelConfig(id="claude-sonnet-4"))
+    kwargs = mock_init.call_args.kwargs
+    assert kwargs["timeout"] == LLM_HTTP_TIMEOUT.read == 600.0
 
 
 @pytest.mark.asyncio
@@ -260,14 +283,135 @@ async def test_session_header_middleware_without_thread_id_preserves_outer_scope
     assert seen == ["outer-thread"]
 
 
-def test_session_http_clients_disable_httpx_default_timeout() -> None:
+def test_session_http_clients_set_explicit_timeout() -> None:
     sync_client, async_client = session_http_clients("x-session")
     holder = SimpleNamespace()
     attach_session_http_clients(holder, sync_client, async_client)
     try:
-        assert sync_client.timeout.connect is None
-        assert sync_client.timeout.read is None
-        assert async_client.timeout.connect is None
+        assert sync_client.timeout == LLM_HTTP_TIMEOUT
+        assert async_client.timeout == LLM_HTTP_TIMEOUT
+        assert sync_client.timeout.read == 600.0
+        assert sync_client.timeout.connect == 5.0
     finally:
         close_session_http_clients(holder)
         assert sync_client.is_closed
+
+
+def test_openai_sdk_honors_chat_timeout_over_http_client_default() -> None:
+    """Regression: timeout=None on OpenAI ignores httpx.Client(timeout=...)."""
+    pytest.importorskip("openai")
+    from openai import OpenAI
+    from openai._base_client import FinalRequestOptions
+
+    http = httpx.Client(timeout=LLM_HTTP_TIMEOUT)
+    try:
+        none_client = OpenAI(
+            api_key="sk-xxx",
+            base_url="https://example.com/v1",
+            http_client=http,
+            timeout=None,
+            max_retries=0,
+        )
+        none_opts = FinalRequestOptions.construct(
+            method="post",
+            url="/chat/completions",
+            json_data={},
+            timeout=none_client.timeout,
+        )
+        none_timeout = none_client._build_request(none_opts).extensions.get("timeout")
+        assert none_timeout == {"connect": None, "read": None, "write": None, "pool": None}
+
+        bounded = OpenAI(
+            api_key="sk-xxx",
+            base_url="https://example.com/v1",
+            http_client=http,
+            timeout=LLM_HTTP_TIMEOUT,
+            max_retries=0,
+        )
+        bounded_opts = FinalRequestOptions.construct(
+            method="post",
+            url="/chat/completions",
+            json_data={},
+            timeout=bounded.timeout,
+        )
+        bounded_timeout = bounded._build_request(bounded_opts).extensions.get("timeout")
+        assert bounded_timeout == {
+            "connect": 5.0,
+            "read": 600.0,
+            "write": 600.0,
+            "pool": 600.0,
+        }
+    finally:
+        http.close()
+
+
+def test_openai_sdk_timeout_aborts_hung_upstream() -> None:
+    """CI-safe stand-in: SDK request timeout aborts a silent upstream near read=N."""
+    import socket
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    pytest.importorskip("openai")
+    from openai import APITimeoutError, OpenAI
+
+    class _Hang(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            time.sleep(3600)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    server = ThreadingHTTPServer(("127.0.0.1", port), _Hang)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    short = httpx.Timeout(connect=2.0, read=2.0, write=5.0, pool=2.0)
+    client = OpenAI(
+        api_key="sk-xxx",
+        base_url=f"http://127.0.0.1:{port}/v1",
+        timeout=short,
+        max_retries=0,
+    )
+    t0 = time.perf_counter()
+    with pytest.raises(APITimeoutError):
+        client.chat.completions.create(
+            model="dummy",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    wall = time.perf_counter() - t0
+    server.shutdown()
+    assert 1.5 <= wall <= 5.0, wall
+
+
+def test_bedrock_factory_sets_botocore_timeouts() -> None:
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_cls = MagicMock(name="ChatBedrockConverse")
+    fake_cls.return_value = SimpleNamespace()
+    fake_config_cls = MagicMock(name="Config")
+    fake_config = SimpleNamespace(connect_timeout=5.0, read_timeout=600.0)
+    fake_config_cls.return_value = fake_config
+    botocore_config = SimpleNamespace(Config=fake_config_cls)
+    provider = ProviderConfig(
+        id="bedrock",
+        protocol="bedrock",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        api_key="aws-x",
+    )
+    with patch.dict(
+        sys.modules,
+        {
+            "langchain_aws": SimpleNamespace(ChatBedrockConverse=fake_cls),
+            "botocore": SimpleNamespace(config=botocore_config),
+            "botocore.config": botocore_config,
+        },
+    ):
+        build_chat_model(provider, ModelConfig(id="anthropic.claude-3"))
+    fake_config_cls.assert_called_once_with(connect_timeout=5.0, read_timeout=600.0)
+    assert fake_cls.call_args.kwargs["config"] is fake_config

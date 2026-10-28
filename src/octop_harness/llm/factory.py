@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from octop_harness.config import ModelConfig, ProviderConfig
+from octop_harness.llm.http_timeout import LLM_HTTP_TIMEOUT
 from octop_harness.llm.session_header import (
     aclose_session_http_clients,
     attach_session_http_clients,
@@ -326,6 +327,11 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: 
         # default httpx client (which other providers reuse).
         session_clients = session_http_clients(provider.session_header)
         kwargs["http_client"], kwargs["http_async_client"] = session_clients
+    # Always pass timeout to the SDK. With a custom http_client, OpenAI still
+    # honors the ChatOpenAI ``timeout`` kwarg on each request; omitting it (or
+    # passing None) writes four None timeouts onto the request and ignores the
+    # client's Timeout(read=...).
+    kwargs["timeout"] = LLM_HTTP_TIMEOUT
     instance: BaseChatModel = cls(**kwargs)
     instance._harness_codex = is_codex  # type: ignore[attr-defined]
 
@@ -882,6 +888,8 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retrie
     # Enable extended thinking when model.thinking is explicitly True.
     if model.thinking is True:
         kwargs["thinking"] = {"type": "adaptive"}
+    # ChatAnthropic's ``timeout`` (default_request_timeout) is a plain float.
+    kwargs["timeout"] = LLM_HTTP_TIMEOUT.read
     instance_a: BaseChatModel = ChatAnthropic(**kwargs)
     if provider.session_header:
         bind_anthropic_session_header(instance_a, provider.session_header)
@@ -900,13 +908,19 @@ def _build_bedrock(provider: ProviderConfig, model: ModelConfig, *, max_retries:
 
     # Bedrock auth is typically AWS-credential-driven; api_key/base_url here
     # are accepted for symmetry but not all combinations are meaningful.
+    from botocore.config import Config
+
     kwargs: dict[str, Any] = {"model": model.id}
     if provider.headers:
         kwargs["additional_model_request_fields"] = dict(provider.headers)
+    # botocore (not httpx): mirror the shared LLM timeout policy.
+    config_kwargs: dict[str, Any] = {
+        "connect_timeout": float(LLM_HTTP_TIMEOUT.connect or 5.0),
+        "read_timeout": float(LLM_HTTP_TIMEOUT.read or 600.0),
+    }
     if max_retries is not None:
-        from botocore.config import Config
-
-        kwargs["config"] = Config(retries={"total_max_attempts": max_retries + 1})
+        config_kwargs["retries"] = {"total_max_attempts": max_retries + 1}
+    kwargs["config"] = Config(**config_kwargs)
     instance_b: BaseChatModel = ChatBedrockConverse(**kwargs)
     _inject_model_token_limits(instance_b, model)
     return instance_b
