@@ -1,5 +1,0 @@
-id: echo-tool
-version: 1.0.0
-name: Echo Tool
-kind: tool
-entry: main.py
