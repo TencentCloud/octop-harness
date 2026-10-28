@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 记忆开关决定 `USER.md` / `MEMORY.md` 只读还是可编辑，并可用 `manual_document_policy` 覆盖。
 
+### 新增
+
+- `dangerous_shell_commands.yaml` 增加 8 条 Windows / PowerShell 检测规则：PowerShell 编码命令与内存下载执行（`TOOL_CMD_PS_ENCODED_COMMAND` / `TOOL_CMD_PS_DOWNLOAD_EXEC`）、.NET TCPClient 反向 shell（`TOOL_CMD_PS_REVERSE_SHELL`）、隐藏窗口与执行策略绕过（`TOOL_CMD_PS_HIDDEN_WINDOW`）、mshta / certutil / regsvr32 / bitsadmin 代理执行（`TOOL_CMD_WIN_LOLBIN_EXEC`）、计划任务与 Run 键持久化（`TOOL_CMD_WIN_PERSISTENCE`）、LSASS 凭据转储（`TOOL_CMD_WIN_CREDENTIAL_DUMP`）、Defender 与事件日志篡改（`TOOL_CMD_WIN_DEFENSE_TAMPER`），覆盖此前规则集零覆盖的 Windows 平台命令。
+
 ## [1.0.4] - 2026-10-16
 
 ### 新增
