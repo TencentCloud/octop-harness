@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Inbound ACP agent can advertise multiple experts via session `configOptions` (`id=expert`, `category=_expert`) and honor `session/set_config_option` to switch the live harness per session.
+- Inbound ACP `resolve_harness` may be sync or async so hosts can finish embedding after `initialize` (lazy start of non-default experts).
+- Inbound ACP supports session lifecycle: `loadSession` with history replay via `session/update`, `session/resume` (no replay), `session/list` (process-local), and `session/close`; rejects prompts for unknown session ids with JSON-RPC `-32602`.
+- Inbound ACP negotiates protocol version (unsupported client versions get the latest supported), returns `stopReason=cancelled` when a turn is cancelled, and cancels in-flight prompts on `session/close`.
+- Stdio mock agent fixture (`tests/fixtures/acp_stdio_agent.py`) for acp-tck / offline protocol smoke.
 - Pin replies and visible thinking to the configured language, after workspace memory.
 
 ### Fixed
