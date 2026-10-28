@@ -679,7 +679,11 @@ class DockerSandbox(BaseSandbox):
             return self._clamp_to_workspace(raw)
 
         if not raw.startswith("/"):
-            rel = raw.lstrip("./")
+            # ``lstrip("./")`` treats its argument as a character *set*, so it would
+            # destroy legitimate leading dots in filenames:
+            #     ".env".lstrip("./")       -> "env"          (expected ".env")
+            #     ".octop/.env".lstrip("./") -> "octop/.env"   (expected ".octop/.env")
+            rel = raw[2:] if raw.startswith("./") else raw
             if not rel or rel == ".":
                 return root
             return self._clamp_to_workspace(f"{root}/{rel}")
@@ -699,7 +703,10 @@ class DockerSandbox(BaseSandbox):
         if raw.startswith("/"):
             normalized = _normalize_container_path(raw)
         else:
-            normalized = _normalize_container_path(f"{root}/{raw.lstrip('./')}")
+            # Same dotfile-preserving rule as ``_map_path`` above: ``lstrip("./")``
+            # would strip leading dots from legitimate dotfile names.
+            rel = raw[2:] if raw.startswith("./") else raw
+            normalized = _normalize_container_path(f"{root}/{rel}")
         if normalized == root:
             return "/"
         prefix = root + "/"
