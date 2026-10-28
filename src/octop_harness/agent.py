@@ -8,8 +8,9 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Sequence
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
@@ -35,9 +36,15 @@ from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.llm.session_header import session_header_scope
 from octop_harness.mcp import load_mcp_tools, mcp_tool_names, validate_mcp_default_servers
 from octop_harness.memory import MemoryRuntime
+from octop_harness.memory.policy import (
+    manual_documents_locked,
+    memory_system_prompt,
+    render_memory_policy_prompt,
+)
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
 from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
+from octop_harness.middleware.mcp_tool_error import McpToolErrorMiddleware
 from octop_harness.middleware.mcp_tools import MCPToolMiddleware
 from octop_harness.middleware.media_offload import MediaOffloadMiddleware
 from octop_harness.middleware.model_retry import ModelRetryMiddleware
@@ -86,6 +93,27 @@ def _tool_name_of(tool: Any) -> str:
         if isinstance(raw, str):
             return raw
     return ""
+
+
+_SUMMARIZATION_FACTORY_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _patched_summarization_factory(factory: Callable[..., Any]) -> Iterator[None]:
+    """Swap deepagents' summarization factory for one graph build.
+
+    The factory is a process-wide attribute. The lock covers the swap and the
+    build so two agents cannot capture each other's wrapper.
+    """
+    import deepagents.graph as deepagents_graph
+
+    with _SUMMARIZATION_FACTORY_LOCK:
+        previous = deepagents_graph.create_summarization_middleware  # type: ignore[attr-defined]
+        deepagents_graph.create_summarization_middleware = factory  # type: ignore[attr-defined]
+        try:
+            yield
+        finally:
+            deepagents_graph.create_summarization_middleware = previous  # type: ignore[attr-defined]
 
 
 class HarnessAgent:
@@ -182,6 +210,7 @@ class HarnessAgent:
         )
         self._langfuse_callbacks: list[Any] | None = None
         self._protocols: dict[str, ChatProtocol] = {}
+        self._hitl_resume_configs: dict[str, dict[str, Any]] = {}
         # Optional hook called once immediately after bootstrap completes.
         # Set by the caller (e.g. Orca) to trigger a full config reload.
         self.on_bootstrap_complete: Callable[[], None] | None = None
@@ -400,7 +429,7 @@ class HarnessAgent:
         self,
         source: AsyncIterator[Any],
         cancel_event: asyncio.Event,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Yield from *source* until *cancel_event* is set.
 
         Unlike a plain ``async for`` + flag check between chunks, this preempts a
@@ -481,7 +510,7 @@ class HarnessAgent:
         *,
         protocol: str | None = None,
         **kwargs: Any,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Stream protocol-formatted chunks from the graph.
 
         Yields dict chunks in the protocol's native format:
@@ -494,19 +523,28 @@ class HarnessAgent:
         req = ChatRequest.coerce(request)
         ctx = build_runtime_ctx(self, req)
 
-        async def _stream(prepared: ChatRequest) -> AsyncIterator[Any]:
+        async def _stream(prepared: ChatRequest) -> AsyncGenerator[Any, None]:
             messages, config, proto = self._prepare_call(prepared, protocol)
             thread_id = prepared.thread_id or ""
             cancel_event = asyncio.Event()
             if thread_id:
                 self._cancel_events[thread_id] = cancel_event
+                self._hitl_resume_configs.pop(thread_id, None)
             try:
                 with session_header_scope(prepared.thread_id):
-                    async for chunk in self._iter_until_cancelled(
-                        proto.stream(messages, config, **kwargs),
-                        cancel_event,
-                    ):
-                        yield chunk
+                    async with contextlib.aclosing(
+                        self._iter_until_cancelled(
+                            proto.stream(messages, config, **kwargs),
+                            cancel_event,
+                        )
+                    ) as chunks:
+                        async for chunk in chunks:
+                            if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
+                                self._hitl_resume_configs[thread_id] = {
+                                    **config,
+                                    "configurable": deepcopy(config["configurable"]),
+                                }
+                            yield chunk
             finally:
                 if thread_id:
                     self._cancel_events.pop(thread_id, None)
@@ -535,18 +573,30 @@ class HarnessAgent:
         decisions: list[dict[str, Any]],
         *,
         protocol: str | None = None,
-    ) -> AsyncIterator[Any]:
-        """Resume a paused human-in-the-loop interrupt for *thread_id*."""
+    ) -> AsyncGenerator[Any, None]:
+        """Resume a paused interrupt, retaining its process-local request scope.
+
+        The host must authorize the caller before resuming. User identity, tool
+        selections and other config belong to the paused request, not a different
+        thread's most recent invocation. A new stream replaces that thread's scope.
+        """
         proto = self._get_protocol(protocol)
         resume_stream = getattr(proto, "resume_stream", None)
         if resume_stream is None:
             msg = f"Protocol {proto.name!r} does not support HITL resume"
             raise ValueError(msg)
-        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+        config = dict(self._hitl_resume_configs.get(thread_id, {"configurable": {"thread_id": thread_id}}))
+        config["configurable"] = deepcopy(config["configurable"])
+        paused = False
         async with self._invocation():
             with session_header_scope(thread_id):
-                async for chunk in resume_stream(thread_id, decisions, config):
-                    yield chunk
+                async with contextlib.aclosing(resume_stream(thread_id, decisions, config)) as chunks:
+                    async for chunk in chunks:
+                        if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
+                            paused = True
+                        yield chunk
+        if not paused:
+            self._hitl_resume_configs.pop(thread_id, None)
 
     async def stream_events(
         self,
@@ -997,6 +1047,7 @@ class HarnessAgent:
         """
         if self._defer_close_while_busy():
             return
+        self._hitl_resume_configs.clear()
         if self._owns_model_factory:
             self._model_factory.close()
         self._memory_runtime.close()
@@ -1014,6 +1065,7 @@ class HarnessAgent:
         """
         if self._defer_close_while_busy():
             return
+        self._hitl_resume_configs.clear()
         if self._owns_model_factory:
             await self._model_factory.aclose()
         self._memory_runtime.close()
@@ -1259,7 +1311,7 @@ class HarnessAgent:
                 sources=memory_paths,
                 # AGENTS.md owns memory policy. Suppress upstream's default
                 # edit_file learning instructions, keeping only the wrapper.
-                system_prompt="<agent_memory>\n{agent_memory}\n</agent_memory>",
+                system_prompt=memory_system_prompt(language=self._config.language),
                 add_cache_control=True,
             ),
             *self._build_middleware(),
@@ -1443,9 +1495,9 @@ class HarnessAgent:
         """Assemble the middleware chain in declared execution order.
 
         Order: bootstrap (front-loaded) → router → model_settings → session_header →
-        skill_filter → tool_guard → filesystem_guard (outside-root soft-fail; deny
-        rules when permissions + execution backend) → mcp_tools → retry →
-        pii → media_offload → checkpoint_ts → memory → user middleware → team →
+        skill_filter → mcp_tool_error → tool_guard → filesystem_guard (outside-root
+        soft-fail; deny rules when permissions + execution backend) → mcp_tools →
+        retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
         conversation_mode → tools_filter → decision (only when enabled) → tool search →
         task tool ordering → context_usage.
 
@@ -1462,6 +1514,7 @@ class HarnessAgent:
             ModelSettingsMiddleware(),
             SessionHeaderMiddleware(),
             SkillFilterMiddleware(config=cfg),
+            McpToolErrorMiddleware(),
         ]
 
         if cfg.tool_guard_enabled:
@@ -1475,6 +1528,12 @@ class HarnessAgent:
                 )
             )
 
+        # Loop guard: short-circuits the same tool + args when the model has
+        # already retried it max_repeats times without progress (issue #61).
+        from octop_harness.middleware.loop_guard import LoopGuardMiddleware
+
+        chain.append(LoopGuardMiddleware(enabled=True, max_repeats=3))
+
         # Filesystem tool boundary: always soften outside-root ValueError; apply
         # deny rules only when permissions are set on an execution backend.
         from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
@@ -1487,6 +1546,10 @@ class HarnessAgent:
                 root_dir=root_dir,
                 workspace_dir=cfg.workspace_dir,
                 workspace=self._workspace,
+                protect_user_memory=manual_documents_locked(
+                    memory_enabled=cfg.memory_enabled,
+                    policy=cfg.manual_document_policy,
+                ),
             )
         )
 
@@ -1729,6 +1792,9 @@ class HarnessAgent:
             f"(e.g. `{work_dir_text.rstrip('/')}/notes.txt`). "
             "Do not treat `/` as the workspace: `/` is the backend root "
             "(often the user home directory on Windows). "
+            "For glob, a relative path such as `.` or `docs` is this workspace, and "
+            "path='/' searches from the backend root. Patterns such as `*`, `**`, "
+            "`**/*`, and `*.md` need that path; do not omit it. "
             "Do not invent host home prefixes like `/home/...` or `/Users/...`. "
             "Leave the workspace only when the user explicitly asks. "
             "For new AI-generated artifacts, prefer a subdirectory such as "
@@ -1750,7 +1816,17 @@ class HarnessAgent:
 
         directive += f" {EXPLICIT_VIRTUAL_PATH_PROMPT}" if cfg.explicit_virtual_paths else ""
         kwargs["system_prompt"] = (
-            base_prompt + "\n\n" + directive + "\n\n" + render_slash_skill_prompt(language=cfg.language)
+            base_prompt
+            + "\n\n"
+            + directive
+            + "\n\n"
+            + render_memory_policy_prompt(
+                language=cfg.language,
+                memory_enabled=cfg.memory_enabled,
+                policy=cfg.manual_document_policy,
+            )
+            + "\n\n"
+            + render_slash_skill_prompt(language=cfg.language)
         ).strip()
         resolved_subagents = self._resolve_subagents(parent_tools=tools)
         if resolved_subagents:
@@ -1784,21 +1860,23 @@ class HarnessAgent:
 
         def _capture_summarization_middleware(*args: Any, **kwargs: Any) -> Any:
             from octop_harness.middleware.memory_recall import count_tokens_with_recall
+            from octop_harness.middleware.summarization_limits import (
+                SUMMARY_INPUT_TOKEN_LIMIT,
+                harden_summarization_middleware,
+            )
 
             # Summarization wraps the memory middleware and sees clean state
             # messages. Include their recall snapshots in its budget/keep math.
             kwargs.setdefault("token_counter", count_tokens_with_recall)
-            mw = orig_factory(*args, **kwargs)
+            # deepagents' factory leaves this unset, so compaction resends the
+            # whole evicted history. Cap it before the summary model sees it.
+            kwargs.setdefault("trim_tokens_to_summarize", SUMMARY_INPUT_TOKEN_LIMIT)
+            mw = harden_summarization_middleware(orig_factory(*args, **kwargs))
             captured.append(mw)
             return mw
 
-        deepagents_graph.create_summarization_middleware = (  # type: ignore[attr-defined]
-            _capture_summarization_middleware
-        )
-        try:
+        with _patched_summarization_factory(_capture_summarization_middleware):
             graph = deepagents.create_deep_agent(**kwargs)
-        finally:
-            deepagents_graph.create_summarization_middleware = orig_factory  # type: ignore[attr-defined]
         if captured:
             self._summarization_mw = captured[-1]
         return graph
