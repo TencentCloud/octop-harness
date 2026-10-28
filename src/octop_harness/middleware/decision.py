@@ -1067,18 +1067,20 @@ def _map_text(content: Any, edit: Callable[[str], str]) -> Any:
 
 
 def _narrow_skills(request: ModelRequest, kept: set[str]) -> ModelRequest:
+    """Narrow the skills_metadata state so downstream renderers see only kept skills.
+
+    No longer mutates the system prompt text directly — the downstream
+    ``SkillsMiddleware`` (from deepagents) re-renders the "Available Skills:"
+    section from ``request.state["skills_metadata"]`` when it builds the final
+    system prompt. This keeps the system-prompt prefix stable across turns,
+    which fixes issue #2413 where the decision model picking different skills
+    each round caused the prompt to shift mid-conversation.
+    """
     raw = request.state.get("skills_metadata")
     rows = [row for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
     narrowed = [row for row in rows if not str(row.get("name") or "").strip() or str(row.get("name")) in kept]
     state = cast(AgentState[Any], {**request.state, "skills_metadata": narrowed})
-    request = request.override(state=state)
-    system = request.system_message
-    if system is None:
-        return request
-    content = _map_text(system.content, lambda text: _trim_skill_list(text, kept))
-    if content == system.content:
-        return request
-    return request.override(system_message=system.model_copy(update={"content": content}))
+    return request.override(state=state)
 
 
 def _narrow_tools(request: ModelRequest, kept: set[str]) -> ModelRequest:
