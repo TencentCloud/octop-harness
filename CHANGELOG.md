@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep memory databases open until accepted background workers finish during runtime shutdown, including workers from replaced middleware and session-end extraction before graph construction (TencentCloud/Octop#484).
 - Retry memory model calls once without an explicit temperature when the provider rejects it, including auxiliary-model fallbacks, while preserving request options and bounded transport retries (TencentCloud/Octop#835).
 - Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
 - Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.

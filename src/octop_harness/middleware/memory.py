@@ -230,6 +230,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self._background_active = 0
         self._background_paused = False
         self._background_shutdown = False
+        self._background_idle_callbacks: list[Callable[[], None]] = []
         self._manual_review_lock = threading.Lock()
         self._manual_review_running = False
         self._manual_review_again = False
@@ -676,8 +677,14 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         if timer is not None:
             timer.cancel()
 
-    def shutdown(self) -> None:
-        """Cancel all background timers. Safe to call multiple times."""
+    def shutdown(self, *, on_idle: Callable[[], None] | None = None) -> None:
+        """Stop timers and reject new work without waiting for accepted workers.
+
+        ``on_idle`` runs once after all accepted work finishes, or immediately
+        if already idle. It runs outside the worker lock, possibly on the last
+        worker's thread, so owners can safely defer releasing shared resources.
+        Safe to call multiple times; each supplied callback runs once.
+        """
         with self._background_condition:
             self._background_shutdown = True
         self._stop_interval_timer()
@@ -687,6 +694,29 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             self._idle_timers.clear()
         for timer in timers:
             timer.cancel()
+        if on_idle is not None:
+            with self._background_condition:
+                if self._background_active:
+                    self._background_idle_callbacks.append(on_idle)
+                    return
+            self._run_idle_callbacks([on_idle])
+
+    @staticmethod
+    def _run_idle_callbacks(callbacks: list[Callable[[], None]]) -> None:
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                logger.warning("MemoryMiddleware shutdown callback failed", exc_info=True)
+
+    def _finish_background(self) -> None:
+        callbacks: list[Callable[[], None]] = []
+        with self._background_condition:
+            self._background_active -= 1
+            if self._background_active == 0:
+                callbacks, self._background_idle_callbacks = self._background_idle_callbacks, []
+            self._background_condition.notify_all()
+        self._run_idle_callbacks(callbacks)
 
     def schedule_manual_review(self) -> None:
         """Ask the background worker to compare one batch of atoms with the owner documents.
@@ -747,17 +777,13 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             try:
                 fn()
             finally:
-                with self._background_condition:
-                    self._background_active -= 1
-                    self._background_condition.notify_all()
+                self._finish_background()
 
         if background:
             try:
                 _bg_pool().submit(run, label=label)
             except Exception:
-                with self._background_condition:
-                    self._background_active -= 1
-                    self._background_condition.notify_all()
+                self._finish_background()
                 raise
             return True
         run()
