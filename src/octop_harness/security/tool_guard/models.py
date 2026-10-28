@@ -20,6 +20,7 @@ class GuardSeverity(StrEnum):
 class GuardThreatCategory(StrEnum):
     COMMAND_INJECTION = "command_injection"
     DATA_EXFILTRATION = "data_exfiltration"
+    DEFENSE_EVASION = "defense_evasion"
     PATH_TRAVERSAL = "path_traversal"
     SENSITIVE_FILE_ACCESS = "sensitive_file_access"
     NETWORK_ABUSE = "network_abuse"
