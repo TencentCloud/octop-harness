@@ -155,7 +155,28 @@ class HarnessAgentInboxManager:
 
     def start(self) -> None:
         if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._worker_loop(), name="harness-inbox")
+            # Run the inbox worker in a clean context so it does NOT inherit
+            # the caller's LangGraph/LangChain run config or stream handler.
+            # Without this, every inbox job leaks its streamed chunks into
+            # the first turn's stream queue and keeps run references alive
+            # long after the turn ends (issue #115).
+            import contextvars as _cv
+
+            _ctx = _cv.copy_context()
+            # Drop LangGraph/LangChain run-specific variables that would
+            # otherwise keep the caller's stream handler reachable.
+            for _k in list(_ctx.keys()):
+                _n = getattr(_k, "name", str(_k))
+                if any(tok in _n.lower() for tok in ("runnable", "stream", "run_", "config")):
+                    try:
+                        _ctx.run(lambda k=_k: _ctx.delete(k))
+                    except KeyError:
+                        pass
+
+            _loop = asyncio.get_event_loop()
+            self._worker = _loop.create_task(
+                self._worker_loop(), context=_ctx, name="harness-inbox"
+            )
 
     async def shutdown(self) -> None:
         if self._worker is None and not self._tasks:
