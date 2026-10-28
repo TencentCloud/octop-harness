@@ -33,11 +33,14 @@ class _FakeService:
 
 
 class TestBuildMemoryTools:
-    def test_memory_save_reports_a_manual_document_conflict(self) -> None:
+    def test_memory_save_does_not_report_document_review_to_the_model(self) -> None:
         service = _FakeService()
-        service.save_result.metadata = {"manual_document_conflict": True}
+        service.save_result.metadata = {
+            "manual_document_conflict": True,
+            "manual_document_review": {"status": "partial"},
+        }
         save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
-        assert "review candidate" in save.invoke({"content": "A conflicting fact"})
+        assert save.invoke({"content": "A conflicting fact"}) == "Memory saved to octop-memory."
 
     def test_returns_recall_tools(self) -> None:
         tools = build_memory_tools(_FakeService())  # type: ignore[arg-type]

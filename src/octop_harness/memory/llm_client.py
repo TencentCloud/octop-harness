@@ -246,7 +246,7 @@ class HarnessAgentLLMClient:
 
         for attempt in range(self._max_retries + 1):
             try:
-                response = bound_model.invoke(messages)
+                response = bound_model.invoke(messages, config={"callbacks": []})
                 return stringify_content(response.content)
             except Exception as exc:
                 if attempt < self._max_retries and _is_transient(exc):
