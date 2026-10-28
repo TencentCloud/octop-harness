@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +22,7 @@ from octop_harness.observability.logging import (
     LogLevel,
     resolve_log_dir,
     setup_logging,
+    use_host_logging,
 )
 from octop_harness.providers import ProviderPreset, load_provider_templates
 from octop_harness.registry import AgentEntry, AgentRegistry, generate_agent_id
@@ -49,7 +50,9 @@ class HarnessAgentManager:
     (``log_dir`` / ``log_level`` / rotation), not on each agent config.
     One process should use one ``log_dir``: a later manager (or
     ``setup_logging`` call) with a different path replaces the package
-    file handler.
+    file handler. Pass ``file_logging=False`` when the host process already
+    writes a log file; records then propagate instead of opening
+    ``YYYY-MM-DD.log``.
     """
 
     def __init__(
@@ -63,6 +66,7 @@ class HarnessAgentManager:
         log_level: LogLevel | None = None,
         log_max_bytes: int = DEFAULT_LOG_MAX_BYTES,
         log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
+        file_logging: bool = True,
     ) -> None:
         from octop_harness.llm.factory import ChatModelFactory
 
@@ -72,13 +76,20 @@ class HarnessAgentManager:
         self._cancel_events: dict[tuple[str, str], asyncio.Event] = {}
         self._langfuse: LangfuseTracer | None = LangfuseTracer(langfuse) if langfuse and langfuse.configured else None
         self._security_policy: SecurityPolicy = SecurityPolicy.defaults()
-        self._log_dir = resolve_log_dir(log_dir)
-        self._log_file = setup_logging(
-            self._log_dir,
-            level=log_level,
-            max_bytes=log_max_bytes,
-            backup_count=log_backup_count,
-        )
+        self._log_dir: Path | None
+        self._log_file: Path | None
+        if file_logging:
+            self._log_dir = resolve_log_dir(log_dir)
+            self._log_file = setup_logging(
+                self._log_dir,
+                level=log_level,
+                max_bytes=log_max_bytes,
+                backup_count=log_backup_count,
+            )
+        else:
+            use_host_logging()
+            self._log_dir = None
+            self._log_file = None
         self._team = TeamManager(self._registry)
         self._team.bind_invocation_hooks(
             enrich_request=self._enrich_request,
@@ -382,8 +393,9 @@ class HarnessAgentManager:
     ) -> AsyncGenerator[Any, None]:
         entry = self._registry[agent_id]
         prepared = await self._prepare_request(agent_id, request)
-        async for chunk in entry.agent.stream(prepared, **kwargs):
-            yield chunk
+        async with aclosing(entry.agent.stream(prepared, **kwargs)) as chunks:
+            async for chunk in chunks:
+                yield chunk
 
     async def call(
         self,
@@ -448,8 +460,11 @@ class HarnessAgentManager:
         **kwargs: Any,
     ) -> AsyncGenerator[Any, None]:
         entry = self._registry[agent_id]
-        async with self._cancellable_stream(agent_id, thread_id) as event:
-            async for chunk in entry.agent.resume_hitl(thread_id, decisions, **kwargs):
+        async with (
+            self._cancellable_stream(agent_id, thread_id) as event,
+            aclosing(entry.agent.resume_hitl(thread_id, decisions, **kwargs)) as chunks,
+        ):
+            async for chunk in chunks:
                 if event.is_set():
                     break
                 yield chunk
@@ -466,18 +481,14 @@ class HarnessAgentManager:
             return
         factory = self._shared_factory
         factory._providers[provider.id] = provider
-        stale = [k for k in factory._cache if k.startswith(f"{provider.id}/")]
-        for k in stale:
-            factory.pop_cached(k)
+        factory.clear_provider_cache(provider.id)
 
     def remove_provider(self, provider_id: str) -> None:
         if self._shared_factory is None:
             return
         factory = self._shared_factory
         factory._providers.pop(provider_id, None)
-        stale = [k for k in factory._cache if k.startswith(f"{provider_id}/")]
-        for k in stale:
-            factory.pop_cached(k)
+        factory.clear_provider_cache(provider_id)
 
     def list_provider_templates(
         self,

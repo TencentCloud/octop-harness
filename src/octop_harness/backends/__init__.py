@@ -26,7 +26,7 @@ Per design discussion (round 3):
       onto ``root_dir`` and executes from the host workspace.
     - Remote backends (``s3`` / ``postgres`` / ``cos``) ignore ``root_dir``
       entirely; they have their own addressing scheme (``bucket`` /
-      ``prefix`` / ``connection_string``).
+      ``prefix`` / host + table).
     - Pre-constructed backend instances (anything that quacks like
       ``BackendProtocol``) bypass the factory entirely.
 
@@ -39,6 +39,7 @@ this backend uses (put/get/list/delete/head/multipart).
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -48,6 +49,11 @@ if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
 
 logger = logging.getLogger(__name__)
+
+# One warning per workspace for the life of the process. Agent startup builds
+# the same host-root shell more than once, and each build used to log again.
+_HOST_ROOT_WARNED: set[str] = set()
+_HOST_ROOT_WARN_LOCK = threading.Lock()
 
 # String aliases that callers can use in ``HarnessAgentConfig.backend``.
 _BUILTIN_TYPES: frozenset[str] = frozenset(
@@ -88,6 +94,7 @@ def resolve_backend(
     workspace_dir: str | Path | None = None,
     system_files_path: str = "",
     _scope_host_artifacts: bool = True,
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     """Turn a user-provided backend spec into a ``BackendProtocol`` instance.
 
@@ -114,8 +121,7 @@ def resolve_backend(
 
     Raises:
         ValueError: For unknown types or malformed specs.
-        ImportError: For ``s3`` / ``postgres`` when the
-            ``[remote-backends]`` extra isn't installed.
+        ImportError: For ``postgres`` when ``psycopg`` is not installed.
     """
     if spec is None:
         spec = DEFAULT_BACKEND_SPEC
@@ -151,6 +157,7 @@ def resolve_backend(
             workspace_dir=workspace_dir,
             system_files_path=system_files_path,
             scope_host_artifacts=_scope_host_artifacts,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
     if backend_type == "filesystem":
         return _build_filesystem(
@@ -158,6 +165,7 @@ def resolve_backend(
             workspace_dir=workspace_dir,
             system_files_path=system_files_path,
             scope_host_artifacts=_scope_host_artifacts,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
     if backend_type == "state":
         return _build_state(kwargs)
@@ -168,6 +176,7 @@ def resolve_backend(
             kwargs,
             workspace_dir=workspace_dir,
             system_files_path=system_files_path,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
     if backend_type == "s3":
         return _build_s3(kwargs)
@@ -210,6 +219,7 @@ def _artifacts_root_for_workspace(
     *,
     root_dir: str | Path | None = None,
     system_files_path: str = "",
+    explicit_virtual_paths: bool = False,
 ) -> str | None:
     """Backend path prefix for deepagents offloads, or ``None`` if unmappable.
 
@@ -225,7 +235,7 @@ def _artifacts_root_for_workspace(
         return str(host_target)
 
     root = Path(root_dir).expanduser().resolve()
-    if root == Path(_HOST_ROOT).resolve():
+    if not explicit_virtual_paths and root == Path(_HOST_ROOT).resolve():
         # Host-rooted backend: offloads must be redirected to the workspace
         # (host '/' is often not writable, e.g. macOS).
         return str(host_target)
@@ -258,6 +268,7 @@ def _maybe_wrap_workspace_artifacts(
     workspace_dir: str | Path | None,
     system_files_path: str = "",
     scope_host_artifacts: bool,
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     """Scope deepagents offloads to the agent workspace (under system_files_path)."""
     if not scope_host_artifacts or workspace_dir is None:
@@ -266,6 +277,7 @@ def _maybe_wrap_workspace_artifacts(
         workspace_dir,
         root_dir=root_dir,
         system_files_path=system_files_path,
+        explicit_virtual_paths=explicit_virtual_paths,
     )
     if artifacts_root is None:
         return backend
@@ -276,12 +288,27 @@ def _maybe_wrap_workspace_artifacts(
     )
 
 
+def _warn_host_root_once(workspace_dir: str | Path | None) -> None:
+    """Log the host-root shell warning at most once per workspace."""
+    key = "<none>" if workspace_dir is None else str(workspace_dir)
+    with _HOST_ROOT_WARN_LOCK:
+        if key in _HOST_ROOT_WARNED:
+            return
+        _HOST_ROOT_WARNED.add(key)
+    logger.warning(
+        "⚠️  LocalShellBackend is rooted at '/' (workspace=%s): the agent has shell access "
+        "to the entire host. Restrict ``backend.root_dir`` in production to limit exposure.",
+        key,
+    )
+
+
 def _build_local_shell(
     kwargs: dict[str, Any],
     *,
     workspace_dir: str | Path | None,
     system_files_path: str = "",
     scope_host_artifacts: bool = True,
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     from octop_harness.backends.bwrap_shell import (
         BubbledLocalShellBackend,
@@ -299,16 +326,14 @@ def _build_local_shell(
     kwargs.setdefault("inherit_env", True)
 
     if is_host_root(root_dir):
-        logger.warning(
-            "⚠️  LocalShellBackend is rooted at '/' (workspace=%s): the agent has shell access "
-            "to the entire host. Restrict ``backend.root_dir`` in production to limit exposure.",
-            workspace_dir if workspace_dir is not None else "<none>",
-        )
+        _warn_host_root_once(workspace_dir)
 
+    from_spec = bool(kwargs.pop("explicit_virtual_paths", False))
     shell_kwargs: dict[str, Any] = {
         "root_dir": str(root_dir),
         "virtual_mode": virtual_mode,
         "workspace_dir": workspace_dir,
+        "explicit_virtual_paths": explicit_virtual_paths or from_spec,
         **kwargs,
     }
     bwrap = resolve_bubbled_bwrap(virtual_mode=bool(virtual_mode), root_dir=root_dir)
@@ -326,6 +351,7 @@ def _build_local_shell(
         workspace_dir=workspace_dir,
         system_files_path=effective_system,
         scope_host_artifacts=scope_host_artifacts,
+        explicit_virtual_paths=bool(shell_kwargs["explicit_virtual_paths"]),
     )
 
 
@@ -335,6 +361,7 @@ def _build_filesystem(
     workspace_dir: str | Path | None,
     system_files_path: str = "",
     scope_host_artifacts: bool = True,
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     from deepagents.backends import FilesystemBackend
 
@@ -344,6 +371,7 @@ def _build_filesystem(
     virtual_mode = kwargs.pop("virtual_mode", True)
     spec_system = kwargs.pop("system_files_path", None)
     effective_system = str(spec_system if spec_system is not None else system_files_path or "")
+    kwargs.pop("explicit_virtual_paths", None)
     backend = FilesystemBackend(root_dir=str(root_dir), virtual_mode=virtual_mode, **kwargs)
     return _maybe_wrap_workspace_artifacts(
         backend,
@@ -351,6 +379,7 @@ def _build_filesystem(
         workspace_dir=workspace_dir,
         system_files_path=effective_system,
         scope_host_artifacts=scope_host_artifacts,
+        explicit_virtual_paths=explicit_virtual_paths,
     )
 
 
@@ -378,6 +407,7 @@ def _build_composite(
     *,
     workspace_dir: str | Path | None,
     system_files_path: str = "",
+    explicit_virtual_paths: bool = False,
 ) -> BackendProtocol:
     default = kwargs.pop("default", None)
     if default is None:
@@ -393,6 +423,7 @@ def _build_composite(
         workspace_dir=workspace_dir,
         system_files_path=system_files_path,
         _scope_host_artifacts=False,
+        explicit_virtual_paths=explicit_virtual_paths,
     )
     resolved_routes = {
         prefix: resolve_backend(
@@ -400,6 +431,7 @@ def _build_composite(
             workspace_dir=workspace_dir,
             system_files_path=system_files_path,
             _scope_host_artifacts=False,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
         for prefix, sub in routes.items()
     }
@@ -409,6 +441,7 @@ def _build_composite(
             workspace_dir,
             root_dir=default_root,
             system_files_path=system_files_path,
+            explicit_virtual_paths=explicit_virtual_paths,
         )
         if artifacts_root is not None:
             kwargs["artifacts_root"] = artifacts_root
@@ -452,48 +485,35 @@ def _looks_like_backend_instance(obj: Any) -> bool:
 def _build_s3(kwargs: dict[str, Any]) -> BackendProtocol:
     """S3-compatible backend (AWS S3, MinIO, custom S3-compatible stores).
 
-    Prefers ``deepagents_backends.S3Backend`` when available (installed via the
-    ``octop-harness[remote-backends]`` extra).  Falls back to the
-    bundled :class:`~octop_harness.backends.s3_backend.S3Backend` (boto3)
-    so that S3-compatible stores work without that optional dependency.
+    Always uses the bundled :class:`~octop_harness.backends.s3_backend.S3Backend`
+    (boto3). That implementation speaks the deepagents 0.7 ``BackendProtocol``
+    (``WriteResult`` / ``ReadResult`` / ``ls`` / ``glob`` / ``grep``). The
+    third-party ``deepagents-backends`` S3 client stays on the 0.5/0.6 protocol
+    and must not be selected here.
+
+    Community path-style aliases (``s3_force_path_style`` / ``path_style``)
+    are translated by :meth:`S3Config.from_kwargs`. Unknown keys go into
+    ``extra`` instead of raising.
 
     For Alibaba Cloud OSS use ``type="oss"`` and for Huawei Cloud OBS use
     ``type="obs"`` — both have dedicated backends that use the official SDKs.
     """
-    try:
-        from deepagents_backends import S3Backend, S3Config
+    from octop_harness.backends.s3_backend import S3Backend as _S3Backend
+    from octop_harness.backends.s3_backend import S3Config as _S3Config
 
-        config = S3Config(**kwargs)
-        return cast("BackendProtocol", S3Backend(config))
-    except ImportError:
-        logger.info("deepagents-backends unavailable, falling back to S3Backend (boto3)")
-        from octop_harness.backends.s3_backend import S3Backend as _S3Backend
-        from octop_harness.backends.s3_backend import S3Config as _S3Config
-
-        return _S3Backend(_S3Config.from_kwargs(**kwargs))
+    return _S3Backend(_S3Config.from_kwargs(**kwargs))
 
 
 def _build_postgres(kwargs: dict[str, Any]) -> BackendProtocol:
-    """Postgres backend.
+    """Postgres workspace backend (bundled, deepagents 0.7).
 
-    Uses the third-party ``deepagents-backends`` package, available via the
-    ``octop-harness[remote-backends]`` extra (Python >=3.12 required).
-
-    Note: the underlying backend exposes ``initialize()`` / ``close()`` —
-    HarnessAgent does not call these automatically; if you use a Postgres
-    backend, manage its lifecycle alongside the agent.
+    Specs may use a libpq ``connection_string`` / ``dsn`` or split fields.
+    Unknown keys are dropped. The table is created on first use (``psycopg``
+    required; install ``octop-harness[remote-backends]``).
     """
-    try:
-        from deepagents_backends import PostgresBackend, PostgresConfig
-    except ImportError as exc:
-        raise ImportError(
-            "Postgres backend requires the optional dependency 'deepagents-backends'. "
-            "Install with: pip install 'octop-harness[remote-backends]' "
-            "(Python >=3.12 required).",
-        ) from exc
+    from octop_harness.backends.postgres import PostgresBackend, PostgresConfig
 
-    config = PostgresConfig(**kwargs)
-    return cast("BackendProtocol", PostgresBackend(config))
+    return PostgresBackend(PostgresConfig.from_kwargs(**kwargs))
 
 
 def _build_cos(kwargs: dict[str, Any]) -> BackendProtocol:

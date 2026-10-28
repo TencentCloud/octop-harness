@@ -20,13 +20,15 @@ Fail-soft: any IO / RPC error during write or recall is logged at
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,6 +41,29 @@ from octop_harness.middleware.memory_recall import (
     replay_recall_snapshots,
     stamp_recall_snapshot,
 )
+
+# ~20MB at the default 4KB page size. Matches
+# octop_memory.pipeline.lifecycle.vacuum.MAINTENANCE_INCREMENTAL_VACUUM_PAGES.
+# Kept local so a host can pass it to an already-installed octop-memory
+# whose ``nudge_vacuum`` accepts ``pages`` but does not export the constant yet.
+_MAINTENANCE_VACUUM_PAGES = 5000
+_MANUAL_REVIEW_BATCH = 20
+
+
+def _review_pending_manual_documents(service: Any) -> None:
+    """Compare one bounded batch, including against an older memory package."""
+    review = getattr(service, "review_new_memory", None)
+    if not callable(review):
+        return
+    try:
+        accepts_limit = "max_atoms" in inspect.signature(review).parameters
+    except (TypeError, ValueError):
+        accepts_limit = False
+    if accepts_limit:
+        review(max_atoms=_MANUAL_REVIEW_BATCH)
+    else:
+        review()
+
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
@@ -101,9 +126,14 @@ class _BackgroundExecutor:
     """
 
     def submit(self, fn: Callable[[], None], *, label: str) -> None:
+        from octop_harness.observability.logging import current_log_agent_id, logging_scope
+
+        agent_id = current_log_agent_id()
+
         def _runner() -> None:
             try:
-                fn()
+                with logging_scope(agent_id):
+                    fn()
             except Exception:  # pragma: no cover - never raise into the user turn; pylint: disable=broad-except
                 logger.warning("MemoryMiddleware background %s failed", label, exc_info=True)
 
@@ -196,6 +226,13 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self._maintenance_interval_seconds = maintenance_interval_seconds
         self._maintenance_initial_delay_seconds = maintenance_initial_delay_seconds
         self._lock = threading.Lock()
+        self._background_condition = threading.Condition()
+        self._background_active = 0
+        self._background_paused = False
+        self._background_shutdown = False
+        self._manual_review_lock = threading.Lock()
+        self._manual_review_running = False
+        self._manual_review_again = False
         # Per-session idle timers for the extract watchdog. Each captured turn
         # re-arms its session's timer; on expiry we fire ``end_session`` so
         # promotion to atoms runs after a quiet period without a host signal.
@@ -273,7 +310,12 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 and isinstance(messages[-1], HumanMessage)
                 and not has_recall_snapshot(messages[-1])
             ):
-                stamped = self._prepare_recall(messages[-1], runtime)
+                manual_context = {
+                    str(path).replace("\\", "/").rsplit("/", 1)[-1]: body
+                    for path, body in state.get("memory_contents", {}).items()
+                    if str(path).replace("\\", "/").rsplit("/", 1)[-1] in {"USER.md", "MEMORY.md"}
+                }
+                stamped = self._prepare_recall(messages[-1], runtime, manual_context=manual_context or None)
                 return {"messages": [stamped]}
         except Exception:  # pragma: no cover - never raise into the user turn; pylint: disable=broad-except
             logger.warning("MemoryMiddleware before_model failed", exc_info=True)
@@ -334,7 +376,12 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
 
             visible = _filter_visible_messages(new_messages, trigger_user=trigger_user)
 
-            if self._service is not None and self._capture_enabled and visible:
+            if (
+                self._service is not None
+                and self._capture_enabled
+                and visible
+                and configurable.get("octop_memory_capture_exclude") is not True
+            ):
                 if self._maintenance_blocks_io():
                     logger.info(
                         "memory.capture skip: maintenance %s",
@@ -440,16 +487,15 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 with self._sessions_lock:
                     self._session_threads.pop(session_id, None)
 
-        if background:
-            _bg_pool().submit(_run, label="extract")
-        else:
-            _run()
+        self._submit_background(_run, label="extract", background=background)
 
     # ------------------------------------------------------------------
     # Read-path helper (recall injection)
     # ------------------------------------------------------------------
 
-    def _prepare_recall(self, message: HumanMessage, runtime: Any) -> HumanMessage:
+    def _prepare_recall(
+        self, message: HumanMessage, runtime: Any, *, manual_context: dict[str, str] | None = None
+    ) -> HumanMessage:
         """Freeze success, empty recall, maintenance skip, or failure for this turn."""
         rendered = ""
         try:
@@ -461,15 +507,15 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 logger.info("memory.recall skip: maintenance %s", self.maintenance_status()["phase"])
             elif query:
                 assert self._service is not None  # gated by caller
+                context_options = {"manual_context": manual_context} if manual_context is not None else {}
                 result = self._service.recall(
-                    query, thread_id=thread_id, session_id=session_id, limit=self._recall_limit
+                    query, thread_id=thread_id, session_id=session_id, limit=self._recall_limit, **context_options
                 )
                 rendered = getattr(result, "rendered", None) or ""
-                logger.info(
-                    "memory.trigger recall_inject thread=%s session=%s query=%r limit=%d hit=%s",
+                logger.debug(
+                    "memory.trigger recall_inject thread=%s session=%s limit=%d hit=%s",
                     thread_id,
                     session_id,
-                    query[:60],
                     self._recall_limit,
                     bool(rendered),
                 )
@@ -493,7 +539,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         assert service is not None  # gated by caller
 
         def _run() -> None:
-            logger.info(
+            logger.debug(
                 "memory.trigger capture_turn session=%s thread=%s user=%s user_chars=%d asst_chars=%d",
                 session_id,
                 thread_id,
@@ -509,7 +555,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 user_id=user_id,
             )
 
-        _bg_pool().submit(_run, label="capture")
+        self._submit_background(_run, label="capture")
 
     def _remember_chat_model(self, configurable: dict[str, Any]) -> None:
         """Tell the extract LLM client which model just served this turn."""
@@ -537,6 +583,9 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         """
         if self._extract_idle_seconds <= 0 or self._service is None:
             return
+        from octop_harness.observability.logging import current_log_agent_id
+
+        agent_id = current_log_agent_id()
         with self._idle_lock:
             existing = self._idle_timers.pop(session_id, None)
             if existing is not None:
@@ -544,24 +593,22 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             timer = threading.Timer(
                 self._extract_idle_seconds,
                 self._on_idle_extract,
-                args=(session_id,),
+                args=(session_id, agent_id),
             )
             timer.daemon = True
             timer.name = f"hm-idle-{session_id}"
             self._idle_timers[session_id] = timer
             timer.start()
 
-    def _on_idle_extract(self, session_id: str) -> None:
+    def _on_idle_extract(self, session_id: str, agent_id: str | None = None) -> None:
         """Timer callback: drop the timer and run session-end extraction."""
+        from octop_harness.observability.logging import logging_scope
+
         with self._idle_lock:
             self._idle_timers.pop(session_id, None)
-        logger.info(
-            "memory.trigger idle_extract fire session=%s after %ss idle",
-            session_id,
-            self._extract_idle_seconds,
-        )
-        self.end_session(session_id, background=True)
-        self._submit_maintenance()
+        with logging_scope(agent_id):
+            self.end_session(session_id, background=True)
+            self._submit_maintenance()
 
     def _cancel_idle_timer(self, session_id: str) -> None:
         """Cancel any pending idle timer for ``session_id`` (idempotent)."""
@@ -631,6 +678,8 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
 
     def shutdown(self) -> None:
         """Cancel all background timers. Safe to call multiple times."""
+        with self._background_condition:
+            self._background_shutdown = True
         self._stop_interval_timer()
         self._stop_maintenance_timer()
         with self._idle_lock:
@@ -638,6 +687,102 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             self._idle_timers.clear()
         for timer in timers:
             timer.cancel()
+
+    def schedule_manual_review(self) -> None:
+        """Ask the background worker to compare one batch of atoms with the owner documents.
+
+        Returns immediately. A review already in progress absorbs this request
+        as a single follow-up batch instead of starting a second model call.
+        """
+        self._kick_manual_review(background=True)
+
+    def _kick_manual_review(self, *, background: bool) -> None:
+        service = self._service
+        if service is None or not callable(getattr(service, "review_new_memory", None)):
+            return
+        with self._background_condition:
+            if background and (self._background_paused or self._background_shutdown):
+                return
+        with self._manual_review_lock:
+            if self._manual_review_running:
+                self._manual_review_again = True
+                return
+            self._manual_review_running = True
+        try:
+            started = self._submit_background(
+                lambda: self._run_manual_review(service),
+                label="manual-review",
+                background=background,
+            )
+        except Exception:
+            started = False
+            logger.warning("memory.manual_review failed to start", exc_info=True)
+        if not started:
+            with self._manual_review_lock:
+                self._manual_review_running = False
+                self._manual_review_again = False
+
+    def _run_manual_review(self, service: Any) -> None:
+        try:
+            while True:
+                _review_pending_manual_documents(service)
+                with self._manual_review_lock:
+                    if not self._manual_review_again:
+                        self._manual_review_running = False
+                        return
+                    self._manual_review_again = False
+        except Exception:
+            logger.warning("memory.manual_review failed", exc_info=True)
+            with self._manual_review_lock:
+                self._manual_review_running = False
+                self._manual_review_again = False
+
+    def _submit_background(self, fn: Callable[[], None], *, label: str, background: bool = True) -> bool:
+        with self._background_condition:
+            if self._background_paused or self._background_shutdown:
+                return False
+            self._background_active += 1
+
+        def run() -> None:
+            try:
+                fn()
+            finally:
+                with self._background_condition:
+                    self._background_active -= 1
+                    self._background_condition.notify_all()
+
+        if background:
+            try:
+                _bg_pool().submit(run, label=label)
+            except Exception:
+                with self._background_condition:
+                    self._background_active -= 1
+                    self._background_condition.notify_all()
+                raise
+            return True
+        run()
+        return True
+
+    @contextmanager
+    def pause_background(self, *, timeout: float = 120) -> Iterator[None]:
+        """Drain this expert's memory workers for a host-owned restore.
+
+        The host must separately stop graph admission. New background work is
+        skipped while paused; timeout restores normal admission without closing
+        resources still in use. Other middleware instances remain independent.
+        """
+        with self._background_condition:
+            if self._background_paused:
+                raise RuntimeError("Memory background work is already paused")
+            self._background_paused = True
+        try:
+            with self._background_condition:
+                if not self._background_condition.wait_for(lambda: self._background_active == 0, timeout=timeout):
+                    raise TimeoutError("Memory background work did not become idle")
+            yield
+        finally:
+            with self._background_condition:
+                self._background_paused = False
 
     def maintenance_status(self) -> dict[str, Any]:
         """Snapshot of the current slimming phase for host status APIs."""
@@ -703,7 +848,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         def _run() -> None:
             self._run_maintenance_tick(service)
 
-        _bg_pool().submit(_run, label="maintenance")
+        self._submit_background(_run, label="maintenance")
 
     @staticmethod
     def _run_reclaim_pass(memory: Any, *, run_gc: Any, nudge_vacuum: Any) -> None:
@@ -768,6 +913,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             logger.debug("memory.maintenance skip overlapping tick")
             return
         try:
+            self._kick_manual_review(background=False)
             # Deliberately NOT ``run_idle_maintenance``: its first step is
             # ``prune_checkpoints`` and it has no switch to skip that, so the
             # two reclaim steps are called directly. LangGraph checkpoint rows
@@ -786,7 +932,11 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             if not _claim_reclaim_slot(memory, window=self._maintenance_interval_seconds / 2):
                 logger.debug("memory.maintenance skip: another agent just reclaimed this store")
                 return
-            self._run_reclaim_pass(memory, run_gc=run_gc, nudge_vacuum=nudge_vacuum)
+
+            def _nudge(store: Any) -> Any:
+                return nudge_vacuum(store, pages=_MAINTENANCE_VACUUM_PAGES)
+
+            self._run_reclaim_pass(memory, run_gc=run_gc, nudge_vacuum=_nudge)
         except Exception:  # maintenance runs off the user path; pylint: disable=broad-except
             logger.warning("memory.maintenance failed", exc_info=True)
         finally:
@@ -1071,11 +1221,14 @@ def _filter_visible_messages(
     - ``ToolMessage`` (tool outputs).
     - Intermediate ``AIMessage`` instances that carry ``tool_calls`` or
       whose content is empty (no text was emitted).
+    - Runtime-generated failure replies marked ``octop_runtime_error``.
+      Their triggering user input is still captured; JSONL keeps diagnostics.
     """
     visible: list[BaseMessage] = []
     if trigger_user is not None and isinstance(trigger_user, HumanMessage):
         visible.append(trigger_user)
     final_ai: AIMessage | None = None
+    runtime_failure = False
     for msg in messages:
         if isinstance(msg, HumanMessage):
             visible.append(msg)
@@ -1085,13 +1238,14 @@ def _filter_visible_messages(
             if not tool_calls and has_text:
                 # Last write wins — if a turn somehow produces multiple
                 # tool_call-free AIMessages (rare), keep the latest.
-                final_ai = msg
+                runtime_failure = msg.response_metadata.get("octop_runtime_error") is True
+                final_ai = None if runtime_failure else msg
         # ToolMessage and tool-call-only AIMessages are intentionally skipped.
     if final_ai is not None:
         visible.append(final_ai)
     # Edge case: ``trigger_user`` alone with no AI reply isn't a
     # user-visible exchange yet — drop it so we don't write a record.
-    if visible and (final_ai is None) and (trigger_user is not None) and len(visible) == 1:
+    if visible and final_ai is None and trigger_user is not None and len(visible) == 1 and not runtime_failure:
         return []
     return visible
 

@@ -7,10 +7,12 @@ process writes to one set of date-named files. Direct
 :class:`~octop_harness.agent.HarnessAgent` construction falls back to
 :func:`ensure_logging` with the library default ``~/.octop-harness/logs``.
 
-Host apps (e.g. Octop) pass ``log_dir`` to land under their own home
-(``~/.octop/logs``). Log files are named by date (``YYYY-MM-DD.log``).
-When a single day's file exceeds ``max_bytes``, it is size-rotated to
-``YYYY-MM-DD.1.log``, ``YYYY-MM-DD.2.log``, etc.
+Standalone use writes date-named files (``YYYY-MM-DD.log``) under
+``~/.octop-harness/logs``. When a single day's file exceeds ``max_bytes``,
+it is size-rotated to ``YYYY-MM-DD.1.log``, ``YYYY-MM-DD.2.log``, etc.
+Host apps that already own a log file (Octop's ``octop.log``) call
+:func:`use_host_logging` so records propagate to the host handler instead
+of opening a second file.
 
 Each line is tagged with ``[agent=<id>]`` via :func:`logging_scope`.
 """
@@ -29,6 +31,15 @@ from typing import Literal
 _HANDLER_NAME = "octop_harness_file_handler"
 
 _log_agent_id: ContextVar[str | None] = ContextVar("octop_harness_log_agent_id", default=None)
+
+
+class _LoggingState:
+    """Process-wide switch: host logger owns output, so no package log file."""
+
+    host: bool = False
+
+
+_logging_state = _LoggingState()
 
 DEFAULT_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s [agent=%(agent)s]: %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -82,6 +93,11 @@ def logging_scope(agent_id: str | None) -> Iterator[None]:
         _log_agent_id.reset(token)
 
 
+def current_log_agent_id() -> str | None:
+    """Return the agent id installed by :func:`logging_scope`, if any."""
+    return _log_agent_id.get()
+
+
 def _existing_handler_file() -> Path | None:
     pkg_logger = logging.getLogger("octop_harness")
     for handler in pkg_logger.handlers:
@@ -89,6 +105,22 @@ def _existing_handler_file() -> Path | None:
             raw = getattr(handler, "baseFilename", "")
             return Path(raw) if raw else None
     return None
+
+
+def use_host_logging() -> None:
+    """Do not open a package log file; let records propagate to the host logger.
+
+    ``ensure_logging`` will not fall back to ``~/.octop-harness/logs`` after
+    this. Any package file handler already installed is removed.
+    """
+    _logging_state.host = True
+    pkg_logger = logging.getLogger("octop_harness")
+    for handler in list(pkg_logger.handlers):
+        if getattr(handler, "name", None) == _HANDLER_NAME:
+            handler.close()
+            pkg_logger.removeHandler(handler)
+    pkg_logger.setLevel(logging.NOTSET)
+    pkg_logger.propagate = True
 
 
 def setup_logging(
@@ -107,6 +139,8 @@ def setup_logging(
     date file updates the level; a call with a different path replaces the
     previous handler (host apps use one shared ``log_dir``).
     """
+    _logging_state.host = False
+
     if level is not None:
         effective_level = getattr(logging, level, logging.INFO)
     else:
@@ -156,14 +190,18 @@ def ensure_logging(
     debug: bool = False,
     max_bytes: int = DEFAULT_LOG_MAX_BYTES,
     backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
-) -> Path:
+) -> Path | None:
     """Install library-default logging only if no package file handler exists.
+
+    Returns ``None`` when :func:`use_host_logging` is active.
 
     Host apps / :class:`~octop_harness.manager.HarnessAgentManager` call
     :func:`setup_logging` once. Direct agent construction uses this so
     defaults still apply without overriding an already-configured app
     ``log_dir``.
     """
+    if _logging_state.host:
+        return None
     existing = _existing_handler_file()
     if existing is not None:
         return existing
@@ -183,6 +221,7 @@ def current_log_file(log_dir: Path) -> Path:
 
 def teardown_logging() -> None:
     """Remove file handlers installed by ``setup_logging``."""
+    _logging_state.host = False
     pkg_logger = logging.getLogger("octop_harness")
     for handler in list(pkg_logger.handlers):
         if getattr(handler, "name", None) == _HANDLER_NAME:
@@ -195,6 +234,7 @@ __all__ = [
     "DEFAULT_LOG_BACKUP_COUNT",
     "DEFAULT_LOG_MAX_BYTES",
     "LogLevel",
+    "current_log_agent_id",
     "current_log_file",
     "default_log_dir",
     "ensure_logging",
@@ -202,4 +242,5 @@ __all__ = [
     "resolve_log_dir",
     "setup_logging",
     "teardown_logging",
+    "use_host_logging",
 ]

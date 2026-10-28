@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -91,6 +93,35 @@ def test_wrap_model_call_appends_bootstrap_after_compiled_system_prompt(tmp_path
     assert "onboarding instructions" in joined
     assert joined.find("Your working directory is /.octop/workspaces/ABC123.") < joined.find("onboarding instructions")
     assert all(not isinstance(m, SystemMessage) for m in applied.messages)
+
+
+def test_bootstrap_injection_is_logged_once_at_debug(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ws = _workspace(tmp_path)
+    ws.write_text(DEFAULT_BOOTSTRAP_PATH, "onboarding instructions", force=True)
+    mw = BootstrapMiddleware(ws, bootstrap_file=DEFAULT_BOOTSTRAP_PATH, bootstrap_marker=DEFAULT_BOOTSTRAPPED_PATH)
+
+    def handler(request: ModelRequest) -> ModelResponse:
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    request = ModelRequest(
+        model=MagicMock(),
+        tools=[],
+        system_message=SystemMessage(content="base"),
+        messages=[HumanMessage(content="hi")],
+        tool_choice=None,
+        response_format=None,
+        state={"messages": [HumanMessage(content="hi")]},
+        runtime=MagicMock(),
+    )
+    with caplog.at_level(logging.DEBUG, logger="octop_harness.middleware.bootstrap"):
+        mw.wrap_model_call(request, handler)
+        mw.wrap_model_call(request, handler)
+    logged = [rec for rec in caplog.records if "Bootstrap active" in rec.message]
+    assert len(logged) == 1
+    assert logged[0].levelno == logging.DEBUG
 
 
 def test_wrap_model_call_uses_bootstrap_alone_when_system_message_missing(tmp_path: Path) -> None:
@@ -311,7 +342,7 @@ def test_marker_detected_on_backend(tmp_path: Path) -> None:
     assert mw.is_bootstrapped
 
 
-def test_after_agent_writes_marker_when_user_md_updated(tmp_path: Path) -> None:
+def test_user_md_write_attempt_does_not_complete_onboarding(tmp_path: Path) -> None:
     ws = _workspace(tmp_path)
     ws.write_text(DEFAULT_BOOTSTRAP_PATH, "onboarding", force=True)
 
@@ -332,7 +363,8 @@ def test_after_agent_writes_marker_when_user_md_updated(tmp_path: Path) -> None:
     )
     mw.after_agent(state, runtime=None)
 
-    assert mw.is_bootstrapped
+    assert not mw.is_bootstrapped
+    assert not ws.exists(DEFAULT_BOOTSTRAPPED_PATH)
 
 
 def test_after_agent_does_not_write_marker_on_read_file_bootstrap_marker(tmp_path: Path) -> None:
@@ -486,3 +518,25 @@ def test_complete_storage_bootstrap_path(tmp_path: Path) -> None:
     assert "base" in joined
     assert "custom onboarding" in joined
     assert joined.find("base") < joined.find("custom onboarding")
+
+
+def test_missing_marker_is_checked_once(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path)
+    calls = 0
+    real_exists = ws.exists
+
+    def _counted(path: str) -> bool:
+        nonlocal calls
+        calls += 1
+        return real_exists(path)
+
+    ws.exists = _counted  # type: ignore[method-assign]
+    mw = BootstrapMiddleware(
+        ws,
+        bootstrap_file=DEFAULT_BOOTSTRAP_PATH,
+        bootstrap_marker=DEFAULT_BOOTSTRAPPED_PATH,
+    )
+
+    assert mw.is_bootstrapped is False
+    assert mw.is_bootstrapped is False
+    assert calls == 1

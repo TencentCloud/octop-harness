@@ -18,12 +18,9 @@ You don't need everything in one turn. Name and basic preferences are enough for
 
 ## Write the dossier
 
-Put agent info in `USER.md` → "About Me".
-Put user info in `USER.md` → "About the User".
+Update `USER.md` and `MEMORY.md` according to the memory rules in the system prompt. Confirm the name, how to address them, and communication preferences, then save them that way.
 
-If `MEMORY.md` is still a template, add sections as needed (technical decisions, tool config, etc.).
-
-Talk about what matters to them, how they want you to work, and any hard lines — write that into behavioral rules in `USER.md`.
+Talk about what matters to them, how they want you to work, and any hard lines.
 
 ## Wrap up
 

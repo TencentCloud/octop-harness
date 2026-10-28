@@ -119,11 +119,75 @@ async def test_inbox_target_failure_still_replies_failed() -> None:
 
     assert len(proc.events) == 1
     assert proc.events[0].status == "failed"
-    assert proc.events[0].error_text == "boom"
+    assert proc.events[0].error_text == "RuntimeError: boom"
     # source agent still produced a user-facing fallback reply.
     assert proc.events[0].reply_text == "sorry, it failed"
 
+
+@pytest.mark.asyncio
+async def test_inbox_sdk_auth_failure_finishes_and_excludes_notification_from_memory() -> None:
+    import httpx
+    from openai import AuthenticationError
+
+    proc = _Processor()
+    requests: list[ChatRequest] = []
+    error = AuthenticationError(
+        "Error code: 401 - token expired",
+        response=httpx.Response(401, request=httpx.Request("POST", "https://provider.example/v1/messages")),
+        body={},
+    )
+
+    async def call(agent_id: str, request: ChatRequest) -> dict[str, Any]:
+        requests.append(request)
+        if agent_id == "child":
+            raise error
+        return {"messages": [{"role": "assistant", "content": "The member failed authentication."}]}
+
+    inbox = HarnessAgentInboxManager(call_agent=call, processor=proc)
+    msg = InboxMessage(
+        id="auth-failure",
+        target_agent_id="child",
+        source_agent_id="main",
+        source_thread_id="thread",
+        message="do work",
+        user_id=1,
+    )
+    await inbox._process(msg)
+    assert msg.status == "failed"
+    assert proc.events[0].status == "failed"
+    assert "401" in (proc.events[0].error_text or "")
+    assert requests[-1].to_runnable_config()["configurable"]["octop_memory_capture_exclude"] is True
+
     await inbox.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_inbox_source_auth_failure_still_completes_failed_callback() -> None:
+    from langchain_core.exceptions import ModelAuthenticationError
+
+    proc = _Processor()
+
+    async def call(agent_id: str, request: ChatRequest) -> dict[str, Any]:
+        if agent_id == "main":
+            raise ModelAuthenticationError("expired")
+        return {"messages": [{"role": "assistant", "content": "Member finished"}]}
+
+    inbox = HarnessAgentInboxManager(call_agent=call, processor=proc)
+    msg = InboxMessage(
+        id="source-auth-failure",
+        target_agent_id="child",
+        source_agent_id="main",
+        source_thread_id="thread",
+        message="work",
+        user_id=1,
+    )
+    await inbox._process(msg)
+    assert msg.status == "failed"
+    assert proc.events[0].status == "failed"
+    assert "ModelAuthenticationError" in (proc.events[0].error_text or "")
+    assert "expired" in (proc.events[0].error_text or "")
+    assert not inbox._source_locks
+    assert not inbox._target_locks
 
 
 @pytest.mark.asyncio
@@ -325,3 +389,33 @@ def test_inbox_rejects_non_positive_concurrency() -> None:
 
     with pytest.raises(ValueError, match="max_concurrency"):
         HarnessAgentInboxManager(call_agent=_call, processor=proc, max_concurrency=0)
+
+
+@pytest.mark.asyncio
+async def test_inbox_marks_model_retry_failure_prompt_as_failed() -> None:
+    from octop_harness.messages import MODEL_RETRY_FAILURE_MARK
+
+    proc = _Processor()
+    prompt = f"{MODEL_RETRY_FAILURE_MARK}\nThe model API request failed.\nTechnical detail: boom"
+
+    async def target(_msg: InboxMessage) -> dict[str, Any]:
+        return {"messages": [{"role": "assistant", "content": prompt}]}
+
+    inbox = HarnessAgentInboxManager(
+        call_agent=_Caller().call,
+        processor=proc,
+        invoke_target=target,
+    )
+    msg = InboxMessage(
+        id="retry-failure",
+        target_agent_id="B",
+        source_agent_id="A",
+        source_thread_id="thread",
+        message="test",
+        user_id=1,
+    )
+    await inbox._process(msg)
+    assert msg.status == "failed"
+    assert msg.error_text == prompt
+    assert proc.events[0].status == "failed"
+    assert "boom" in (proc.events[0].error_text or "")

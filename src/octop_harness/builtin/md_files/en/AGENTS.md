@@ -4,53 +4,6 @@ read_when:
   - Bootstrapping a workspace manually
 ---
 
-## Memory System
-
-Harness Agent keeps context across conversations through **workspace Markdown files**. At the start of every turn, these files (when present) are injected into the system prompt.
-
-### Where to write — route by content type
-
-| File | Purpose | Update when... |
-|------|---------|----------------|
-| `USER.md` | User identity, long-term preferences, hard boundaries, agent self-config | The user reveals identity / preferences / hard limits or corrects your style |
-| `MEMORY.md` | Project-level long-term decisions, conventions, constraints, lessons, env config | The user makes a long-term decision / agreement / shares env parameters |
-| `AGENTS.md` | Project collaboration rules (build commands, code style, layout conventions) | The user clarifies how the project should be worked on |
-
-> Transient events / emotions / day-of context don't need to be persisted — leave them in the conversation. Only write to the files above when the fact is durable across conversations.
-
-### Routing examples
-
-| User said | Write to |
-|-----------|----------|
-| "My wife is Xiao Li" / "I'm an iOS engineer" / "Always reply briefly" / "Don't call me bro" | ✏️ `USER.md` |
-| "We've decided on PostgreSQL" / "4-space indent" / "Prod SSH port is 2222" | ✏️ `MEMORY.md` |
-| "Use pnpm, not npm" / "Test command is `make test`" | ✏️ `AGENTS.md` |
-| "Argued with Xiao Li today" / "Crunching on OKR this week" | (don't persist — only relevant in the moment) |
-
-### Write rules
-
-- To edit `USER.md` / `MEMORY.md` / `AGENTS.md`: `read_file` first, then `edit_file` for precise changes or `append_file` to add. **Never overwrite with `write_file`.**
-- Sensitive data (passwords, keys, tokens) is not persisted unless the user explicitly asks.
-- One fact per line, terse — these files are read every turn, shorter saves tokens.
-
-### Per-turn quick check (before replying)
-
-**Skip filter:** Pure technical Q&A / code gen / formatting / translation with no personal info, decisions, or emotional signals → **skip memory work, reply directly**.
-
-```
-1. User revealed identity / preference / hard limit? → edit_file USER.md
-2. User stated a long-term decision / convention / lesson? → edit_file MEMORY.md
-3. User clarified project workflow? → edit_file AGENTS.md
-4. One utterance carries multiple signals? → multiple edit_file calls, one per home
-5. Just events / emotions / transient context? → skip, no write needed
-```
-
-### Proactive recall
-
-If the user clearly references the past ("last time", "we talked about", "earlier"), first check `MEMORY.md` / `USER.md` for clues. If that's not enough, call `memory_search` to recall historical snippets. Weave findings naturally — never say "I found in my memory that…".
-
----
-
 ## Safety
 
 - Private data never leaks.
@@ -84,7 +37,7 @@ Put session artifacts in subdirectories to keep the root clean:
 
 ## Built-in tools
 
-Skills document specialized tools — read each `SKILL.md` before use. Local environment details (SSH, device paths, etc.) go in `MEMORY.md` under "Tool Config".
+Skills document specialized tools — read each `SKILL.md` before use. For an explicit `AGENTS.md` configuration change, read first and edit precisely.
 
 ### Web information retrieval
 

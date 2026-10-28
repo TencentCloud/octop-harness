@@ -185,10 +185,17 @@ class TestDictForms:
         """Default root is '/', which DOES trigger the warning."""
         from deepagents.backends import LocalShellBackend
 
+        from octop_harness.backends import _HOST_ROOT_WARNED
+
+        # The warning is once per workspace for the process. An earlier test
+        # may already have built a host-root shell with no workspace.
+        _HOST_ROOT_WARNED.clear()
         with caplog.at_level(logging.WARNING):
             backend = resolve_backend("local_shell")
+            resolve_backend("local_shell")
         assert isinstance(backend, LocalShellBackend)
-        assert any("rooted at '/'" in rec.message for rec in caplog.records)
+        matching = [rec for rec in caplog.records if "rooted at '/'" in rec.message]
+        assert len(matching) == 1
 
     def test_local_shell_root_slash_warns(
         self,
@@ -196,13 +203,20 @@ class TestDictForms:
         tmp_path: Path,
     ) -> None:
         """Explicitly setting root_dir='/' triggers the warning (includes workspace)."""
+        from octop_harness.backends import _HOST_ROOT_WARNED
+
+        _HOST_ROOT_WARNED.clear()
         with caplog.at_level(logging.WARNING):
             resolve_backend(
                 {"type": "local_shell", "root_dir": "/"},
                 workspace_dir=tmp_path,
             )
+            resolve_backend(
+                {"type": "local_shell", "root_dir": "/"},
+                workspace_dir=tmp_path,
+            )
         matching = [rec.message for rec in caplog.records if "rooted at '/'" in rec.message]
-        assert matching
+        assert len(matching) == 1
         assert f"workspace={tmp_path}" in matching[0]
 
     def test_local_shell_explicit_root_no_warning(
@@ -316,9 +330,8 @@ class TestRemoteBackendsImportError:
     """When ``deepagents-backends`` isn't importable, the factory must surface
     a helpful error rather than a generic ``ModuleNotFoundError``."""
 
-    def test_s3_falls_back_to_s3_compat_without_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # S3 now falls back to S3CompatBackend (boto3) instead of raising ImportError.
-        pytest.importorskip("boto3", reason="boto3 not installed; skipping S3CompatBackend fallback test")
+    def test_s3_uses_bundled_backend_without_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("boto3", reason="boto3 not installed; skipping S3Backend test")
         from octop_harness.backends.s3_backend import S3CompatBackend
 
         monkeypatch.setitem(sys.modules, "deepagents_backends", None)
@@ -332,7 +345,56 @@ class TestRemoteBackendsImportError:
         )
         assert isinstance(backend, S3CompatBackend)
 
-    def test_postgres_without_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(sys.modules, "deepagents_backends", None)
-        with pytest.raises(ImportError, match="octop-harness\\[remote-backends\\]"):
-            resolve_backend({"type": "postgres", "dsn": "postgresql://x"})
+    def test_s3_uses_bundled_backend_when_deepagents_backends_present(self) -> None:
+        pytest.importorskip("boto3", reason="boto3 not installed; skipping S3Backend test")
+        from octop_harness.backends.s3_backend import S3Backend
+
+        backend = resolve_backend(
+            {
+                "type": "s3",
+                "bucket": "test-bucket",
+                "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "s3_force_path_style": True,
+            }
+        )
+        assert isinstance(backend, S3Backend)
+        assert backend._config.addressing_style == "path"
+        assert "s3_force_path_style" not in backend._config.extra
+
+    def test_s3_write_result_compatible_with_deepagents_07(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pytest.importorskip("boto3", reason="boto3 not installed; skipping S3Backend test")
+        backend = resolve_backend(
+            {
+                "type": "s3",
+                "bucket": "test-bucket",
+                "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            }
+        )
+        monkeypatch.setattr(backend, "_get_file_data", lambda _path: None)
+        monkeypatch.setattr(backend, "_put_file_data", lambda _path, _data: None)
+        result = backend.write("/.harness-probe-x.txt", "harness-backend-probe")
+        assert result.error is None
+        assert result.path == "/.harness-probe-x.txt"
+
+    def test_postgres_without_psycopg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+        with pytest.raises(ImportError, match="psycopg"):
+            resolve_backend({"type": "postgres", "host": "127.0.0.1"})
+
+    def test_postgres_uses_bundled_backend(self) -> None:
+        pytest.importorskip("psycopg")
+        from octop_harness.backends.postgres import PostgresBackend
+
+        backend = resolve_backend(
+            {
+                "type": "postgres",
+                "host": "127.0.0.1",
+                "user": "postgres",
+                "password": "postgres",
+                "database": "postgres",
+            }
+        )
+        assert isinstance(backend, PostgresBackend)
+        assert backend._config.host == "127.0.0.1"

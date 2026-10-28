@@ -48,6 +48,7 @@ from deepagents.backends.utils import (
 )
 from wcmatch import glob as wcglob
 
+from octop_harness.backends.storage_errors import format_storage_error, wrap_io_error
 from octop_harness.backends.utils import relative_virtual_path
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,31 @@ _BASE_STORAGE_ERRORS: tuple[type[BaseException], ...] = (
     json.JSONDecodeError,
     UnicodeDecodeError,
 )
+
+
+def _finalize_ls_entries(path: str, entries: list[FileInfo]) -> list[FileInfo]:
+    """Single-level listing: one node per path, never the directory being listed.
+
+    Object stores emit both a trailing-slash marker and a CommonPrefix for the
+    same folder. The workspace tree treats those as one directory.
+    """
+    listed = path.replace("\\", "/").rstrip("/") or "/"
+    merged: dict[str, FileInfo] = {}
+    for entry in entries:
+        raw = str(entry.get("path") or "").replace("\\", "/").strip()
+        if not raw or raw in {".", "./"}:
+            continue
+        is_dir = bool(entry.get("is_dir")) or raw.endswith("/")
+        norm = raw.rstrip("/") or "/"
+        if norm in {".", "./", listed}:
+            continue
+        existing = merged.get(norm)
+        if existing is not None:
+            if is_dir and not existing.get("is_dir"):
+                merged[norm] = {**entry, "path": norm, "is_dir": True}
+            continue
+        merged[norm] = {**entry, "path": norm, "is_dir": is_dir}
+    return sorted(merged.values(), key=lambda item: (not item.get("is_dir"), str(item.get("path") or "")))
 
 
 class CloudStorageBackend(BackendProtocol, ABC):
@@ -167,9 +193,18 @@ class CloudStorageBackend(BackendProtocol, ABC):
 
     @staticmethod
     def _parse_body(raw: bytes | str) -> FileData:
-        """Decode a stored object body into ``FileData``."""
+        """Decode a stored object body into ``FileData``.
+
+        Workspace objects are JSON envelopes. Existing S3-compatible buckets
+        may hold raw text or binary; those are accepted without requiring
+        the envelope.
+        """
         if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return CloudStorageBackend._bytes_to_file_data(raw)
+            raw = text
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -206,7 +241,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
         try:
             file_data = self._get_file_data(file_path)
         except self._storage_error_types() as exc:
-            return ReadResult(error=f"Error reading {file_path!r}: {exc}")
+            return ReadResult(error=wrap_io_error("reading", file_path, exc))
         if file_data is None:
             return ReadResult(error=f"Error: File '{file_path}' not found")
         sliced = slice_read_response(file_data, offset, limit)
@@ -220,7 +255,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
         try:
             existing = self._get_file_data(file_path)
         except self._storage_error_types() as exc:
-            return WriteResult(error=f"Error checking {file_path!r}: {exc}", path=None)
+            return WriteResult(error=wrap_io_error("checking", file_path, exc), path=None)
         if existing is not None:
             return WriteResult(
                 error=(
@@ -232,7 +267,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
         try:
             self._put_file_data(file_path, create_file_data(content))
         except self._storage_error_types() as exc:
-            return WriteResult(error=f"Error writing {file_path!r}: {exc}", path=None)
+            return WriteResult(error=wrap_io_error("writing", file_path, exc), path=None)
         return WriteResult(error=None, path=file_path)
 
     # ------------------------------------------------------------------
@@ -249,7 +284,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
         try:
             file_data = self._get_file_data(file_path)
         except self._storage_error_types() as exc:
-            return EditResult(error=f"Error reading {file_path!r}: {exc}", path=None, occurrences=None)
+            return EditResult(error=wrap_io_error("reading", file_path, exc), path=None, occurrences=None)
         if file_data is None:
             return EditResult(error=f"Error: File '{file_path}' not found", path=None, occurrences=None)
 
@@ -262,7 +297,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
         try:
             self._put_file_data(file_path, update_file_data(file_data, new_content))
         except self._storage_error_types() as exc:
-            return EditResult(error=f"Error writing {file_path!r}: {exc}", path=None, occurrences=None)
+            return EditResult(error=wrap_io_error("writing", file_path, exc), path=None, occurrences=None)
         return EditResult(error=None, path=file_path, occurrences=occurrences)
 
     # ------------------------------------------------------------------
@@ -273,8 +308,8 @@ class CloudStorageBackend(BackendProtocol, ABC):
         try:
             entries = self._ls_entries(path)
         except self._storage_error_types() as exc:
-            return LsResult(error=f"Error listing {path!r}: {exc}")
-        return LsResult(entries=entries)
+            return LsResult(error=wrap_io_error("listing", path, exc))
+        return LsResult(entries=_finalize_ls_entries(path, entries))
 
     def ls_info(self, path: str) -> list[FileInfo]:
         return self.ls(path).entries or []
@@ -287,7 +322,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
         search_path = path if path is not None else "/"
         try:
             files = self._collect_recursive(search_path)
-            flags = wcglob.BRACE | wcglob.GLOBSTAR
+            flags = wcglob.BRACE | wcglob.GLOBSTAR | wcglob.DOTGLOB
             base = search_path.rstrip("/") or "/"
             matched: list[FileInfo] = []
             for fp in sorted(files):
@@ -295,7 +330,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
                 if wcglob.globmatch(fp, pattern, flags=flags) or wcglob.globmatch(rel, pattern, flags=flags):
                     matched.append({"path": fp, "is_dir": False})
         except self._storage_error_types() as exc:
-            return GlobResult(error=f"Error during glob: {exc}")
+            return GlobResult(error=f"Error during glob: {format_storage_error(exc)}")
         return GlobResult(matches=matched)
 
     def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
@@ -313,7 +348,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
         try:
             files = self._collect_recursive(path or "/")
         except self._storage_error_types() as exc:
-            return GrepResult(error=f"Error listing files: {exc}")
+            return GrepResult(error=f"Error listing files: {format_storage_error(exc)}")
         return grep_matches_from_files(files, pattern=pattern, path=path, glob=glob)
 
     def grep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:

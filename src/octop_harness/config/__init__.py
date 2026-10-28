@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from deepagents import SubAgent
 
 from octop_harness.acp.models import ACPRunnerConfig, default_acp_runners
+from octop_harness.decision.config import DecisionConfig
 
 if TYPE_CHECKING:
     # State / runtime types are intentionally erased to ``Any`` to avoid
@@ -346,6 +347,11 @@ class ModelConfig:
             legacy configurations this defaults to ``max_input_tokens``.
         max_output_tokens: Maximum generated/output tokens (0 = unknown). This
             is metadata unless a host explicitly configures ``max_tokens``.
+        api_mode: OpenAI-compatible generation API selection. Defaults to
+            Chat Completions; set ``"responses"`` to use ``/v1/responses``.
+        api_fallback: Optional protocol fallback. ``"chat_completions"`` retries
+            a Responses request only when the provider clearly reports that the
+            Responses endpoint or model is unsupported. Defaults to ``"none"``.
         native_tool_search: Enable provider-hosted tool search for this model.
             Supported for OpenAI Responses and Anthropic Messages models whose
             provider endpoint implements the corresponding native protocol.
@@ -359,6 +365,8 @@ class ModelConfig:
     max_input_tokens: int = 0
     context_window: int = 0
     max_output_tokens: int = 0
+    api_mode: Literal["chat_completions", "responses"] = "chat_completions"
+    api_fallback: Literal["none", "chat_completions"] = "none"
     native_tool_search: bool = False
     capabilities: tuple[str, ...] = ()
 
@@ -371,6 +379,14 @@ class ModelConfig:
             raise ValueError(f"ModelConfig({self.id}).input must list at least one modality")
         if self.max_input_tokens < 0 or self.context_window < 0 or self.max_output_tokens < 0:
             raise ValueError(f"ModelConfig({self.id}) token limits must be non-negative")
+        if self.api_mode not in ("chat_completions", "responses"):
+            raise ValueError(f"ModelConfig({self.id}).api_mode is invalid: {self.api_mode!r}")
+        if self.api_fallback not in ("none", "chat_completions"):
+            raise ValueError(f"ModelConfig({self.id}).api_fallback is invalid: {self.api_fallback!r}")
+        if self.api_fallback != "none" and self.api_mode != "responses":
+            raise ValueError(f"ModelConfig({self.id}).api_fallback requires api_mode='responses'")
+        if self.api_fallback != "none" and self.native_tool_search:
+            raise ValueError(f"ModelConfig({self.id}).api_fallback is incompatible with native_tool_search")
         if self.max_input_tokens <= 0 < self.context_window:
             object.__setattr__(self, "max_input_tokens", self.context_window)
         if self.context_window <= 0 < self.max_input_tokens:
@@ -410,6 +426,8 @@ class ModelConfig:
             "max_input_tokens": self.max_input_tokens,
             "context_window": self.effective_context_window,
             "max_output_tokens": self.max_output_tokens,
+            "api_mode": self.api_mode,
+            "api_fallback": self.api_fallback,
             "native_tool_search": self.native_tool_search,
             "capabilities": list(self.capabilities),
         }
@@ -436,6 +454,8 @@ class ModelConfig:
             max_input_tokens=max_input,
             context_window=context_window,
             max_output_tokens=int(data.get("max_output_tokens") or 0),
+            api_mode=data.get("api_mode", "chat_completions"),
+            api_fallback=data.get("api_fallback", "none"),
             native_tool_search=bool(data.get("native_tool_search", False)),
             capabilities=tuple(str(x) for x in (data.get("capabilities") or ())),
         )
@@ -594,6 +614,10 @@ class HarnessAgentConfig:
     #   - a dict with a "type" key plus per-type kwargs
     #   - any object that implements ``BackendProtocol``
     backend: Any = None
+    # New Windows subtree experts set this. Shell commands, environment
+    # values, and stdout/stderr are not scanned for paths. Callers convert a
+    # virtual path through the ``virtual_to_native_path`` tool.
+    explicit_virtual_paths: bool = False
 
     # —— Protocol ——
     protocol: str = "langgraph"
@@ -688,6 +712,10 @@ class HarnessAgentConfig:
     # (lose async) but cannot gain background dispatch.
     peer_invoke_mode: Literal["sync", "async", "both"] = "both"
 
+    # —— Decision model ——
+    # None, or a disabled config, leaves the middleware unmounted.
+    decision: DecisionConfig | None = None
+
     # —— Progressive tool loading ——
     # Names in this set remain registered with DeepAgents for real execution.
     # Client mode keeps name/description references visible but defers parameter
@@ -734,11 +762,13 @@ class HarnessAgentConfig:
     # Auto by default: every provider whose required env vars are set is
     # loaded. ``searchfree`` (zero-config) is always included. Accepted values:
     #   - ``"auto"`` / ``True`` (default): every provider whose required env
-    #     vars are set is loaded (tavily / brave / google / kimi / searchfree).
+    #     vars are set is loaded (tavily / brave / deepseek / google / kimi /
+    #     yuanbao / searchfree, plus ``you`` once ``YDC_API_KEY`` is set).
     #   - ``False``: no web-search tools loaded.
     #   - ``"all"``: every provider is loaded; the ones missing env vars
     #     return a plain-text error string when invoked.
-    #   - ``["tavily", "kimi"]``: an explicit list. Unknown names raise
+    #   - ``["you"]`` works without a key (free tier, 100 searches a day).
+    #   - ``["tavily", "deepseek"]``: an explicit list. Unknown names raise
     #     ``ValueError``; missing env vars raise ``RuntimeError`` so
     #     misconfiguration surfaces at agent construction time.
     web_search_tools: bool | Literal["auto", "all"] | Sequence[str] = "auto"
@@ -761,6 +791,11 @@ class HarnessAgentConfig:
 
     # —— Memory ——
     memory_enabled: bool = True
+    # Who may edit USER.md / MEMORY.md.
+    # ``auto`` locks them while structured memory is on and opens them when it
+    # is off. ``user`` keeps them owner-maintained. ``agent`` allows edits even
+    # while structured memory is on.
+    manual_document_policy: Literal["auto", "user", "agent"] = "auto"
     memory_backend: str | dict[str, Any] | Any = "sqlite"
     memory_backend_config: dict[str, Any] | None = None  # backend-specific settings
     memory_jsonl_enabled: bool = True
@@ -804,6 +839,36 @@ class HarnessAgentConfig:
     # Fixed-interval cadence (mode="interval"): seconds between sweeps of all
     # recently-active sessions. Default 6h.
     memory_extract_interval_seconds: float = 21600.0
+    # Output budget for extraction / episode completions. ``None`` keeps
+    # octop-memory's built-in 2048. This is written into the memory runtime's
+    # ``extraction.max_tokens`` — the extractor always sends its own
+    # ``max_tokens``, so a client-side fallback cannot override it.
+    memory_extract_max_tokens: int | None = None
+    # How long one auxiliary request may block. ``None`` keeps
+    # ``HarnessAgentLLMClient`` defaults (light 120s, heavy 300s). These are
+    # not the idle/interval trigger: those decide when extraction starts.
+    memory_aux_light_timeout_s: float | None = None
+    memory_aux_heavy_timeout_s: float | None = None
+    # Depth-thinking on OpenAI-compatible aux calls. ``auto`` turns it off
+    # for known Qwen3/QwQ chat-template models. ``off`` requests the same
+    # supported switch; unknown models keep their own defaults.
+    # ``on`` leaves the server default. Main-chat thinking settings are not
+    # reused here.
+    memory_aux_thinking: Literal["auto", "off", "on"] = "auto"
+    # Completion budget for aux calls that do not pass their own
+    # ``max_tokens`` (promotion / page regen). Extraction is unaffected:
+    # it always sends a budget, overridden only by
+    # ``memory_extract_max_tokens``. ``None`` adds no client-side cap.
+    memory_aux_max_tokens: int | None = None
+    # Extra OpenAI-compatible request fields for the first selected model only
+    # (for example ``reasoning_effort``). Merged after the thinking switch,
+    # so these top-level keys win. Bound only for langchain-openai models.
+    memory_aux_extra_body: dict[str, Any] | None = None
+    # Retries after the first request, per candidate model. Memory owns the
+    # retry loop; dedicated SDK clients have their implicit retries disabled.
+    memory_aux_max_retries: int = 2
+    # Exponential delay: base * 2**attempt, capped at 60 seconds.
+    memory_aux_retry_backoff_s: float = 1.0
 
     # ------------------------------------------------------------------
     # Validation
@@ -829,6 +894,15 @@ class HarnessAgentConfig:
         if self.session_log_max_bytes <= 0:
             raise ValueError("session_log_max_bytes must be positive")
 
+        if self.memory_aux_max_tokens is not None and self.memory_aux_max_tokens < 1:
+            raise ValueError(f"memory_aux_max_tokens must be >= 1, got {self.memory_aux_max_tokens!r}")
+        if self.memory_aux_extra_body is not None and not isinstance(self.memory_aux_extra_body, dict):
+            raise ValueError("memory_aux_extra_body must be a dict when set")
+
+        if self.manual_document_policy not in ("auto", "user", "agent"):
+            raise ValueError(
+                f"manual_document_policy must be 'auto', 'user', or 'agent', got {self.manual_document_policy!r}",
+            )
         if self.language not in ("en", "zh"):
             raise ValueError(f"language must be 'en' or 'zh', got {self.language!r}")
         if self.tool_search_mode not in ("client", "native", "eager"):
@@ -843,6 +917,19 @@ class HarnessAgentConfig:
             raise ValueError(
                 f"peer_invoke_mode must be 'sync', 'async', or 'both', got {self.peer_invoke_mode!r}",
             )
+        if self.memory_aux_thinking not in ("auto", "off", "on"):
+            raise ValueError(
+                f"memory_aux_thinking must be 'auto', 'off', or 'on', got {self.memory_aux_thinking!r}",
+            )
+        retries = self.memory_aux_max_retries
+        if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 10:
+            raise ValueError("memory_aux_max_retries must be an integer from 0 to 10")
+        backoff = self.memory_aux_retry_backoff_s
+        if isinstance(backoff, bool) or not isinstance(backoff, int | float) or not 0 <= backoff <= 60:
+            raise ValueError("memory_aux_retry_backoff_s must be between 0 and 60 seconds")
+        _validate_extract_max_tokens(self.memory_extract_max_tokens)
+        _validate_aux_timeout("memory_aux_light_timeout_s", self.memory_aux_light_timeout_s)
+        _validate_aux_timeout("memory_aux_heavy_timeout_s", self.memory_aux_heavy_timeout_s)
 
         # Workspace must be an absolute directory: it doubles as the backend's
         # on-disk root for local backends and as the parent for all
@@ -1030,6 +1117,7 @@ class HarnessAgentConfig:
             "bootstrap_file": _path_to_str(self.bootstrap_file) if self.bootstrap_file else None,
             "bootstrap_marker": _path_to_str(self.bootstrap_marker) if self.bootstrap_marker else None,
             "memory_enabled": self.memory_enabled,
+            "manual_document_policy": self.manual_document_policy,
             "memory_backend_config": (
                 dict(self.memory_backend_config) if self.memory_backend_config is not None else None
             ),
@@ -1045,9 +1133,20 @@ class HarnessAgentConfig:
             "memory_extract_trigger_mode": self.memory_extract_trigger_mode,
             "memory_extract_idle_seconds": self.memory_extract_idle_seconds,
             "memory_extract_interval_seconds": self.memory_extract_interval_seconds,
+            "memory_extract_max_tokens": self.memory_extract_max_tokens,
+            "memory_aux_light_timeout_s": self.memory_aux_light_timeout_s,
+            "memory_aux_heavy_timeout_s": self.memory_aux_heavy_timeout_s,
+            "memory_aux_thinking": self.memory_aux_thinking,
+            "memory_aux_max_retries": self.memory_aux_max_retries,
+            "memory_aux_retry_backoff_s": self.memory_aux_retry_backoff_s,
+            "memory_aux_max_tokens": self.memory_aux_max_tokens,
+            "memory_aux_extra_body": (
+                dict(self.memory_aux_extra_body) if self.memory_aux_extra_body is not None else None
+            ),
             "debug": self.debug,
             "language": self.language,
             "default_timezone": self.default_timezone,
+            "decision": self.decision.to_dict() if self.decision is not None else None,
         }
         # Backend: serialize only if it's a string or dict spec; live instances skipped.
         if isinstance(self.backend, str | dict) or self.backend is None:
@@ -1194,11 +1293,29 @@ def _coerce_config_field(
         if not isinstance(value, dict):
             raise TypeError("'media_generation' must be a dict or null")
         coerced = MediaGenerationConfig.from_dict(value)
+    elif key == "decision":
+        if not isinstance(value, dict):
+            raise TypeError("'decision' must be a dict or null")
+        coerced = DecisionConfig.from_dict(value)
     elif key == "subagents":
         coerced = [_subagent_from_dict(item) for item in value]
     else:
         coerced = value
     return coerced
+
+
+def _validate_extract_max_tokens(value: int | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or not 128 <= value <= 65536:
+        raise ValueError("memory_extract_max_tokens must be an int from 128 to 65536, or None")
+
+
+def _validate_aux_timeout(name: str, value: float | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 30 <= float(value) <= 3600:
+        raise ValueError(f"{name} must be between 30 and 3600 seconds, or None")
 
 
 def _path_to_str(value: str | Path) -> str:
@@ -1300,6 +1417,7 @@ def _web_search_tools_to_jsonable(value: bool | Literal["auto", "all"] | Sequenc
 __all__ = [
     "DEFAULT_CONFIG_FILENAME",
     "DEFAULT_SESSION_LOG_MAX_BYTES",
+    "DecisionConfig",
     "HarnessAgentConfig",
     "InputModality",
     "MediaGenerationConfig",

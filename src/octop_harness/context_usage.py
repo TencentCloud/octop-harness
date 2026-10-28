@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -29,6 +30,17 @@ _TEAM_TOOL_NAMES = frozenset({"agent_list", "ask_agent", "task"})
 DEFAULT_MAX_TOKENS = 128_000
 
 ContextUsageSource = Literal["model_request", "empty"]
+
+# Segments a decision pass can shrink. Conversation and the base prompt stay.
+_FILTERED_SEGMENT_KEYS = (
+    "tool_definitions",
+    "skills",
+    "mcp",
+    "subagent_definitions",
+)
+
+# Set by decision middleware around the model call it narrowed.
+pending_decision_saved: ContextVar[int] = ContextVar("octop_pending_decision_saved", default=0)
 
 
 # Han / kana / Hangul cost far more tokens per character than Latin text: BPE
@@ -244,6 +256,19 @@ def scale_segments(raw: dict[str, int], target: int) -> dict[str, int]:
     return scaled
 
 
+def catalog_saved_tokens(before: Any, after: Any) -> int:
+    """Tokens the decision filter kept out of one model request.
+
+    Uses the same segment estimator as the context panel, so the number matches
+    the tool, skill, MCP, and subagent rows.
+    """
+    if before is after:
+        return 0
+    raw_before = breakdown_from_model_request(before)
+    raw_after = breakdown_from_model_request(after)
+    return sum(max(0, int(raw_before.get(key, 0)) - int(raw_after.get(key, 0))) for key in _FILTERED_SEGMENT_KEYS)
+
+
 def breakdown_from_model_request(
     request: Any,
     *,
@@ -342,6 +367,7 @@ class ContextUsage:
     reasoning_tokens: int = 0
     segments: dict[str, int] = field(default_factory=dict)
     source: ContextUsageSource = "empty"
+    decision_saved: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -372,6 +398,7 @@ class ContextUsage:
             reasoning_tokens=int(data.get("reasoning_tokens") or 0),
             segments=segments,
             source=source,  # type: ignore[arg-type]
+            decision_saved=max(0, int(data.get("decision_saved") or 0)),
         )
 
     def with_max_tokens(self, max_tokens: int) -> ContextUsage:
@@ -394,6 +421,7 @@ class ContextUsage:
             reasoning_tokens=self.reasoning_tokens,
             segments=dict(self.segments),
             source=self.source,
+            decision_saved=self.decision_saved,
         )
 
 
@@ -436,6 +464,7 @@ def build_context_usage(
     # Drop zero segments for a compact persisted payload / API response.
     compact = {k: v for k, v in segments.items() if v > 0}
     cap = max_tokens if max_tokens > 0 else DEFAULT_MAX_TOKENS
+    decision_saved = max(0, int(pending_decision_saved.get() or 0))
     return ContextUsage(
         max_tokens=cap,
         used_tokens=min(input_tokens, cap),
@@ -447,6 +476,7 @@ def build_context_usage(
         reasoning_tokens=reasoning_tokens,
         segments=compact,
         source="model_request" if input_tokens > 0 else "empty",
+        decision_saved=decision_saved,
     )
 
 
@@ -492,6 +522,7 @@ def shrink_context_usage(usage: ContextUsage, removed_tokens: int) -> ContextUsa
         reasoning_tokens=0,
         segments=segments,
         source=usage.source,
+        decision_saved=usage.decision_saved,
     )
 
 
@@ -517,6 +548,7 @@ __all__ = [
     "ContextUsage",
     "breakdown_from_model_request",
     "build_context_usage",
+    "catalog_saved_tokens",
     "content_tokens",
     "context_usage_from_messages",
     "conversation_tokens_from_messages",
@@ -526,6 +558,7 @@ __all__ = [
     "extract_usage_from_message",
     "message_content_text",
     "partition_system_prompt_segments",
+    "pending_decision_saved",
     "scale_segments",
     "shrink_context_usage",
     "tool_bucket_tokens",

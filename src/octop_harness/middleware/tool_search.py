@@ -281,7 +281,7 @@ class ToolSearchMiddleware(AgentMiddleware[ClientToolSearchState, Any]):
     @staticmethod
     def _deferred_reference(tool: BaseTool) -> BaseTool:
         extras = dict(tool.extras or {})
-        extras["defer_loading"] = True
+        extras.pop("defer_loading", None)
         return tool.model_copy(
             update={
                 "args_schema": _DeferredToolInput,

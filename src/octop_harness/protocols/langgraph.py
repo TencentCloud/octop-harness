@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from enum import StrEnum
 from typing import Any
 
@@ -25,6 +26,28 @@ def _is_internal_model_stream(metadata: Any) -> bool:
     response, so they must be removed before protocol consumers see them.
     """
     return isinstance(metadata, dict) and metadata.get("lc_source") in _INTERNAL_LC_SOURCES
+
+
+def _content_block_delta(block: Any) -> tuple[str, str]:
+    """Split a streamed content block into (text, reasoning) delta parts."""
+    if isinstance(block, str):
+        return block, ""
+    if not isinstance(block, dict):
+        return "", ""
+    block_type = block.get("type", "text")
+    if block_type == "thinking":
+        return "", str(block.get("thinking") or "")
+    if block_type == "text":
+        return str(block.get("text") or ""), ""
+    return "", ""
+
+
+def _emit_splitter_text(splitter: ThinkSplitter, text: str, node: str, out: list[dict[str, Any]]) -> None:
+    final_text, thinking_text = splitter.feed(text)
+    if thinking_text:
+        out.append({"type": AgentEventType.REASONING, "content": thinking_text, "node": node})
+    if final_text:
+        out.append({"type": AgentEventType.TOKEN, "content": final_text, "node": node})
 
 
 class AgentEventType(StrEnum):
@@ -98,7 +121,26 @@ def _usage_event(msg_chunk: Any, metadata: Any, node: str) -> dict[str, Any] | N
         model = str(metadata.get("ls_model_name") or metadata.get("model") or "")
     if model:
         event["model"] = model
+    saved = _decision_saved(msg_chunk)
+    if saved > 0:
+        event["usage"] = {**event["usage"], "decision_saved": saved}
     return event
+
+
+def _decision_saved(msg: Any) -> int:
+    kwargs = getattr(msg, "additional_kwargs", None)
+    if not isinstance(kwargs, dict) and isinstance(msg, dict):
+        kwargs = msg.get("additional_kwargs")
+    if not isinstance(kwargs, dict):
+        return 0
+    ctx = kwargs.get("context_usage")
+    if not isinstance(ctx, dict):
+        return 0
+    try:
+        saved = int(ctx.get("decision_saved") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return saved if saved > 0 else 0
 
 
 class LangGraphProtocol(ChatProtocol):
@@ -119,15 +161,18 @@ class LangGraphProtocol(ChatProtocol):
         **kwargs: Any,
     ) -> AsyncGenerator[dict[str, Any], None]:
         splitter = ThinkSplitter()
-        async for chunk in self._graph.astream(
-            {"messages": messages},
-            config=config,
-            stream_mode=["values", "updates", "messages", "custom"],
-            version="v2",
-            **kwargs,
-        ):
-            for event in self._project_chunk(chunk, splitter):
-                yield event
+        async with aclosing(
+            self._graph.astream(
+                {"messages": messages},
+                config=config,
+                stream_mode=["values", "updates", "messages", "custom"],
+                version="v2",
+                **kwargs,
+            )
+        ) as graph_chunks:
+            async for chunk in graph_chunks:
+                for event in self._project_chunk(chunk, splitter):
+                    yield event
         for event in self._drain_splitter(splitter):
             yield event
 
@@ -144,15 +189,18 @@ class LangGraphProtocol(ChatProtocol):
         merged_config["configurable"] = configurable
 
         splitter = ThinkSplitter()
-        async for chunk in self._graph.astream(
-            Command(resume={"decisions": decisions}),
-            config=merged_config,
-            stream_mode=["values", "updates", "messages", "custom"],
-            version="v2",
-            **kwargs,
-        ):
-            for event in self._project_chunk(chunk, splitter):
-                yield event
+        async with aclosing(
+            self._graph.astream(
+                Command(resume={"decisions": decisions}),
+                config=merged_config,
+                stream_mode=["values", "updates", "messages", "custom"],
+                version="v2",
+                **kwargs,
+            )
+        ) as graph_chunks:
+            async for chunk in graph_chunks:
+                for event in self._project_chunk(chunk, splitter):
+                    yield event
         for event in self._drain_splitter(splitter):
             yield event
 
@@ -179,12 +227,17 @@ class LangGraphProtocol(ChatProtocol):
         if reasoning:
             out.append({"type": AgentEventType.REASONING, "content": reasoning, "node": node})
         content = msg_chunk.content if hasattr(msg_chunk, "content") else ""
-        if content:
-            final_text, thinking_text = splitter.feed(content)
-            if thinking_text:
-                out.append({"type": AgentEventType.REASONING, "content": thinking_text, "node": node})
-            if final_text:
-                out.append({"type": AgentEventType.TOKEN, "content": final_text, "node": node})
+        if isinstance(content, list):
+            # Anthropic / OpenAI-Responses streams deliver thinking and text as
+            # content blocks, not a plain str.
+            for block in content:
+                block_text, block_reasoning = _content_block_delta(block)
+                if block_reasoning:
+                    out.append({"type": AgentEventType.REASONING, "content": block_reasoning, "node": node})
+                if block_text:
+                    _emit_splitter_text(splitter, block_text, node, out)
+        elif content:
+            _emit_splitter_text(splitter, content, node, out)
         for tc in getattr(msg_chunk, "tool_call_chunks", None) or []:
             out.append(
                 {
@@ -220,6 +273,12 @@ class LangGraphProtocol(ChatProtocol):
                 out.append({"type": AgentEventType.TOOL_RESULT, "node": node_name, "messages": node_messages})
             else:
                 out.append({"type": AgentEventType.STATE_UPDATE, "node": node_name, "data": node_data})
+            for message in node_messages:
+                if _decision_saved(message) <= 0:
+                    continue
+                usage_event = _usage_event(message, {}, node_name)
+                if usage_event is not None:
+                    out.append(usage_event)
         return out
 
     def _project_chunk(self, chunk: dict[str, Any], splitter: ThinkSplitter) -> list[dict[str, Any]]:

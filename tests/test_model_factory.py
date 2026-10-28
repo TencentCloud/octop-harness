@@ -11,6 +11,7 @@ from octop_harness.config import ModelConfig, ProviderConfig
 from octop_harness.llm.factory import (
     ChatModelFactory,
     _get_reasoning_aware_chat_openai,
+    _is_responses_api_unsupported_error,
     build_chat_model,
 )
 
@@ -43,6 +44,8 @@ class TestBuildChatModel:
         # so the factory must pass it explicitly or streamed responses carry
         # no usage_metadata.
         assert kwargs["stream_usage"] is True
+        assert kwargs["use_responses_api"] is False
+        assert "output_version" not in kwargs
 
     def test_openai_protocol_stream_usage_opt_out(self) -> None:
         provider = ProviderConfig(
@@ -67,7 +70,7 @@ class TestBuildChatModel:
             api_key="sk-x",
             protocol="openai",
         )
-        model = ModelConfig(id="gpt-tool-search", native_tool_search=True)
+        model = ModelConfig(id="gpt-tool-search", api_mode="responses", native_tool_search=True)
         from langchain_openai import ChatOpenAI
 
         cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
@@ -79,6 +82,55 @@ class TestBuildChatModel:
         assert kwargs["output_version"] == "responses/v1"
         assert instance._harness_native_tool_search is True
         assert instance._harness_tool_search_provider == "openai"
+
+    @pytest.mark.parametrize(
+        ("api_mode", "expected"),
+        [("responses", True), ("chat_completions", False)],
+    )
+    def test_openai_explicit_api_mode_overrides_endpoint(self, api_mode: str, expected: bool) -> None:
+        provider = ProviderConfig(
+            id="openai",
+            base_url="https://api.openai.com/v1",
+            api_key="sk-x",
+            protocol="openai",
+        )
+        model = ModelConfig(id="gpt-X", api_mode=api_mode)  # type: ignore[arg-type]
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            build_chat_model(provider, model)
+
+        assert mock_init.call_args.kwargs["use_responses_api"] is expected
+
+    def test_openai_native_tool_search_rejects_chat_completions(self) -> None:
+        provider = ProviderConfig(id="openai", base_url="https://api.example.com/v1", api_key="sk-x")
+        model = ModelConfig(id="gpt-X", api_mode="chat_completions", native_tool_search=True)
+
+        with pytest.raises(ValueError, match="native_tool_search requires api_mode='responses'"):
+            build_chat_model(provider, model)
+
+    def test_openai_responses_fallback_builds_chat_completions_model(self) -> None:
+        provider = ProviderConfig(id="openai", base_url="https://api.example.com/v1", api_key="sk-x")
+        model = ModelConfig(
+            id="gpt-X",
+            api_mode="responses",
+            api_fallback="chat_completions",
+        )
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            instance = build_chat_model(provider, model)
+
+        assert mock_init.call_count == 2
+        primary_kwargs = mock_init.call_args_list[0].kwargs
+        fallback_kwargs = mock_init.call_args_list[1].kwargs
+        assert primary_kwargs["use_responses_api"] is True
+        assert primary_kwargs["output_version"] == "responses/v1"
+        assert fallback_kwargs["use_responses_api"] is False
+        assert "output_version" not in fallback_kwargs
+        assert instance._harness_api_fallback_model is not None
 
     def test_openai_profile_includes_distinct_context_limits(self) -> None:
         provider = ProviderConfig(
@@ -325,3 +377,410 @@ class TestReasoningContentRoundTrip:
         second = _get_reasoning_aware_chat_openai(ChatOpenAI)
         assert first is second
         assert issubclass(first, ChatOpenAI)
+
+
+class TestCodexResponses:
+    @staticmethod
+    def _build(
+        base_url: str = "https://chatgpt.com/backend-api/codex", *, model_config: ModelConfig | None = None
+    ) -> Any:
+        return build_chat_model(
+            ProviderConfig(
+                id="openai-codex",
+                protocol="openai",
+                base_url=base_url,
+                api_key="sk-test",
+                headers={"ChatGPT-Account-Id": "test-account"},
+            ),
+            model_config or ModelConfig(id="gpt-5.5"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_codex_never_falls_back_to_chat_completions(self) -> None:
+        from langchain_core.messages import HumanMessage
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build(
+            model_config=ModelConfig(id="gpt-5.5", api_mode="responses", api_fallback="chat_completions")
+        )
+        assert instance.use_responses_api is True
+        assert getattr(instance, "_harness_api_fallback_model", None) is None
+        error = TestResponsesApiFallback.UnsupportedEndpointError()
+        with (
+            patch.object(ChatOpenAI, "_agenerate", side_effect=error) as generate,
+            pytest.raises(TestResponsesApiFallback.UnsupportedEndpointError),
+        ):
+            await instance._agenerate([HumanMessage(content="ping")])
+        assert generate.call_count == 1
+
+    def test_codex_overrides_default_api_mode_for_native_tool_search(self) -> None:
+        instance = self._build(model_config=ModelConfig(id="gpt-5.5", native_tool_search=True))
+        assert instance.use_responses_api is True
+        assert instance._harness_native_tool_search is True
+
+    def test_other_responses_endpoints_keep_their_instructions_behavior(self) -> None:
+        instance = self._build(
+            "https://api.example.com/v1", model_config=ModelConfig(id="gpt-5.5", api_mode="responses")
+        )
+        payload = instance._get_request_payload([("system", "Be concise."), ("human", "ping")])
+        assert instance.use_responses_api is True
+        assert "instructions" not in payload
+        assert "store" not in payload
+        assert payload["stream"] is False
+        assert payload["input"][0]["content"] == "Be concise."
+
+    @pytest.mark.parametrize("suffix", ["", "/"])
+    def test_stateless_streaming_payload_and_headers(self, suffix: str) -> None:
+        instance = self._build("https://chatgpt.com/backend-api/codex" + suffix)
+        payload = instance._get_request_payload([("human", "ping")])
+        assert payload["store"] is False
+        assert payload["stream"] is True
+        assert "input" in payload and "messages" not in payload
+        assert instance.use_previous_response_id is False
+        assert instance.output_version == "responses/v1"
+        assert instance.default_headers["ChatGPT-Account-Id"] == "test-account"
+
+    def test_system_and_tool_history_are_preserved_without_mutation(self) -> None:
+        from copy import deepcopy
+
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+        history = [
+            SystemMessage(content="Be concise."),
+            HumanMessage(content="Echo hello."),
+            AIMessage(
+                content=[
+                    {"type": "reasoning", "id": "rs_test", "summary": [], "encrypted_content": "opaque-test-reasoning"}
+                ],
+                tool_calls=[
+                    {"name": "echo", "args": {"text": "hello"}, "id": "call_echo", "type": "tool_call"},
+                ],
+                response_metadata={"id": "resp_previous"},
+            ),
+            ToolMessage(content="hello", tool_call_id="call_echo"),
+            SystemMessage(content="Keep the original instructions."),
+            HumanMessage(content="Summarize the result."),
+        ]
+        before = deepcopy(history)
+        payload = self._build()._get_request_payload(history)
+        assert "previous_response_id" not in payload
+        items = payload["input"]
+        assert payload["instructions"] == "Be concise."
+        assert [item["role"] for item in items if "role" in item] == ["user", "developer", "user"]
+        assert next(item for item in items if item.get("role") == "developer")["content"] == (
+            "Keep the original instructions."
+        )
+        call = next(item for item in items if item.get("type") == "function_call")
+        result = next(item for item in items if item.get("type") == "function_call_output")
+        assert call["call_id"] == result["call_id"] == "call_echo"
+        assert result["output"] == "hello"
+        reasoning = next(item for item in items if item.get("type") == "reasoning")
+        assert reasoning["encrypted_content"] == "opaque-test-reasoning"
+        assert history == before
+
+    @pytest.mark.parametrize(
+        "content, expected",
+        [
+            ("  Be concise.\n", "  Be concise.\n"),
+            (
+                [{"type": "text", "text": "Base rules."}, {"type": "text", "text": "Runtime rules."}],
+                "Base rules.\n\nRuntime rules.",
+            ),
+        ],
+    )
+    def test_main_system_prompt_becomes_instructions(self, content: Any, expected: str) -> None:
+        from copy import deepcopy
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        history = [SystemMessage(content=content), HumanMessage(content="ping")]
+        before = deepcopy(history)
+        payload = self._build()._get_request_payload(history)
+        assert payload["instructions"] == expected
+        assert [item["role"] for item in payload["input"]] == ["user"]
+        assert history == before
+
+    @pytest.mark.parametrize("explicit", ["Caller rules.", "", None])
+    @pytest.mark.parametrize("via_extra_body", [False, True])
+    def test_explicit_instructions_leave_system_messages_in_input(self, explicit: Any, via_extra_body: bool) -> None:
+        options = {"instructions": explicit}
+        if via_extra_body:
+            options = {"extra_body": options}
+        payload = self._build()._get_request_payload(
+            [("system", "Main rules."), ("human", "ping"), ("system", "Later rules.")], **options
+        )
+        target = payload["extra_body"] if via_extra_body else payload
+        assert "instructions" in target
+        assert target["instructions"] == explicit
+        if via_extra_body:
+            assert "instructions" not in payload
+        assert [item["role"] for item in payload["input"]] == ["developer", "user", "developer"]
+        assert payload["input"][0]["content"] == "Main rules."
+        assert payload["input"][2]["content"] == "Later rules."
+
+    @pytest.mark.parametrize(
+        "history, roles",
+        [
+            ([("human", "ping")], ["user"]),
+            ([("developer", "Developer rules."), ("human", "ping")], ["developer", "user"]),
+            ([("human", "ping"), ("system", "Later rules.")], ["user", "developer"]),
+        ],
+    )
+    def test_no_main_system_prompt_keeps_message_roles(self, history: Any, roles: list[str]) -> None:
+        payload = self._build()._get_request_payload(history)
+        assert "instructions" not in payload
+        assert [item["role"] for item in payload["input"]] == roles
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://api.openai.com/v1",
+            "https://chatgpt.com.example.org/backend-api/codex",
+            "https://example.org/chatgpt.com/backend-api/codex",
+            "https://chatgpt.com/backend-api/codex-other",
+        ],
+    )
+    def test_other_endpoints_keep_chat_completions(self, base_url: str) -> None:
+        instance = self._build(base_url)
+        payload = instance._get_request_payload([("system", "Be concise."), ("human", "ping")])
+        assert "messages" in payload and "input" not in payload
+        assert payload["messages"][0]["role"] == "system"
+        assert "store" not in payload
+        assert payload["stream"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["ainvoke", "astream"])
+    @pytest.mark.parametrize("bound_instructions", [False, True])
+    async def test_http_request_and_sse_response(self, mode: str, bound_instructions: bool) -> None:
+        import json
+
+        import httpx
+        from openai import AsyncOpenAI
+
+        requests: list[httpx.Request] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            body = json.loads(request.content)
+            assert request.url.path == "/backend-api/codex/responses"
+            assert request.headers["authorization"] == "Bearer sk-test"
+            assert request.headers["chatgpt-account-id"] == "test-account"
+            assert body["store"] is False
+            assert body["stream"] is True
+            if bound_instructions:
+                assert body["instructions"] == "Caller rules."
+                assert body["input"][0]["role"] == "developer"
+                assert body["input"][0]["content"] == "Be concise."
+            else:
+                assert body["instructions"] == "Be concise."
+                assert body["input"][0]["role"] == "user"
+            assert "reasoning.encrypted_content" in body["include"]
+            events = [
+                {
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "item_id": "msg_test",
+                    "delta": "OK",
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_test",
+                        "object": "response",
+                        "created_at": 0,
+                        "model": "gpt-5.5",
+                        "status": "completed",
+                        "output": [],
+                        "parallel_tool_calls": True,
+                        "tool_choice": "auto",
+                        "tools": [],
+                    },
+                },
+            ]
+            sse = "".join("data: " + json.dumps(event) + "\n\n" for event in events)
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=sse)
+
+        instance = self._build()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            instance.root_async_client = AsyncOpenAI(
+                api_key="sk-test",
+                base_url=instance.openai_api_base,
+                default_headers=instance.default_headers,
+                http_client=http,
+            )
+            messages = [("system", "Be concise."), ("human", "ping")]
+            chat = instance.bind(instructions="Caller rules.") if bound_instructions else instance
+            if mode == "ainvoke":
+                result = await chat.ainvoke(messages)
+                assert result.text == "OK"
+            else:
+                chunks = [chunk async for chunk in chat.astream(messages)]
+                assert "".join(chunk.text for chunk in chunks) == "OK"
+        assert len(requests) == 1
+
+    def test_stateless_replay_does_not_reference_unstored_items(self) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        history = [
+            HumanMessage(content="Say hello."),
+            AIMessage(
+                content=[
+                    {"type": "text", "text": "Hello", "id": "msg_unstored"},
+                    {"type": "reasoning", "id": "rs_unstored", "summary": []},
+                ],
+                response_metadata={"id": "resp_unstored"},
+            ),
+            HumanMessage(content="Repeat that."),
+        ]
+        payload = self._build()._get_request_payload(history)
+        assert "previous_response_id" not in payload
+        assistant = next(item for item in payload["input"] if item.get("role") == "assistant")
+        assert "id" not in assistant
+        assert assistant["content"][0]["text"] == "Hello"
+        assert not any(item.get("type") == "reasoning" for item in payload["input"])
+
+
+class TestResponsesApiFallback:
+    class UnsupportedEndpointError(Exception):
+        status_code = 404
+        body = {"error": {"message": "Not Found"}}
+
+    def _build(self) -> Any:
+        provider = ProviderConfig(
+            id="example",
+            base_url="https://api.example.com/v1",
+            api_key="sk-x",
+            protocol="openai",
+        )
+        model = ModelConfig(
+            id="responses-model",
+            api_mode="responses",
+            api_fallback="chat_completions",
+        )
+        return build_chat_model(provider, model)
+
+    @pytest.mark.parametrize("status_code", [404, 405, 501])
+    def test_endpoint_status_is_eligible(self, status_code: int) -> None:
+        exc = self.UnsupportedEndpointError()
+        exc.status_code = status_code
+        assert _is_responses_api_unsupported_error(exc) is True
+
+    @pytest.mark.parametrize("status_code", [401, 403, 429, 500, 503])
+    def test_operational_error_is_not_eligible(self, status_code: int) -> None:
+        exc = self.UnsupportedEndpointError()
+        exc.status_code = status_code
+        assert _is_responses_api_unsupported_error(exc) is False
+
+    def test_explicit_unsupported_400_is_eligible(self) -> None:
+        exc = self.UnsupportedEndpointError("This model does not support Responses API")
+        exc.status_code = 400
+        assert _is_responses_api_unsupported_error(exc) is True
+
+    def test_generic_400_is_not_eligible(self) -> None:
+        exc = self.UnsupportedEndpointError("invalid tool schema")
+        exc.status_code = 400
+        exc.body = {"error": {"message": "invalid tool schema"}}
+        assert _is_responses_api_unsupported_error(exc) is False
+
+    def test_non_streaming_call_falls_back_and_marks_result(self) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+        expected = ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+        with patch.object(
+            ChatOpenAI,
+            "_generate",
+            side_effect=[self.UnsupportedEndpointError(), expected],
+        ) as generate:
+            result = instance._generate([HumanMessage(content="ping")])
+
+        assert generate.call_count == 2
+        assert result.generations[0].message.response_metadata["api_fallback"] == "chat_completions"
+
+    @pytest.mark.asyncio
+    async def test_async_non_streaming_call_falls_back_and_marks_result(self) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+        expected = ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+        calls = 0
+
+        async def fake_agenerate(_model: Any, *_args: Any, **_kwargs: Any) -> ChatResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise self.UnsupportedEndpointError()
+            return expected
+
+        with patch.object(ChatOpenAI, "_agenerate", new=fake_agenerate):
+            result = await instance._agenerate([HumanMessage(content="ping")])
+
+        assert calls == 2
+        assert result.generations[0].message.response_metadata["api_fallback"] == "chat_completions"
+
+    def test_responses_only_request_option_disables_fallback(self) -> None:
+        from langchain_core.messages import HumanMessage
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+        with (
+            patch.object(
+                ChatOpenAI,
+                "_generate",
+                side_effect=self.UnsupportedEndpointError(),
+            ) as generate,
+            pytest.raises(self.UnsupportedEndpointError),
+        ):
+            instance._generate(
+                [HumanMessage(content="ping")],
+                previous_response_id="resp_123",
+            )
+
+        assert generate.call_count == 1
+
+    def test_stream_falls_back_only_before_first_chunk(self) -> None:
+        from langchain_core.messages import AIMessageChunk, HumanMessage
+        from langchain_core.outputs import ChatGenerationChunk
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+
+        def fake_stream(model: Any, *_args: Any, **_kwargs: Any) -> Any:
+            if model.use_responses_api:
+                raise self.UnsupportedEndpointError()
+            yield ChatGenerationChunk(message=AIMessageChunk(content="ok"))
+
+        with patch.object(ChatOpenAI, "_stream", new=fake_stream):
+            chunks = list(instance._stream([HumanMessage(content="ping")]))
+
+        assert len(chunks) == 1
+        assert chunks[0].message.response_metadata["api_fallback"] == "chat_completions"
+
+    def test_stream_does_not_fallback_after_first_chunk(self) -> None:
+        from langchain_core.messages import AIMessageChunk, HumanMessage
+        from langchain_core.outputs import ChatGenerationChunk
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+        fallback_calls = 0
+
+        def fake_stream(model: Any, *_args: Any, **_kwargs: Any) -> Any:
+            nonlocal fallback_calls
+            if model.use_responses_api:
+                yield ChatGenerationChunk(message=AIMessageChunk(content="partial"))
+                raise self.UnsupportedEndpointError()
+            fallback_calls += 1
+            yield ChatGenerationChunk(message=AIMessageChunk(content="duplicate"))
+
+        with (
+            patch.object(ChatOpenAI, "_stream", new=fake_stream),
+            pytest.raises(self.UnsupportedEndpointError),
+        ):
+            list(instance._stream([HumanMessage(content="ping")]))
+
+        assert fallback_calls == 0

@@ -206,9 +206,18 @@ def load_subagents_from_workspace(
 ) -> list[SubAgent]:
     """Scan agent roots and return parsed ``SubAgent`` specs."""
     merged: dict[str, SubAgent] = {}
+    seen_sources: set[str] = set()
 
     for root in agent_scan_roots(workspace, extra=subagents_path):
         for path_fragment in collect_agent_markdown_paths(workspace, root):
+            # The legacy ``agents/`` root and the canonical prefixed root can
+            # resolve to the same stored file (``.octop/agents/x.md``). Process
+            # each file once so the name-merge below only warns on genuine
+            # collisions between different files.
+            source = workspace.resolve_path(path_fragment)
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
             text = workspace.read_text(path_fragment)
             if text is None:
                 continue

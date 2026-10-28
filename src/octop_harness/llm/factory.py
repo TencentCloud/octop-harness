@@ -28,10 +28,14 @@ emit the field, so it's always-on for ``protocol="openai"``.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Mapping, Sequence
+import json
+import logging
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from octop_harness.config import ModelConfig, ProviderConfig
+from octop_harness.llm.http_timeout import LLM_HTTP_TIMEOUT
 from octop_harness.llm.session_header import (
     aclose_session_http_clients,
     attach_session_http_clients,
@@ -47,6 +51,9 @@ if TYPE_CHECKING:
     from octop_harness.config import HarnessAgentConfig
     from octop_harness.llm.access import ModelAccess
     from octop_harness.protocols.base import ChatProtocol
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChatModelFactory:
@@ -72,7 +79,7 @@ class ChatModelFactory:
     ) -> None:
         # Build id→ProviderConfig index for O(1) lookups in get().
         self._providers: dict[str, ProviderConfig] = {p.id: p for p in providers}
-        self._cache: dict[str, BaseChatModel] = {}
+        self._cache: dict[str | tuple[str, int], BaseChatModel] = {}
         self._agent_config = agent_config
         self._get_protocol = get_protocol
 
@@ -183,9 +190,18 @@ class ChatModelFactory:
         ref = self.resolve_ref(spec, messages=messages, configurable=configurable)
         return self.get(ref, get_protocol=get_protocol)
 
-    def get_chat_model(self, model_ref: str) -> BaseChatModel:
-        """Return the cached ``BaseChatModel`` (legacy escape hatch)."""
-        cached = self._cache.get(model_ref)
+    def get_chat_model(self, model_ref: str, *, max_retries: int | None = None) -> BaseChatModel:
+        """Return a cached model, optionally with an isolated SDK retry policy.
+
+        Memory uses ``max_retries=0`` and owns retries itself. These instances
+        never replace or mutate the model used by the main conversation.
+        """
+        if max_retries is not None and (
+            isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0
+        ):
+            raise ValueError("max_retries must be a non-negative integer or None")
+        cache_key = model_ref if max_retries is None else (model_ref, max_retries)
+        cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
         provider_key, _, model_id = model_ref.partition("/")
@@ -195,15 +211,22 @@ class ChatModelFactory:
         model = provider.get_model(model_id)
         if model is None or not model.enabled:
             raise ValueError(f"Model {model_ref!r} not found or disabled")
-        instance = self._build(provider, model)
-        self._cache[model_ref] = instance
+        instance = self._build(provider, model, max_retries=max_retries)
+        self._cache[cache_key] = instance
         return instance
 
     def pop_cached(self, model_ref: str) -> None:
         """Drop a cached model and close any dedicated session-header clients."""
-        instance = self._cache.pop(model_ref, None)
-        if instance is not None:
-            close_session_http_clients(instance)
+        for key in list(self._cache):
+            if key == model_ref or (isinstance(key, tuple) and key[0] == model_ref):
+                close_session_http_clients(self._cache.pop(key))
+
+    def clear_provider_cache(self, provider_id: str) -> None:
+        """Evict all models for a provider, including isolated retry variants."""
+        refs = {key[0] if isinstance(key, tuple) else key for key in self._cache}
+        for ref in refs:
+            if ref.startswith(f"{provider_id}/"):
+                self.pop_cached(ref)
 
     def close(self) -> None:
         """Close dedicated session-header clients and drop the model cache."""
@@ -221,13 +244,13 @@ class ChatModelFactory:
     # Construction by protocol
     # ------------------------------------------------------------------
 
-    def _build(self, provider: ProviderConfig, model: ModelConfig) -> BaseChatModel:
+    def _build(self, provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
         if provider.protocol == "openai":
-            return _build_openai(provider, model)
+            return _build_openai(provider, model, max_retries=max_retries)
         if provider.protocol == "anthropic":
-            return _build_anthropic(provider, model)
+            return _build_anthropic(provider, model, max_retries=max_retries)
         if provider.protocol == "bedrock":
-            return _build_bedrock(provider, model)
+            return _build_bedrock(provider, model, max_retries=max_retries)
         raise ValueError(f"Unsupported provider protocol: {provider.protocol!r}")
 
 
@@ -247,7 +270,17 @@ def build_chat_model(provider: ProviderConfig, model: ModelConfig) -> BaseChatMo
 # ---------------------------------------------------------------------------
 
 
-def _build_openai(provider: ProviderConfig, model: ModelConfig) -> BaseChatModel:
+def _is_codex_base_url(base_url: str | None) -> bool:
+    """Match the ChatGPT Codex endpoint, without affecting API-key providers."""
+    endpoint = urlsplit(base_url or "")
+    return (
+        endpoint.scheme == "https"
+        and endpoint.hostname == "chatgpt.com"
+        and endpoint.path.rstrip("/") == "/backend-api/codex"
+    )
+
+
+def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as exc:  # pragma: no cover - covered by install path
@@ -266,12 +299,26 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig) -> BaseChatModel
         # off and streamed AIMessages carry no usage_metadata.
         "stream_usage": provider.stream_usage,
     }
-    if model.native_tool_search:
-        # OpenAI hosted tool search is a Responses API capability. Keep
-        # Chat Completions as the default for OpenAI-compatible endpoints
-        # that do not explicitly advertise it.
-        kwargs["use_responses_api"] = True
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
+    is_codex = _is_codex_base_url(provider.base_url)
+    use_responses_api = is_codex or model.api_mode == "responses"
+    if model.native_tool_search and not use_responses_api:
+        raise ValueError("OpenAI native_tool_search requires api_mode='responses'")
+    kwargs["use_responses_api"] = use_responses_api
+    if use_responses_api:
         kwargs["output_version"] = "responses/v1"
+    if is_codex:
+        # ChatGPT plan tokens require stateless, streaming Responses requests.
+        # Keep the complete history, including encrypted reasoning for replay.
+        kwargs.update(
+            use_responses_api=True,
+            store=False,
+            streaming=True,
+            use_previous_response_id=False,
+            output_version="responses/v1",
+            include=["reasoning.encrypted_content"],
+        )
     if provider.headers:
         kwargs["default_headers"] = dict(provider.headers)
     session_clients = None
@@ -280,12 +327,31 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig) -> BaseChatModel
         # default httpx client (which other providers reuse).
         session_clients = session_http_clients(provider.session_header)
         kwargs["http_client"], kwargs["http_async_client"] = session_clients
+    # Always pass timeout to the SDK. With a custom http_client, OpenAI still
+    # honors the ChatOpenAI ``timeout`` kwarg on each request; omitting it (or
+    # passing None) writes four None timeouts onto the request and ignores the
+    # client's Timeout(read=...).
+    kwargs["timeout"] = LLM_HTTP_TIMEOUT
     instance: BaseChatModel = cls(**kwargs)
+    instance._harness_codex = is_codex  # type: ignore[attr-defined]
+
+    fallback_instance: BaseChatModel | None = None
+    # Codex is Responses-only; never retry it through Chat Completions.
+    if model.api_fallback == "chat_completions" and not is_codex:
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs["use_responses_api"] = False
+        fallback_kwargs.pop("output_version", None)
+        fallback_instance = cls(**fallback_kwargs)
+        object.__setattr__(instance, "_harness_api_fallback_model", fallback_instance)
+        object.__setattr__(instance, "_harness_api_fallback_provider", provider.id)
+        object.__setattr__(instance, "_harness_api_fallback_model_id", model.id)
     if session_clients is not None:
         attach_session_http_clients(instance, session_clients[0], session_clients[1])
     # Attach supported input modalities so the subclass can strip
     # unsupported content types (e.g. image_url for text-only models).
     instance._harness_supported_input = set(model.input)  # type: ignore[attr-defined]
+    if fallback_instance is not None:
+        fallback_instance._harness_supported_input = set(model.input)  # type: ignore[attr-defined]
     _stamp_native_tool_search_capability(instance, provider.protocol, model.native_tool_search)
     _inject_model_token_limits(instance, model)
     return instance
@@ -300,6 +366,89 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig) -> BaseChatModel
 # Keyed on the base class identity so test patches that swap ``ChatOpenAI`` for
 # a mock don't poison the cache for subsequent real-class lookups.
 _REASONING_AWARE_CHAT_OPENAI: dict[int, type[Any]] = {}
+
+_RESPONSES_UNSUPPORTED_400_MARKERS: tuple[str, ...] = (
+    "responses api is not supported",
+    "response api is not supported",
+    "does not support responses",
+    "doesn't support responses",
+    "not support responses",
+    "unsupported responses",
+    "unsupported endpoint",
+    "unknown endpoint",
+    "unsupported api mode",
+)
+_RESPONSES_ONLY_REQUEST_KEYS: frozenset[str] = frozenset(
+    {
+        "background",
+        "context_management",
+        "conversation",
+        "include",
+        "max_tool_calls",
+        "previous_response_id",
+        "prompt",
+        "reasoning",
+        "text",
+        "truncation",
+    }
+)
+
+
+def _is_responses_api_unsupported_error(exc: BaseException) -> bool:
+    """Return whether an error clearly means the Responses API is unavailable."""
+    status_code = getattr(exc, "status_code", None)
+    if status_code in (404, 405, 501):
+        return True
+    if status_code != 400:
+        return False
+    body = getattr(exc, "body", None)
+    try:
+        body_text = json.dumps(body, ensure_ascii=False) if body is not None else ""
+    except (TypeError, ValueError):
+        body_text = str(body)
+    error_text = f"{exc} {body_text}".lower()
+    return any(marker in error_text for marker in _RESPONSES_UNSUPPORTED_400_MARKERS)
+
+
+def _request_allows_chat_completions_fallback(kwargs: Mapping[str, Any]) -> bool:
+    if _RESPONSES_ONLY_REQUEST_KEYS.intersection(kwargs):
+        return False
+    tools = kwargs.get("tools")
+    if not isinstance(tools, list):
+        return True
+    return all(not isinstance(tool, dict) or tool.get("type", "function") == "function" for tool in tools)
+
+
+def _mark_api_fallback_message(message: Any) -> None:
+    metadata = getattr(message, "response_metadata", None)
+    if isinstance(metadata, dict):
+        metadata["api_fallback"] = "chat_completions"
+        metadata["api_mode"] = "chat_completions"
+
+
+def _mark_api_fallback_result(result: Any) -> Any:
+    for generation in getattr(result, "generations", ()):
+        _mark_api_fallback_message(getattr(generation, "message", None))
+    return result
+
+
+def _mark_api_fallback_chunk(chunk: Any) -> Any:
+    _mark_api_fallback_message(getattr(chunk, "message", None))
+    return chunk
+
+
+def _fallback_model_for(instance: Any, exc: BaseException, kwargs: Mapping[str, Any]) -> Any | None:
+    fallback = getattr(instance, "_harness_api_fallback_model", None)
+    if fallback is None or not _request_allows_chat_completions_fallback(kwargs):
+        return None
+    if not _is_responses_api_unsupported_error(exc):
+        return None
+    logger.warning(
+        "Responses API unsupported for provider=%s model=%s; retrying with Chat Completions",
+        getattr(instance, "_harness_api_fallback_provider", "?"),
+        getattr(instance, "_harness_api_fallback_model_id", "?"),
+    )
+    return fallback
 
 
 def _copy_reasoning_from_response(result: Any, response: Any) -> Any:
@@ -389,6 +538,44 @@ def _attach_reasoning_to_payload(payload: dict[str, Any], source_messages: list[
     return payload
 
 
+def _adapt_codex_instructions(payload: dict[str, Any], source_messages: list[Any]) -> None:
+    """Extract the leading system prompt; retain later instructions in place.
+
+    Explicit instructions (including an empty value) take precedence over
+    extraction. Inspect the source role because the SDK may already have
+    converted system to developer for some models. Only flatten text blocks;
+    preserve structured content as a developer message rather than losing it.
+    """
+    from langchain_core.messages import SystemMessage
+
+    items = payload["input"]
+    extra_body = payload.get("extra_body")
+    explicit = "instructions" in payload or (isinstance(extra_body, dict) and "instructions" in extra_body)
+    if not explicit and source_messages and isinstance(source_messages[0], SystemMessage) and items:
+        source = source_messages[0]
+        first = items[0]
+        if source.additional_kwargs.get("__openai_role__", "system") == "system" and first.get("role") in (
+            "system",
+            "developer",
+        ):
+            content = first.get("content")
+            instructions = content if isinstance(content, str) else None
+            if isinstance(content, list) and all(
+                isinstance(block, dict)
+                and block.get("type") in ("text", "input_text")
+                and isinstance(block.get("text"), str)
+                for block in content
+            ):
+                instructions = "\n\n".join(block["text"] for block in content)
+            if instructions is not None:
+                payload["instructions"] = instructions
+                items = items[1:]
+    payload["input"] = [
+        {**item, "role": "developer"} if isinstance(item, dict) and item.get("role") == "system" else item
+        for item in items
+    ]
+
+
 def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
     """Return a ``ChatOpenAI`` subclass that round-trips ``reasoning_content``.
 
@@ -415,6 +602,50 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
     class _ReasoningAwareChatOpenAI(base_cls):  # type: ignore[misc]
         """ChatOpenAI subclass that round-trips ``reasoning_content``."""
 
+        def _generate(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return super()._generate(*args, **kwargs)
+            except Exception as exc:
+                fallback = _fallback_model_for(self, exc, kwargs)
+                if fallback is None:
+                    raise
+                return _mark_api_fallback_result(fallback._generate(*args, **kwargs))
+
+        async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return await super()._agenerate(*args, **kwargs)
+            except Exception as exc:
+                fallback = _fallback_model_for(self, exc, kwargs)
+                if fallback is None:
+                    raise
+                return _mark_api_fallback_result(await fallback._agenerate(*args, **kwargs))
+
+        def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            yielded = False
+            try:
+                for chunk in super()._stream(*args, **kwargs):
+                    yielded = True
+                    yield chunk
+            except Exception as exc:
+                fallback = None if yielded else _fallback_model_for(self, exc, kwargs)
+                if fallback is None:
+                    raise
+                for chunk in fallback._stream(*args, **kwargs):
+                    yield _mark_api_fallback_chunk(chunk)
+
+        async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            yielded = False
+            try:
+                async for chunk in super()._astream(*args, **kwargs):
+                    yielded = True
+                    yield chunk
+            except Exception as exc:
+                fallback = None if yielded else _fallback_model_for(self, exc, kwargs)
+                if fallback is None:
+                    raise
+                async for chunk in fallback._astream(*args, **kwargs):
+                    yield _mark_api_fallback_chunk(chunk)
+
         def _create_chat_result(self, response: Any, generation_info: dict[str, Any] | None = None) -> Any:
             return _copy_reasoning_from_response(super()._create_chat_result(response, generation_info), response)
 
@@ -432,6 +663,9 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
         def _get_request_payload(self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
             input_ = _sanitize_input_messages(input_)
             payload: dict[str, Any] = super()._get_request_payload(input_, stop=stop, **kwargs)
+            if getattr(self, "_harness_codex", False):
+                source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
+                _adapt_codex_instructions(payload, source_messages)
             messages_out = payload.get("messages")
             if not isinstance(messages_out, list):
                 return payload
@@ -632,7 +866,7 @@ def _stamp_native_tool_search_capability(
         object.__setattr__(instance, "_harness_tool_search_provider", provider)
 
 
-def _build_anthropic(provider: ProviderConfig, model: ModelConfig) -> BaseChatModel:
+def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
     try:
         from langchain_anthropic import ChatAnthropic
     except ImportError as exc:  # pragma: no cover
@@ -644,6 +878,8 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig) -> BaseChatMo
         "model": model.id,
         "api_key": provider.api_key,
     }
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
     # ChatAnthropic accepts ``base_url`` for proxy/relay configurations.
     if provider.base_url:
         kwargs["base_url"] = provider.base_url
@@ -652,6 +888,8 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig) -> BaseChatMo
     # Enable extended thinking when model.thinking is explicitly True.
     if model.thinking is True:
         kwargs["thinking"] = {"type": "adaptive"}
+    # ChatAnthropic's ``timeout`` (default_request_timeout) is a plain float.
+    kwargs["timeout"] = LLM_HTTP_TIMEOUT.read
     instance_a: BaseChatModel = ChatAnthropic(**kwargs)
     if provider.session_header:
         bind_anthropic_session_header(instance_a, provider.session_header)
@@ -660,7 +898,7 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig) -> BaseChatMo
     return instance_a
 
 
-def _build_bedrock(provider: ProviderConfig, model: ModelConfig) -> BaseChatModel:
+def _build_bedrock(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
     try:
         from langchain_aws import ChatBedrockConverse
     except ImportError as exc:
@@ -670,9 +908,19 @@ def _build_bedrock(provider: ProviderConfig, model: ModelConfig) -> BaseChatMode
 
     # Bedrock auth is typically AWS-credential-driven; api_key/base_url here
     # are accepted for symmetry but not all combinations are meaningful.
+    from botocore.config import Config
+
     kwargs: dict[str, Any] = {"model": model.id}
     if provider.headers:
         kwargs["additional_model_request_fields"] = dict(provider.headers)
+    # botocore (not httpx): mirror the shared LLM timeout policy.
+    config_kwargs: dict[str, Any] = {
+        "connect_timeout": float(LLM_HTTP_TIMEOUT.connect or 5.0),
+        "read_timeout": float(LLM_HTTP_TIMEOUT.read or 600.0),
+    }
+    if max_retries is not None:
+        config_kwargs["retries"] = {"total_max_attempts": max_retries + 1}
+    kwargs["config"] = Config(**config_kwargs)
     instance_b: BaseChatModel = ChatBedrockConverse(**kwargs)
     _inject_model_token_limits(instance_b, model)
     return instance_b

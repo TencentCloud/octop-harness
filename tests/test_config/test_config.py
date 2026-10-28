@@ -23,6 +23,8 @@ class TestModelConfig:
         assert m.enabled is True
         assert m.input == ["text"]
         assert m.is_multimodal is False
+        assert m.api_mode == "chat_completions"
+        assert m.api_fallback == "none"
 
     def test_multimodal_detection(self) -> None:
         assert ModelConfig(id="m", input=["text", "image"]).is_multimodal is True
@@ -36,6 +38,27 @@ class TestModelConfig:
     def test_empty_input_rejected(self) -> None:
         with pytest.raises(ValueError, match="modality"):
             ModelConfig(id="x", input=[])
+
+    def test_invalid_api_mode_rejected(self) -> None:
+        with pytest.raises(ValueError, match="api_mode is invalid"):
+            ModelConfig(id="x", api_mode="invalid")  # type: ignore[arg-type]
+
+    def test_invalid_api_fallback_rejected(self) -> None:
+        with pytest.raises(ValueError, match="api_fallback is invalid"):
+            ModelConfig(id="x", api_fallback="auto")  # type: ignore[arg-type]
+
+    def test_api_fallback_requires_responses_mode(self) -> None:
+        with pytest.raises(ValueError, match="api_fallback requires api_mode='responses'"):
+            ModelConfig(id="x", api_fallback="chat_completions")
+
+    def test_api_fallback_rejects_native_tool_search(self) -> None:
+        with pytest.raises(ValueError, match="api_fallback is incompatible with native_tool_search"):
+            ModelConfig(
+                id="x",
+                api_mode="responses",
+                api_fallback="chat_completions",
+                native_tool_search=True,
+            )
 
 
 class TestProviderConfig:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -98,6 +99,39 @@ class TestCollectAndLoad:
         specs = load_subagents_from_workspace(workspace)
         assert len(specs) == 1
         assert specs[0]["name"] == "workflow-optimizer"
+
+    def test_single_system_files_definition_loads_without_duplicate_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=False)
+        workspace = BackendWorkspace(backend, tmp_path, system_files_path=".octop")
+        path = tmp_path / ".octop" / "agents" / "workflow.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(SAMPLE_MD, encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING):
+            specs = load_subagents_from_workspace(workspace)
+
+        assert len(specs) == 1
+        assert specs[0]["name"] == "workflow-optimizer"
+        assert not any("Duplicate subagent name" in rec.message for rec in caplog.records)
+
+    def test_duplicate_names_from_different_files_still_warn(
+        self, workspace: BackendWorkspace, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        first = tmp_path / "agents" / "a" / "same.md"
+        first.parent.mkdir(parents=True)
+        first.write_text(SAMPLE_MD, encoding="utf-8")
+        second = tmp_path / "agents" / "b" / "same.md"
+        second.parent.mkdir(parents=True)
+        second.write_text(SAMPLE_MD.replace("efficiency", "speed"), encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING):
+            specs = load_subagents_from_workspace(workspace)
+
+        assert len(specs) == 1
+        assert "speed" in specs[0]["description"]
+        assert any("Duplicate subagent name" in rec.message for rec in caplog.records)
 
 
 class TestMergeSubagents:

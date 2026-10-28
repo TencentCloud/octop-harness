@@ -9,6 +9,7 @@ echoes whatever was passed to it.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -18,7 +19,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from octop_harness.agent import HarnessAgent
+from octop_harness.backends.workspace import DEFAULT_MEMORY_FILES
 from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
+from octop_harness.memory.policy import render_memory_policy_prompt
 from octop_harness.middleware.bootstrap import BOOTSTRAP_FILENAME, BOOTSTRAPPED_MARKER
 from octop_harness.middleware.skill_filter import render_slash_skill_prompt
 from octop_harness.observability.logging import _HANDLER_NAME, _log_agent_id
@@ -172,11 +175,16 @@ class TestConstruction:
 
         mw_classes = [type(m).__name__ for m in captured["middleware"]]
         assert "ModelRouterMiddleware" in mw_classes
-        # MemoryMiddleware handles both the searchable Memory store and the
-        # daily JSONL session log; both default-on so it always appears.
-        assert "MemoryMiddleware" in mw_classes
+        assert "McpToolErrorMiddleware" in mw_classes
+        # The octop-memory adapter also owns the default-on JSONL session log.
+        assert "HarnessMemoryMiddleware" in [m.name for m in captured["middleware"]]
         # ModelRetry and PII (api-key redaction) are on by default.
         assert "ModelRetryMiddleware" in mw_classes
+        retry = next(m for m in captured["middleware"] if type(m).__name__ == "ModelRetryMiddleware")
+        assert retry.on_failure == "error"
+        from langchain.agents.middleware import ModelRetryMiddleware
+
+        assert retry.retry_on is ModelRetryMiddleware().retry_on
         assert "PIIMiddleware" in mw_classes
 
     def test_can_disable_model_retry_and_pii(
@@ -219,8 +227,7 @@ class TestConstruction:
         tmp_path: Path,
         mock_model_factory: Callable[[], Any],
     ) -> None:
-        """When both Memory and the JSONL session log are off, the
-        MemoryMiddleware shouldn't be installed at all."""
+        """Disabling ordinary memory and JSONL keeps only workspace context."""
         cfg = HarnessAgentConfig(
             workspace_dir=tmp_path,
             backend={"type": "filesystem", "root_dir": str(tmp_path), "virtual_mode": False},
@@ -246,7 +253,8 @@ class TestConstruction:
             HarnessAgent(cfg)
 
         mw_classes = [type(m).__name__ for m in captured["middleware"]]
-        assert "MemoryMiddleware" not in mw_classes
+        assert "HarnessMemoryMiddleware" not in [m.name for m in captured["middleware"]]
+        assert "MemoryMiddleware" in [m.name for m in captured["middleware"]]
         assert "ModelRouterMiddleware" in mw_classes
         assert "SkillFilterMiddleware" in mw_classes
         assert "ToolsFilterMiddleware" in mw_classes
@@ -373,7 +381,7 @@ class TestConstruction:
         assert "/.octop/workspaces/NBR8CP/.octop/skills" in skills
         assert not any(str(root) in path for path in skills)
 
-    def test_memory_includes_only_existing_files(
+    def test_memory_sources_include_files_created_after_graph_construction(
         self,
         cfg: HarnessAgentConfig,
         mock_model_factory: Callable[[], Any],
@@ -390,7 +398,12 @@ class TestConstruction:
             HarnessAgent(cfg)
 
         memory = captured.get("memory")
-        assert memory == [str(Path(cfg.workspace_dir) / "AGENTS.md")]
+        assert memory == [str(Path(cfg.workspace_dir) / name) for name in DEFAULT_MEMORY_FILES]
+        (Path(cfg.workspace_dir) / "MEMORY.md").write_text("new manual memory", encoding="utf-8")
+        loader = next(m for m in captured["middleware"] if m.name == "MemoryMiddleware")
+        loaded = loader.before_agent({}, MagicMock(), {})
+        assert loaded is not None
+        assert set(loaded["memory_contents"].values()) == {"# project rules", "new manual memory"}
 
 
 # ---------------------------------------------------------------------------
@@ -1577,6 +1590,7 @@ class TestAgentVisibleWorkspaceDir:
             assert "Keep routine filesystem tool paths" in prompt
             assert "/.octop/workspaces/J1BT2X/notes.txt" in prompt
             assert "Do not treat `/` as the workspace" in prompt
+            assert "path='/' searches from the backend root" in prompt
             assert str(host_ws) not in prompt
 
     def test_scoped_host_workspace_still_presents_rootfs_path(
@@ -1639,4 +1653,169 @@ class TestAgentVisibleWorkspaceDir:
             HarnessAgent(cfg)
             prompt = create.call_args.kwargs["system_prompt"]
         assert render_slash_skill_prompt(language=cfg.language) in prompt
+        assert render_memory_policy_prompt(language=cfg.language, memory_enabled=False) in prompt
         assert "SKILL.md" in prompt
+
+    def test_compiled_system_prompt_uses_memory_save_when_memory_is_on(
+        self,
+        cfg: HarnessAgentConfig,
+        mock_model_factory: Callable[[], Any],
+        stub_create_deep_agent: Any,
+    ) -> None:
+        enabled = replace(cfg, memory_enabled=True, language="en")
+        with mock_model_factory(), stub_create_deep_agent as create:
+            HarnessAgent(enabled)
+            prompt = create.call_args.kwargs["system_prompt"]
+        assert render_memory_policy_prompt(language="en", memory_enabled=True) in prompt
+        assert "Structured memory is off" not in prompt
+
+
+class TestExplicitVirtualPathTool:
+    def test_build_tools_registers_bound_converter(
+        self,
+        cfg: HarnessAgentConfig,
+        mock_model_factory: Callable[[], Any],
+        stub_create_deep_agent: Any,
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        explicit = replace(
+            cfg,
+            explicit_virtual_paths=True,
+            workspace_dir=root,
+            backend={
+                "type": "filesystem",
+                "root_dir": str(root),
+                "virtual_mode": True,
+            },
+        )
+        with mock_model_factory(), stub_create_deep_agent as create, HarnessAgent(explicit) as agent:
+            registered = create.call_args.kwargs["tools"]
+            built = agent._build_tools()
+            assert any(getattr(tool, "name", None) == "virtual_to_native_path" for tool in registered)
+            tool = next(item for item in built if getattr(item, "name", None) == "virtual_to_native_path")
+            result = tool.invoke({"path": "/data/a.txt"})
+            assert result == {
+                "kind": "native_path",
+                "path": os.fspath((root / "data" / "a.txt").resolve()),
+            }
+            with pytest.raises(ValueError, match="explicit virtual"):
+                tool.invoke({"path": "C:/work/data/a.txt"})
+            prompt = create.call_args.kwargs["system_prompt"]
+            assert "virtual_to_native_path" in prompt
+            assert "execute/shell is not rewritten" in prompt
+
+        with mock_model_factory(), stub_create_deep_agent as create, HarnessAgent(cfg) as agent:
+            names = [getattr(tool, "name", None) for tool in create.call_args.kwargs["tools"]]
+            built_names = [getattr(tool, "name", None) for tool in agent._build_tools()]
+            assert "virtual_to_native_path" not in names
+            assert "virtual_to_native_path" not in built_names
+            prompt = create.call_args.kwargs["system_prompt"]
+            assert "execute/shell is not rewritten" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_on_pause", [False, True])
+async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], Any],
+    stub_create_deep_agent: Any,
+    close_on_pause: bool,
+) -> None:
+    import contextlib
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    seen: list[dict[str, Any]] = []
+    closed: list[str] = []
+
+    async def stream(messages: Any, config: dict[str, Any], **kwargs: Any) -> Any:
+        try:
+            yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+        finally:
+            closed.append("stream")
+
+    async def resume(thread_id: str, decisions: Any, config: dict[str, Any]) -> Any:
+        seen.append(deepcopy(config["configurable"]))
+        try:
+            if len(seen) == 1:
+                yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+            else:
+                yield {"type": "token", "content": "done"}
+        finally:
+            closed.append("resume")
+
+    with mock_model_factory(), stub_create_deep_agent:
+        agent = HarnessAgent(cfg)
+    agent._protocols["langgraph"] = SimpleNamespace(stream=stream, resume_stream=resume)  # type: ignore[assignment]
+    request = ChatRequest(
+        messages="design",
+        thread_id="design-thread",
+        user="7",
+        agent_id="designer",
+        mcp_servers=["open-design__one"],
+        configurable={"locale": "zh", "session_key": "session", "knowledge_base_ids": ["kb"]},
+    )
+    expected = request.to_runnable_config()["configurable"]
+    try:
+        async with contextlib.aclosing(agent.stream(request)) as initial:
+            chunks = [await anext(initial)] if close_on_pause else [c async for c in initial]
+        assert closed == ["stream"]
+        assert [chunk["type"] for chunk in chunks] == ["hitl_required"]
+        # A different thread's user and connector must not overwrite this pause.
+        other = ChatRequest(messages="other", thread_id="other-thread", user="8", mcp_servers=["other"])
+        _ = [c async for c in agent.stream(other)]
+        nested = agent.resume_hitl("design-thread", [{"type": "approve"}])
+        if close_on_pause:
+            assert (await anext(nested))["type"] == "hitl_required"
+            await nested.aclose()
+        else:
+            _ = [c async for c in nested]
+        assert closed == ["stream", "stream", "resume"]
+        _ = [c async for c in agent.resume_hitl("design-thread", [{"type": "approve"}])]
+        assert seen == [expected, expected]
+        assert "design-thread" not in agent._hitl_resume_configs
+        assert "other-thread" in agent._hitl_resume_configs
+    finally:
+        await agent.aclose()
+    assert agent._hitl_resume_configs == {}
+
+
+def test_summarization_factory_patch_is_exclusive() -> None:
+    import threading
+
+    from deepagents import graph
+
+    from octop_harness.agent import _patched_summarization_factory
+
+    original = graph.create_summarization_middleware
+    first_in = threading.Event()
+    release_first = threading.Event()
+    second_waiting = threading.Event()
+    second_in = threading.Event()
+
+    def hold(entered: threading.Event, release: threading.Event | None) -> None:
+        def wrapper(*_args: object, **_kwargs: object) -> object:
+            return original(*_args, **_kwargs)
+
+        if release is None:
+            second_waiting.set()
+        with _patched_summarization_factory(wrapper):
+            entered.set()
+            if release is not None:
+                assert release.wait(timeout=2)
+            assert graph.create_summarization_middleware is wrapper
+
+    first = threading.Thread(target=hold, args=(first_in, release_first))
+    second = threading.Thread(target=hold, args=(second_in, None))
+    first.start()
+    assert first_in.wait(timeout=2)
+    second.start()
+    assert second_waiting.wait(timeout=2)
+    assert not second_in.wait(timeout=0.05)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert second_in.is_set()
+    assert graph.create_summarization_middleware is original

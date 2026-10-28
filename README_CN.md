@@ -96,8 +96,13 @@
 
 
 #### 分层记忆
+- `MEMORY.md` 是强记忆，`USER.md` 是用户档案。每个会话首次加载全文快照，后续复用 checkpoint 中的快照；修改对新会话生效。结构化记忆开启时，这两份文档由用户手动维护，Agent 文件工具只读，「记住」走 `memory_save`。结构化记忆关闭时，Agent 用文件工具直接修改这两份文档，删除和移动仍被拦住。`manual_document_policy` 默认 `auto`，跟随这个开关；设为 `user` 时始终由用户维护，设为 `agent` 时即使记忆开启也允许 Agent 修改。规则由编译进系统提示的记忆段决定，并优先于工作区 `AGENTS.md` 里的旧写法。
+- 工作区上下文的统一读取、session 快照、提示词格式和缓存断点复用 deepagents 原生 `MemoryMiddleware`。模板更新不覆盖已有用户文档。
+- 普通记忆写入和自动晋升后，通过 `BackendWorkspace` 读取当前手动文档做核对，不刷新聊天快照。明确冲突以手动文档为准：旧 Atom 软停用，替代事实转 candidate，原证据保留；`memory_save` 会提示冲突或检查未完成。重复 Atom 保留，仅对已包含相同信息的会话快照抑制召回。语义不确定/模型不可用时不强制停用，宿主应展示待核对状态。文件工具防护不替代宿主的 shell/OS 权限策略。
+- 用户说「记住」时，Agent 使用 `memory_save(content, topic)` 直接保存到 octop-memory；`memory_search` / `memory_get` 用于补充历史召回。
 
-- 每一轮对话先记录为 **L0 原始事件**，再异步蒸馏为 **L2 原子**（`AtomCard`）与 **L3 实体页**。
+- 对话经采集策略过滤后记录为 **L0 原始事件**，再异步蒸馏为 **L2 原子**（`AtomCard`）与 **L3 实体页**。系统运行报错不进入记忆，正常排障经验和用户明确记忆请求仍可保存。
+- 模型重试耗尽后抛出异常；重试范围沿用 LangChain 默认判断，次数与退避参数保持原配置。调用方需处理 `call()` / 流式调用的异常；checkpoint 保留失败任务，不添加合成助手回复。宿主单独展示错误；团队自动失败通知设置 `configurable.octop_memory_capture_exclude=true`，避免诊断信息被采集为记忆。
 - 由 octop-memory 中间件驱动，记忆随工作区一同迁移。
 
 
@@ -120,6 +125,7 @@
 #### 安全
 
 - `SecurityPolicy` 提供工具护栏、文件系统权限（`FilesystemPermission`）与敏感信息脱敏中间件。
+- 敏感信息检测覆盖 API Key、中国大陆手机号（常见 13-19 号段，可带 `+86` / `0086`）及省份代码、1900-2099 出生日期和校验位均有效的 18 位居民身份证号，沿用 `pii_strategy` 与 `pii_surfaces`；不识别旧版 15 位身份证号或其他国家的号码。
 
 
 
@@ -162,7 +168,7 @@ pip install 'octop-harness[cli,all]'
 | `object-storage`  | 腾讯云 COS + 阿里云 OSS + 华为云 OBS SDK                          |
 | `desktop`         | 桌面截图 / 键鼠（`mss`、`pynput`、`pillow`）                       |
 | `web-search-all`  | 全部网页搜索后端（Tavily / Brave / Google）                        |
-| `remote-backends` | 经 `deepagents-backends` 的 Postgres / 上游 S3（Python ≥3.12） |
+| `remote-backends` | Postgres 工作区后端（`psycopg`）。S3 使用内置 boto3 后端。 |
 | `observability`   | Langfuse                                                 |
 | `acp`             | ACP agent runner                                         |
 | `all`             | 上面全部**库功能** extras（**不含** `cli`；两者都要则用 `[cli,all]`）      |

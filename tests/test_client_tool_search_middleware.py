@@ -18,6 +18,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from octop_harness.config import ModelConfig, ProviderConfig
+from octop_harness.llm.factory import build_chat_model
 from octop_harness.middleware.client_tool_search import (
     ClientToolSearchMiddleware,
     ClientToolSearchState,
@@ -93,6 +95,7 @@ def test_hides_deferred_schema_then_exposes_loaded_tool() -> None:
     assert reference.args == {}
     assert "generate_image capability" in reference.description
     assert "Deferred reference" in reference.description
+    assert "defer_loading" not in (reference.extras or {})
     assert first_tools[-1] == {"type": "web_search"}
 
     second_tools = _capture_tools(
@@ -171,10 +174,48 @@ def test_direct_deferred_call_is_blocked_until_loaded() -> None:
 
 
 def test_self_deferred_tool_uses_client_search() -> None:
+    original = _tool("render_scene", deferred=True)
     middleware = ClientToolSearchMiddleware(deferred_tools=frozenset())
-    tools = _capture_tools(middleware, _request([_tool("render_scene", deferred=True)]))
+    tools = _capture_tools(middleware, _request([original]))
     assert [tool.name for tool in tools] == ["tool_search", "render_scene"]
     assert tools[1].args == {}
+    assert "Deferred reference" in tools[1].description
+    assert "defer_loading" not in (tools[1].extras or {})
+    assert original.extras == {"defer_loading": True}
+
+
+def test_client_deferred_reference_omits_native_marker_from_wire_format() -> None:
+    original = _tool("render_scene", deferred=True)
+    middleware = ClientToolSearchMiddleware(deferred_tools=frozenset())
+    model = build_chat_model(
+        ProviderConfig(
+            id="maas",
+            base_url="https://maas.example/v1",
+            api_key="test-key",
+        ),
+        ModelConfig(id="responses-model", api_mode="responses"),
+    )
+    captured: dict[str, list[dict[str, Any]]] = {}
+
+    def handler(prepared: ModelRequest) -> ModelResponse:
+        bound = model.bind_tools(prepared.tools)
+        captured["tools"] = list(bound.kwargs["tools"])
+        return ModelResponse(result=[])
+
+    with patch(
+        "octop_harness.middleware.client_tool_search._current_thread_key",
+        return_value="thread-1",
+    ):
+        middleware.wrap_model_call(_request([original]), handler)
+
+    deferred_payload = captured["tools"][1]
+    assert deferred_payload["function"]["parameters"] == {
+        "properties": {},
+        "type": "object",
+    }
+    assert "Deferred reference" in deferred_payload["function"]["description"]
+    assert "defer_loading" not in deferred_payload
+    assert original.extras == {"defer_loading": True}
 
 
 @pytest.mark.asyncio

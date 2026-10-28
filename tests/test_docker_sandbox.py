@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tarfile
 from pathlib import Path
 from typing import Any
@@ -158,6 +159,27 @@ class TestResolveAndLifecycle:
         env = client.api.exec_create.call_args.kwargs["environment"]
         assert env["ADMIN_KEY"] == "two"
         backend.close()
+
+    @pytest.mark.parametrize("atomic_replace", [False, True])
+    def test_execute_refreshes_environment_with_unchanged_metadata(
+        self, tmp_path: Path, mock_docker: Any, atomic_replace: bool
+    ) -> None:
+        _docker_mod, client, _container = mock_docker
+        env_file = tmp_path / "global.env"
+        env_file.write_text("ADMIN_KEY=one\n", encoding="utf-8")
+        before = env_file.stat()
+        with resolve_backend({"type": "docker", "environment_file": str(env_file)}, workspace_dir=tmp_path) as backend:
+            backend.execute("true")
+            assert client.api.exec_create.call_args.kwargs["environment"]["ADMIN_KEY"] == "one"
+            replacement = tmp_path / "replacement.env" if atomic_replace else env_file
+            replacement.write_text("ADMIN_KEY=two\n", encoding="utf-8")
+            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            if atomic_replace:
+                replacement.replace(env_file)
+            after = env_file.stat()
+            assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+            backend.execute("true")
+            assert client.api.exec_create.call_args.kwargs["environment"]["ADMIN_KEY"] == "two"
 
     def test_upload_and_download(self, tmp_path: Path, mock_docker: Any) -> None:
         _docker_mod, _client, container = mock_docker

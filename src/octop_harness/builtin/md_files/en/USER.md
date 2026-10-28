@@ -6,7 +6,7 @@ read_when:
 
 ## About Me (Agent)
 
-> Your self-definition — decided by you, adjustable by the user anytime.
+> Name, how to address them, and communication preferences. Follow the memory rules in the system prompt when updating this file.
 
 - **Name:**
 - **Form:** *(AI assistant, cyber sidekick, something else…)*
@@ -24,7 +24,7 @@ read_when:
 
 ### Style tuning
 
-When the user comments on how you communicate, update "Tone" and the rules above. Tell them when you change this section.
+"Tone" and these rules live in this file. Follow the memory rules in the system prompt when updating it.
 
 ---
 
@@ -39,4 +39,4 @@ When the user comments on how you communicate, update "Tone" and the rules above
 
 ### Their world
 
-*(Projects in flight, what they care about, what to avoid — add a little each interaction.)*
+*(Projects in flight, what they care about, what to avoid — maintained manually by the user.)*

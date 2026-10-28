@@ -8,6 +8,7 @@ runs from the host workspace.
 
 from __future__ import annotations
 
+import locale
 import os
 import re
 import shlex
@@ -184,6 +185,39 @@ def present_host_paths_in_output(text: str, root_dir: Path | str) -> str:
     return re.sub(rf"{re.escape(root)}(?=$|[\s'\"),:;])", "/", replaced)
 
 
+def decode_child_output(data: bytes | str | None) -> str:
+    """Decode child-process output without ever raising.
+
+    ``subprocess`` in text mode decodes with ``locale.getpreferredencoding(False)``
+    — ``cp936`` on a Chinese Windows host — while the tools we run emit UTF-8.
+    On Windows the mismatch raises inside ``subprocess``'s pipe reader thread,
+    where the exception is swallowed: the caller only sees ``stdout=None`` with
+    exit code 0, so the command's output silently becomes ``<no output>``.
+
+    Shell output is a mixed ecosystem, though, so no single encoding is correct:
+    ``python`` / ``git`` / ``rg`` emit UTF-8 while ``cmd`` builtins emit the
+    console code page. Try strict UTF-8 first, then the locale code page, then
+    GBK, and only then degrade to replacement characters.
+
+    Already-decoded ``str`` payloads (``CompletedProcess`` is routinely built by
+    hand and ``format_execute_result`` is public) are returned unchanged.
+    """
+    if not data:
+        return ""
+    if isinstance(data, str):
+        return data
+    seen: set[str] = set()
+    for encoding in ("utf-8", locale.getpreferredencoding(False), "gbk"):
+        if not encoding or encoding.lower() in seen:
+            continue
+        seen.add(encoding.lower())
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def format_execute_result(
     result: subprocess.CompletedProcess[str],
     *,
@@ -226,8 +260,10 @@ class HarnessLocalShellBackend(LocalShellBackend):
         virtual_mode: bool | None = None,
         env: dict[str, str] | None = None,
         inherit_env: bool = True,
+        explicit_virtual_paths: bool = False,
         **kwargs: Any,
     ) -> None:
+        self._explicit_virtual_paths = explicit_virtual_paths
         self._extra_env = {str(k): str(v) for k, v in dict(env or {}).items()}
         self._inherit_live = inherit_env
         expanded_root = _expand_local_path(root_dir) if root_dir is not None else None
@@ -293,12 +329,19 @@ class HarnessLocalShellBackend(LocalShellBackend):
                 shell=True,
                 capture_output=True,
                 stdin=subprocess.DEVNULL,
-                text=True,
                 timeout=effective_timeout,
                 env=self._env,
                 cwd=str(self._host_execute_cwd()),
             )
-            return format_execute_result(result, max_output_bytes=self._max_output_bytes)
+            # Decode explicitly instead of passing ``text=True``: see
+            # :func:`decode_child_output` for why the locale code page is wrong.
+            decoded = subprocess.CompletedProcess(
+                result.args,
+                result.returncode,
+                decode_child_output(result.stdout),
+                decode_child_output(result.stderr),
+            )
+            return format_execute_result(decoded, max_output_bytes=self._max_output_bytes)
         except subprocess.TimeoutExpired:
             if timeout is not None:
                 detail = f"{effective_timeout} seconds (custom timeout)"
@@ -325,6 +368,8 @@ class HarnessLocalShellBackend(LocalShellBackend):
         if not command or not isinstance(command, str):
             return super().execute(command, timeout=timeout)
         self._refresh_execute_env()
+        if self._explicit_virtual_paths:
+            return self._execute_on_host(command, timeout=timeout)
         if self.virtual_mode and not is_host_root(self.cwd):
             command = rewrite_virtual_paths_in_command(
                 command,

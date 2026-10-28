@@ -10,6 +10,11 @@ from typing import Any
 # whatever is already stored — it does not backfill missing stamps.
 CHECKPOINT_TS_KEY = "checkpoint_ts"
 
+# Prefix on the AIMessage that ModelRetryMiddleware emits when retries are
+# exhausted and ``on_failure`` returns a model-visible prompt instead of raising.
+# Inbox jobs treat this as a failed peer task so the source agent sees the error.
+MODEL_RETRY_FAILURE_MARK = "[model_call_failed]"
+
 
 def message_role(msg: Any) -> str:  # noqa: PLR0911
     if isinstance(msg, dict):
@@ -57,9 +62,16 @@ def extract_call_response(result: dict[str, Any]) -> str:
     return ""
 
 
+def is_model_retry_failure_text(text: str | None) -> bool:
+    """True when assistant text is a model-retry exhaustion prompt, not a real answer."""
+    return text is not None and MODEL_RETRY_FAILURE_MARK in text
+
+
 __all__ = [
     "CHECKPOINT_TS_KEY",
+    "MODEL_RETRY_FAILURE_MARK",
     "extract_call_response",
+    "is_model_retry_failure_text",
     "message_content",
     "message_role",
 ]

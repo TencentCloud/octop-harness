@@ -27,6 +27,7 @@ from octop_harness.memory.store import (
 from octop_harness.middleware.memory import MemoryMiddleware
 
 if TYPE_CHECKING:
+    from octop_harness.backends.workspace import BackendWorkspace
     from octop_harness.config import HarnessAgentConfig
     from octop_harness.llm.factory import ChatModelFactory
 
@@ -47,6 +48,7 @@ class MemoryRuntime:
         config: HarnessAgentConfig,
         workspace_path: Path,
         model_factory: ChatModelFactory,
+        workspace: BackendWorkspace | None = None,
     ) -> None:
         self._config = config
         self._workspace_path = workspace_path
@@ -61,7 +63,20 @@ class MemoryRuntime:
         if config.memory_enabled:
             self._memory = self._build_memory()
             self._llm_client = self._build_llm_client() if config.memory_aux_model_enabled else None
-            self._service = MemoryService(self._memory, llm=self._llm_client, host="octop-harness")
+            self._service = MemoryService(
+                self._memory,
+                llm=self._llm_client,
+                config=_extraction_service_config(config),
+                host="octop-harness",
+                manual_documents_provider=(
+                    lambda: {
+                        name: (workspace.download_bytes(name) or b"").decode("utf-8")
+                        for name in ("USER.md", "MEMORY.md")
+                    }
+                )
+                if workspace is not None
+                else None,
+            )
 
     @property
     def memory(self) -> Any | None:
@@ -150,6 +165,7 @@ class MemoryRuntime:
         # recompile used to leak one more maintenance beat.
         previous = self._middleware
         if previous is not None and self._middleware_kwargs == kwargs:
+            self._bind_manual_review_scheduler(previous)
             return previous
         self._middleware = MemoryMiddleware(**kwargs)
         self._middleware_kwargs = kwargs
@@ -158,7 +174,15 @@ class MemoryRuntime:
             # letting them run beside the new ones.
             with contextlib.suppress(Exception):
                 previous.shutdown()
+        self._bind_manual_review_scheduler(self._middleware)
         return self._middleware
+
+    def _bind_manual_review_scheduler(self, middleware: MemoryMiddleware) -> None:
+        """Point saves at this middleware's background review, when the service supports it."""
+        service = self._service
+        setter = getattr(service, "set_manual_review_scheduler", None) if service is not None else None
+        if setter is not None:
+            setter(middleware.schedule_manual_review)
 
     def end_session(
         self,
@@ -258,6 +282,13 @@ class MemoryRuntime:
                 self._model_factory,
                 aux_model=aux,
                 default_model=default,
+                light_timeout_s=cfg.memory_aux_light_timeout_s,
+                heavy_timeout_s=cfg.memory_aux_heavy_timeout_s,
+                default_max_tokens=cfg.memory_aux_max_tokens,
+                extra_body=cfg.memory_aux_extra_body,
+                thinking=cfg.memory_aux_thinking,
+                max_retries=cfg.memory_aux_max_retries,
+                retry_backoff_s=cfg.memory_aux_retry_backoff_s,
             )
         except (ValueError, TypeError):  # pragma: no cover - defensive
             logger.warning(
@@ -265,6 +296,18 @@ class MemoryRuntime:
                 exc_info=True,
             )
             return None
+
+
+def _extraction_service_config(config: HarnessAgentConfig) -> dict[str, Any] | None:
+    """Budget passed into octop-memory's extractor.
+
+    ``CandidateExtractor`` always sends its own ``max_tokens`` (default
+    2048). A harness-side fallback on the chat client never overrides that,
+    so the host budget has to land in ``extraction.max_tokens``.
+    """
+    if config.memory_extract_max_tokens is None:
+        return None
+    return {"extraction": {"max_tokens": config.memory_extract_max_tokens}}
 
 
 __all__ = ["MemoryRuntime"]

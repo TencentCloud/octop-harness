@@ -65,6 +65,40 @@ def _make_runtime(thread_id: str = "t1", user: str = "alice") -> MagicMock:
 
 
 class TestMemoryMiddleware:
+    def test_failed_team_notification_is_only_logged(
+        self, mw: MemoryMiddleware, service: _SpyService, tmp_path: Path
+    ) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        runtime = _make_runtime()
+        runtime.config["configurable"]["octop_memory_capture_exclude"] = True
+        user = HumanMessage(content="System task notification: child failed authentication (401).")
+        reply = AIMessage(content="The member failed. Please update its credentials.")
+        mw.before_model(_make_state([user]), runtime)
+        mw.after_model(_make_state([user, reply]), runtime)
+        assert service.capture_calls == []
+        assert any("401" in path.read_text() for path in (tmp_path / "logs").rglob("*.jsonl"))
+
+    def test_runtime_error_keeps_user_input_without_capturing_error(
+        self, mw: MemoryMiddleware, service: _SpyService, tmp_path: Path
+    ) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        user_msg = HumanMessage(content="记住: 排障时先检查服务状态。")
+        failure = AIMessage(
+            content="Model call failed after 3 attempts with AuthenticationError: 401 token_expired",
+            response_metadata={"octop_runtime_error": True},
+        )
+        runtime = _make_runtime()
+        mw.before_model(_make_state([user_msg]), runtime)
+        mw.after_model(_make_state([user_msg, failure]), runtime)
+
+        assert service.wait_for_capture()
+        assert service.capture_calls[0]["user"] == user_msg.content
+        assert service.capture_calls[0]["assistant"] is None
+        logs = list((tmp_path / "logs").rglob("*.jsonl"))
+        assert any("token_expired" in path.read_text() for path in logs)
+
     def test_after_model_captures_visible_turn(self, mw: MemoryMiddleware, service: _SpyService) -> None:
         from langchain_core.messages import AIMessage, HumanMessage
 
@@ -497,6 +531,26 @@ class TestIdleMaintenance:
         finally:
             mw.shutdown()
 
+    def test_background_submit_keeps_log_agent_only(self) -> None:
+        """Background work inherits the log agent id, not the HTTP session scope."""
+        from octop_harness.llm.session_header import current_session_id, session_header_scope
+        from octop_harness.middleware.memory import _BackgroundExecutor
+        from octop_harness.observability.logging import current_log_agent_id, logging_scope
+
+        seen: dict[str, object] = {}
+        done = threading.Event()
+
+        def _fn() -> None:
+            seen["agent"] = current_log_agent_id()
+            seen["session"] = current_session_id()
+            done.set()
+
+        with session_header_scope("thread-1"), logging_scope("AGT1"):
+            _BackgroundExecutor().submit(_fn, label="log-scope")
+        assert done.wait(2)
+        assert seen["agent"] == "AGT1"
+        assert seen["session"] != "thread-1"
+
     def test_maintenance_runs_gc_and_nudge_without_prune(
         self, service: _SpyService, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -513,8 +567,11 @@ class TestIdleMaintenance:
             stats.total_deleted = 3
             return stats
 
-        def _fake_nudge(_memory: object, **_kwargs: object) -> Any:
+        seen_pages: list[object] = []
+
+        def _fake_nudge(_memory: object, **kwargs: object) -> Any:
             calls.append("nudge_vacuum")
+            seen_pages.append(kwargs.get("pages"))
             stats = MagicMock()
             stats.pages_reclaimed = 7
             stats.auto_vacuum_enabled = True
@@ -535,6 +592,26 @@ class TestIdleMaintenance:
         try:
             mw._run_maintenance_tick(service)
             assert calls == ["run_gc", "nudge_vacuum"]
+            from octop_harness.middleware.memory import _MAINTENANCE_VACUUM_PAGES
+
+            assert seen_pages == [_MAINTENANCE_VACUUM_PAGES]
+        finally:
+            mw.shutdown()
+
+    def test_schedule_manual_review_runs_one_background_batch(self, service: _SpyService) -> None:
+        seen: dict[str, int] = {}
+        done = threading.Event()
+
+        def review(*, max_atoms: int = 100) -> None:
+            seen["max_atoms"] = max_atoms
+            done.set()
+
+        service.review_new_memory = review  # type: ignore[attr-defined]
+        mw = MemoryMiddleware(service=service, jsonl_enabled=False, maintenance_interval_seconds=0)  # type: ignore[arg-type]
+        try:
+            mw.schedule_manual_review()
+            assert done.wait(2)
+            assert seen["max_atoms"] == 20
         finally:
             mw.shutdown()
 

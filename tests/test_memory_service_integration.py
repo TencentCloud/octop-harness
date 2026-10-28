@@ -28,7 +28,9 @@ from octop_memory import Memory, MemoryService
 from octop_memory.ports.llm import LLMClient, LLMClientError
 
 from octop_harness.builtin.tools.memory_tools import build_memory_tools
+from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
 from octop_harness.memory.llm_client import HarnessAgentLLMClient
+from octop_harness.memory.runtime import MemoryRuntime
 from octop_harness.middleware.memory import MemoryMiddleware
 
 # ---------------------------------------------------------------------------
@@ -67,13 +69,14 @@ class _FakeModel:
         self.bind_calls.append(kwargs)
         return self
 
-    def invoke(self, messages: list[Any]) -> _FakeMsg:
+    def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
         self.invoke_messages = messages
+        self.invoke_config = kwargs.get("config")
         return _FakeMsg(self._content)
 
 
 class _BadModel(_FakeModel):
-    def invoke(self, messages: list[Any]) -> _FakeMsg:
+    def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
         raise RuntimeError("boom")
 
 
@@ -102,7 +105,7 @@ class _Factory:
         self.refs.append(ref)
         return self.model
 
-    def get_chat_model(self, ref: str) -> _FakeModel:
+    def get_chat_model(self, ref: str, *, max_retries: int | None = None) -> _FakeModel:
         return self.get(ref)
 
 
@@ -118,7 +121,7 @@ class _MapFactory:
             raise model
         return model
 
-    def get_chat_model(self, ref: str) -> _FakeModel:
+    def get_chat_model(self, ref: str, *, max_retries: int | None = None) -> _FakeModel:
         return self.get(ref)
 
 
@@ -128,11 +131,13 @@ class TestHarnessAgentLLMClient:
         assert isinstance(client, LLMClient)
 
     def test_complete_returns_text(self) -> None:
-        factory = _Factory(_FakeModel("hello"))
+        model = _FakeModel("hello")
+        factory = _Factory(model)
         client = HarnessAgentLLMClient(factory, default_model="p/m")
         out = client.call_llm("hi", system="be brief")
         assert out == "hello"
         assert factory.last_ref == "p/m"
+        assert model.invoke_config == {"callbacks": []}
 
     def test_light_and_heavy_share_one_aux(self) -> None:
         factory = _Factory(_FakeModel("ok"))
@@ -179,11 +184,11 @@ class TestHarnessAgentLLMClient:
                 super().__init__(content="recovered")
                 self.calls = 0
 
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
                 self.calls += 1
                 if self.calls == 1:
                     raise RuntimeError("400 invalid temperature: temperature only support 1")
-                return _FakeMsg(self._content)
+                return super().invoke(messages, **kwargs)
 
         model = _RejectsTemperature()
         factory = _Factory(model)
@@ -195,6 +200,7 @@ class TestHarnessAgentLLMClient:
         # Second bind must omit temperature so the provider default applies.
         assert model.bind_calls[0].get("temperature") == 0.0
         assert "temperature" not in model.bind_calls[1]
+        assert model.invoke_config == {"callbacks": []}
 
     def test_non_temperature_error_does_not_retry_without_temperature(self) -> None:
         class _CountingBadModel(_FakeModel):
@@ -202,7 +208,7 @@ class TestHarnessAgentLLMClient:
                 super().__init__()
                 self.calls = 0
 
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
                 self.calls += 1
                 raise RuntimeError("boom")
 
@@ -219,7 +225,7 @@ class TestHarnessAgentLLMClient:
                 super().__init__()
                 self.calls = 0
 
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
                 self.calls += 1
                 raise RuntimeError("400 invalid temperature: temperature only support 1")
 
@@ -240,7 +246,7 @@ class TestHarnessAgentLLMClient:
             """Mirrors openai.BadRequestError — not a RuntimeError/OSError."""
 
         class _ExpiredModel(_FakeModel):
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
                 raise _SubscriptionExpiredError("InvalidSubscription")
 
         client = HarnessAgentLLMClient(_Factory(_ExpiredModel()), default_model="p/m")
@@ -252,7 +258,7 @@ class TestHarnessAgentLLMClient:
             pass
 
         class _ExpiredModel(_FakeModel):
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
                 raise _SubscriptionExpiredError("InvalidSubscription")
 
         factory = _MapFactory(
@@ -272,7 +278,7 @@ class TestHarnessAgentLLMClient:
 
     def test_failed_aux_falls_back_to_default_when_no_current_model(self) -> None:
         class _ExpiredModel(_FakeModel):
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
                 raise RuntimeError("400")
 
         factory = _MapFactory(
@@ -307,7 +313,7 @@ class TestHarnessAgentLLMClient:
 
     def test_fallback_also_failing_still_wraps(self) -> None:
         class _ExpiredModel(_FakeModel):
-            def invoke(self, messages: list[Any]) -> _FakeMsg:
+            def invoke(self, messages: list[Any], **kwargs: Any) -> _FakeMsg:
                 raise RuntimeError("still-dead")
 
         factory = _MapFactory(
@@ -353,6 +359,53 @@ class TestHarnessAgentLLMClient:
         out = client.call_llm("x")
         assert out == '{"candidates": []}'
 
+    def test_auto_disables_thinking_only_for_reasoning_model_ids(self) -> None:
+        qwen = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(_Factory(qwen), default_model="local/Qwen3.8-Flash-Next")
+        client.call_llm("x", tier="light", max_tokens=2048)
+        assert qwen.bind_calls[-1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+        assert qwen.bind_calls[-1]["max_tokens"] == 2048
+        assert qwen.bind_calls[-1]["timeout"] == HarnessAgentLLMClient.DEFAULT_LIGHT_TIMEOUT_S
+
+        plain = _FakeOpenAIModel()
+        HarnessAgentLLMClient(_Factory(plain), default_model="openai/gpt-4.1").call_llm("x")
+        assert "extra_body" not in plain.bind_calls[-1]
+
+    def test_thinking_off_binds_for_supported_model(self) -> None:
+        model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(
+            _Factory(model),
+            default_model="local/Qwen3",
+            light_timeout_s=45,
+            heavy_timeout_s=90,
+            thinking="off",
+        )
+        client.call_llm("x", tier="heavy")
+        assert model.bind_calls[-1]["timeout"] == 90
+        assert model.bind_calls[-1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+    def test_thinking_on_and_anthropic_skip_extra_body(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        HarnessAgentLLMClient(
+            _Factory(openai_model),
+            default_model="local/Qwen3-8B",
+            thinking="on",
+        ).call_llm("x")
+        assert "extra_body" not in openai_model.bind_calls[-1]
+
+        anthropic_model = _FakeAnthropicModel()
+        HarnessAgentLLMClient(
+            _Factory(anthropic_model),
+            default_model="local/Qwen3-8B",
+            thinking="off",
+        ).call_llm("x")
+        assert "extra_body" not in anthropic_model.bind_calls[-1]
+
+    def test_caller_max_tokens_is_forwarded(self) -> None:
+        model = _FakeOpenAIModel()
+        HarnessAgentLLMClient(_Factory(model), default_model="p/m").call_llm("x", max_tokens=512)
+        assert model.bind_calls[-1]["max_tokens"] == 512
+
     def test_skips_thinking_blocks_in_list_content(self) -> None:
         blocks = [
             {"type": "thinking", "text": "internal reasoning"},
@@ -362,6 +415,107 @@ class TestHarnessAgentLLMClient:
         client = HarnessAgentLLMClient(factory, default_model="p/m")
         out = client.call_llm("x")
         assert out == '{"candidates": []}'
+
+    def test_timeout_overrides_and_default_budget_are_bound(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(
+            _Factory(openai_model),
+            default_model="p/m",
+            light_timeout_s=42.0,
+            heavy_timeout_s=90.0,
+            default_max_tokens=256,
+        )
+        client.call_llm("x")
+        assert openai_model.bind_calls[-1]["timeout"] == 42.0
+        assert openai_model.bind_calls[-1]["max_tokens"] == 256
+
+        client.call_llm("x", tier="heavy")
+        assert openai_model.bind_calls[-1]["timeout"] == 90.0
+
+    def test_caller_budget_wins_over_default_budget(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(_Factory(openai_model), default_model="p/m", default_max_tokens=256)
+        client.call_llm("x", max_tokens=99)
+        assert openai_model.bind_calls[-1]["max_tokens"] == 99
+
+    def test_no_default_budget_leaves_max_tokens_unbound(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(_Factory(openai_model), default_model="p/m")
+        client.call_llm("x")
+        assert "max_tokens" not in openai_model.bind_calls[-1]
+
+    def test_extra_body_is_openai_only(self) -> None:
+        openai_model = _FakeOpenAIModel()
+        openai_client = HarnessAgentLLMClient(
+            _Factory(openai_model),
+            default_model="p/m",
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        openai_client.call_llm("x")
+        assert openai_model.bind_calls[-1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+        anthropic_model = _FakeAnthropicModel()
+        anthropic_client = HarnessAgentLLMClient(
+            _Factory(anthropic_model),
+            default_model="p/m",
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        anthropic_client.call_llm("x")
+        assert "extra_body" not in anthropic_model.bind_calls[-1]
+
+    def test_explicit_extra_body_overrides_thinking_switch(self) -> None:
+        model = _FakeOpenAIModel()
+        client = HarnessAgentLLMClient(
+            _Factory(model),
+            default_model="local/Qwen3-8B",
+            extra_body={
+                "reasoning_effort": "low",
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+        )
+        client.call_llm("x")
+        assert model.bind_calls[-1]["extra_body"] == {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "reasoning_effort": "low",
+        }
+
+
+def test_memory_runtime_writes_budget_into_extraction_config(tmp_path: Path) -> None:
+    """The extractor ignores a client-side max_tokens fallback, so the host budget goes to the runtime."""
+    cfg = HarnessAgentConfig(
+        name="agent",
+        workspace_dir=tmp_path,
+        providers=[
+            ProviderConfig(
+                id="local",
+                base_url="http://127.0.0.1:8000/v1",
+                api_key="k",
+                models=[ModelConfig(id="Qwen3")],
+            )
+        ],
+        default_model="local/Qwen3",
+        memory_backend={"type": "sqlite", "db_path": str(tmp_path / "mem.sqlite")},
+        memory_extract_max_tokens=1024,
+        memory_aux_light_timeout_s=45,
+        memory_aux_heavy_timeout_s=90,
+        memory_aux_thinking="off",
+        memory_aux_max_tokens=256,
+        memory_aux_extra_body={"reasoning_effort": "low"},
+        session_log_enabled=False,
+        checkpointer=False,
+    )
+    runtime = MemoryRuntime(config=cfg, workspace_path=tmp_path, model_factory=MagicMock())
+    try:
+        extraction = runtime.service._runtime._extraction_cfg()
+        assert extraction["max_tokens"] == 1024
+        assert runtime._llm_client is not None
+        assert runtime._llm_client._light_timeout_s == 45
+        assert runtime._llm_client._heavy_timeout_s == 90
+        assert runtime._llm_client._thinking == "off"
+        assert runtime._llm_client._default_max_tokens == 256
+        assert runtime._llm_client._extra_body == {"reasoning_effort": "low"}
+    finally:
+        runtime.close()
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +715,21 @@ class TestMemoryMiddlewareWithService:
 class TestMemoryTools:
     def test_returns_recall_tools(self, service: MemoryService) -> None:
         tools = build_memory_tools(service)
-        assert {t.name for t in tools} == {"memory_search", "memory_get"}
+        assert {t.name for t in tools} == {"memory_search", "memory_get", "memory_save"}
+
+    def test_explicit_save_creates_recallable_atom_without_editing_strong_memory(
+        self,
+        service: MemoryService,
+        memory: Memory,
+        tmp_path: Path,
+    ) -> None:
+        strong = tmp_path / "MEMORY.md"
+        strong.write_text("User-maintained instructions", encoding="utf-8")
+        save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
+        result = save.invoke({"content": "Project Aurora uses PostgreSQL", "topic": "Aurora"})
+        assert "saved" in result.lower()
+        assert memory.search_atoms("PostgreSQL")
+        assert strong.read_text(encoding="utf-8") == "User-maintained instructions"
 
     def test_memory_search_empty(self, service: MemoryService) -> None:
         tools = build_memory_tools(service)

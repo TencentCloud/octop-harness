@@ -137,7 +137,11 @@ def test_real_provider_adapter_serializes_native_wire_format(provider: str, sear
     )
     model = build_chat_model(
         config,
-        ModelConfig(id="native-search-model", native_tool_search=True),
+        ModelConfig(
+            id="native-search-model",
+            api_mode="responses" if provider == "openai" else "chat_completions",
+            native_tool_search=True,
+        ),
     )
     request = _request(model, [_tool("generate_image")])
     middleware = NativeToolSearchMiddleware(deferred_tools=frozenset({"generate_image"}))
