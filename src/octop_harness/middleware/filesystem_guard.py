@@ -309,7 +309,16 @@ def filesystem_guard_block_reason(
 
 
 def is_path_outside_root_error(exc: BaseException) -> bool:
-    """True when *exc* is the deepagents virtual-path jail ``ValueError``."""
+    """True when *exc* is a virtual-path jail or workspace-escape failure.
+
+    Covers both deepagents' ``ValueError("path … outside root directory")`` and
+    :class:`~octop_harness.backends.workspace.BackendWorkspace` sandbox jail
+    ``PermissionError("path … escapes workspace …")`` raised when an absolute
+    path from another agent is accessed.
+    """
+    if isinstance(exc, PermissionError):
+        lower = str(exc).lower()
+        return "escapes workspace" in lower or "outside workspace" in lower
     if not isinstance(exc, ValueError):
         return False
     lower = str(exc).lower()
@@ -484,7 +493,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
             return blocked
         try:
             return await handler(request)
-        except ValueError as exc:
+        except (ValueError, PermissionError) as exc:
             softened = self._soften_outside_root(request, exc)
             if softened is not None:
                 return softened
@@ -501,7 +510,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
             return blocked
         try:
             return handler(request)
-        except ValueError as exc:
+        except (ValueError, PermissionError) as exc:
             softened = self._soften_outside_root(request, exc)
             if softened is not None:
                 return softened
@@ -517,3 +526,4 @@ __all__ = [
     "rewrite_legacy_windows_fs_path",
     "unbounded_glob_block_reason",
 ]
+
