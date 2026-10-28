@@ -1291,16 +1291,15 @@ def _relocate_skills(
     *,
     chinese: bool,
 ) -> tuple[ModelRequest, str]:
-    """Replace the skill catalog with a stable stub and return the selected bullets."""
-    system = request.system_message
-    stub = _STABLE_SKILLS_ZH if chinese else _STABLE_SKILLS_EN
+    """Narrow the skills_metadata state so downstream renderers see only kept skills.
+
+    No longer mutates the system prompt text directly — downstream renderers
+    rebuild the "Available Skills:" section from ``request.state["skills_metadata"]``
+    when they build the final system prompt. Keeping the system-prompt prefix
+    stable across turns fixes issue #2413 where the decision model picking
+    different skills each round caused the prompt to shift mid-conversation.
+    """
     note = ""
-    if system is not None:
-        updated, note = _rewrite_skill_content(system.content, kept, stub)
-        if updated != system.content:
-            request = request.override(system_message=system.model_copy(update={"content": updated}))
-    if not note:
-        note = _metadata_skill_lines(request, kept)
     if kept is not None:
         request = _narrow_skill_state(request, kept)
     if not note.strip():
