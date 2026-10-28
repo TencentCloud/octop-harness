@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AbstractSet, Awaitable, Callable, Mapping
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -30,7 +30,7 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
     def __init__(
         self,
         *,
-        server_names: frozenset[str],
+        server_names: Mapping[str, Any] | AbstractSet[str],
         mcp_tool_names: frozenset[str],
         default_servers: list[str] | None,
     ) -> None:
@@ -66,20 +66,21 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
             active = None
 
         if active is not None:
-            unknown = sorted(set(active) - self._server_names)
+            known = set(self._server_names)
+            unknown = sorted(set(active) - known)
             if unknown:
                 logger.warning(
                     "ChatRequest references unknown MCP server(s) %s; configured: %s",
                     unknown,
-                    sorted(self._server_names),
+                    sorted(known),
                 )
-                active = [s for s in active if s in self._server_names]
+                active = [s for s in active if s in known]
 
         tools_in: list[BaseTool | dict[str, Any]] = list(request.tools or [])
         filtered = filter_tools_for_mcp_servers(
             tools_in,
             mcp_tool_names=self._mcp_tool_names,
-            server_names=self._server_names,
+            server_names=known if active is not None else set(self._server_names),
             active_servers=active,
         )
         if active:

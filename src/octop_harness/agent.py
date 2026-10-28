@@ -1550,7 +1550,7 @@ class HarnessAgent:
         if cfg.mcp_server_configs:
             chain.append(
                 MCPToolMiddleware(
-                    server_names=frozenset(cfg.mcp_server_configs),
+                    server_names=cfg.mcp_server_configs,
                     mcp_tool_names=self._mcp_tool_name_set,
                     default_servers=cfg.mcp_default_servers,
                 )
