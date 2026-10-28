@@ -1522,11 +1522,11 @@ class HarnessAgent:
             )
         )
 
-        if cfg.mcp_server_configs:
+        if cfg.mcp_server_configs or self._mcp_tool_name_set:
             chain.append(
                 MCPToolMiddleware(
-                    server_names=frozenset(cfg.mcp_server_configs),
-                    mcp_tool_names=self._mcp_tool_name_set,
+                    server_names=lambda: frozenset(cfg.mcp_server_configs.keys()) if hasattr(cfg.mcp_server_configs, 'keys') else frozenset(cfg.mcp_server_configs),
+                    mcp_tool_names=lambda: self._mcp_tool_name_set,
                     default_servers=cfg.mcp_default_servers,
                 )
             )
