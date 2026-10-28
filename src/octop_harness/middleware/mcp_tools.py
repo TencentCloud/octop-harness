@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AbstractSet, Awaitable, Callable, Mapping
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -65,8 +65,8 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
             logger.warning("Invalid MCP server selection; hiding all MCP tools", exc_info=True)
             active = None
 
-        known = set(self._server_names)
         if active is not None:
+            known = set(self._server_names)
             unknown = sorted(set(active) - known)
             if unknown:
                 logger.warning(
@@ -80,7 +80,7 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
         filtered = filter_tools_for_mcp_servers(
             tools_in,
             mcp_tool_names=self._mcp_tool_names,
-            server_names=known,
+            server_names=known if active is not None else set(self._server_names),
             active_servers=active,
         )
         if active:
