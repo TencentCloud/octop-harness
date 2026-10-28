@@ -1528,6 +1528,12 @@ class HarnessAgent:
                 )
             )
 
+        # Loop guard: short-circuits the same tool + args when the model has
+        # already retried it max_repeats times without progress (issue #61).
+        from octop_harness.middleware.loop_guard import LoopGuardMiddleware
+
+        chain.append(LoopGuardMiddleware(enabled=True, max_repeats=3))
+
         # Filesystem tool boundary: always soften outside-root ValueError; apply
         # deny rules only when permissions are set on an execution backend.
         from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
