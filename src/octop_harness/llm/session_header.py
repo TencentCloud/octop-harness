@@ -53,7 +53,12 @@ def session_header_scope(thread_id: str | None) -> Iterator[str]:
     try:
         yield incoming
     finally:
-        _CURRENT_SESSION_ID.reset(token)
+        # Late finalization (loop asyncgen hook after early aclose) runs in a
+        # fresh contextvars.Context, where resetting a token from another
+        # context raises ValueError. Guard that case — the ContextVar is
+        # effectively gone once the owning task drains.
+        with contextlib.suppress(ValueError):
+            _CURRENT_SESSION_ID.reset(token)
 
 
 def _stamp_session_header(request: httpx.Request, name: str, needle: str) -> None:

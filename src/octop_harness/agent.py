@@ -551,21 +551,13 @@ class HarnessAgent:
 
         from octop_harness.observability.logging import logging_scope
 
-        chunks = iter_with_runtime_slash(req, ctx=ctx, stream=_stream).__aiter__()
         async with self._invocation():
-            try:
-                while True:
+            async with contextlib.aclosing(
+                iter_with_runtime_slash(req, ctx=ctx, stream=_stream)
+            ) as chunks:
+                async for chunk in chunks:
                     with logging_scope(self._agent_id):
-                        try:
-                            chunk = await chunks.__anext__()
-                        except StopAsyncIteration:
-                            return
-                    yield chunk
-            finally:
-                close = getattr(chunks, "aclose", None)
-                if close is not None:
-                    with logging_scope(self._agent_id):
-                        await close()
+                        yield chunk
 
     async def resume_hitl(
         self,
