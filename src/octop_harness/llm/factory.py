@@ -908,13 +908,19 @@ def _build_bedrock(provider: ProviderConfig, model: ModelConfig, *, max_retries:
 
     # Bedrock auth is typically AWS-credential-driven; api_key/base_url here
     # are accepted for symmetry but not all combinations are meaningful.
+    from botocore.config import Config
+
     kwargs: dict[str, Any] = {"model": model.id}
     if provider.headers:
         kwargs["additional_model_request_fields"] = dict(provider.headers)
+    # botocore (not httpx): mirror the shared LLM timeout policy.
+    config_kwargs: dict[str, Any] = {
+        "connect_timeout": float(LLM_HTTP_TIMEOUT.connect or 5.0),
+        "read_timeout": float(LLM_HTTP_TIMEOUT.read or 600.0),
+    }
     if max_retries is not None:
-        from botocore.config import Config
-
-        kwargs["config"] = Config(retries={"total_max_attempts": max_retries + 1})
+        config_kwargs["retries"] = {"total_max_attempts": max_retries + 1}
+    kwargs["config"] = Config(**config_kwargs)
     instance_b: BaseChatModel = ChatBedrockConverse(**kwargs)
     _inject_model_token_limits(instance_b, model)
     return instance_b

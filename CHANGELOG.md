@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
 - Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
 - Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
-- LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic default shape: 600s request, 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
+- LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic/Bedrock; OpenAI shape 600s request / 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
 
 ### 修复
 

@@ -343,3 +343,75 @@ def test_openai_sdk_honors_chat_timeout_over_http_client_default() -> None:
         }
     finally:
         http.close()
+
+
+def test_openai_sdk_timeout_aborts_hung_upstream() -> None:
+    """CI-safe stand-in: SDK request timeout aborts a silent upstream near read=N."""
+    import socket
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    pytest.importorskip("openai")
+    from openai import APITimeoutError, OpenAI
+
+    class _Hang(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            time.sleep(3600)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    server = ThreadingHTTPServer(("127.0.0.1", port), _Hang)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    short = httpx.Timeout(connect=2.0, read=2.0, write=5.0, pool=2.0)
+    client = OpenAI(
+        api_key="sk-xxx",
+        base_url=f"http://127.0.0.1:{port}/v1",
+        timeout=short,
+        max_retries=0,
+    )
+    t0 = time.perf_counter()
+    with pytest.raises(APITimeoutError):
+        client.chat.completions.create(
+            model="dummy",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    wall = time.perf_counter() - t0
+    server.shutdown()
+    assert 1.5 <= wall <= 5.0, wall
+
+
+def test_bedrock_factory_sets_botocore_timeouts() -> None:
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_cls = MagicMock(name="ChatBedrockConverse")
+    fake_cls.return_value = SimpleNamespace()
+    fake_config_cls = MagicMock(name="Config")
+    fake_config = SimpleNamespace(connect_timeout=5.0, read_timeout=600.0)
+    fake_config_cls.return_value = fake_config
+    botocore_config = SimpleNamespace(Config=fake_config_cls)
+    provider = ProviderConfig(
+        id="bedrock",
+        protocol="bedrock",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        api_key="aws-x",
+    )
+    with patch.dict(
+        sys.modules,
+        {
+            "langchain_aws": SimpleNamespace(ChatBedrockConverse=fake_cls),
+            "botocore": SimpleNamespace(config=botocore_config),
+            "botocore.config": botocore_config,
+        },
+    ):
+        build_chat_model(provider, ModelConfig(id="anthropic.claude-3"))
+    fake_config_cls.assert_called_once_with(connect_timeout=5.0, read_timeout=600.0)
+    assert fake_cls.call_args.kwargs["config"] is fake_config
