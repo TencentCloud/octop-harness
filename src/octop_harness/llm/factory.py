@@ -334,6 +334,11 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: 
     kwargs["timeout"] = LLM_HTTP_TIMEOUT
     instance: BaseChatModel = cls(**kwargs)
     instance._harness_codex = is_codex  # type: ignore[attr-defined]
+    # Groq rejects non-standard reasoning_content on assistant messages
+    # with 400 "property 'reasoning_content' is unsupported". DeepSeek,
+    # Codex and OpenAI accept it as a thinking-mode round-trip, so we
+    # only attach it for known-good providers.
+    instance._harness_supports_reasoning_content = provider.id != "groq"  # type: ignore[attr-defined]
 
     fallback_instance: BaseChatModel | None = None
     # Codex is Responses-only; never retry it through Chat Completions.
@@ -675,7 +680,9 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
             if not source_messages:
                 return payload
-            return _attach_reasoning_to_payload(payload, source_messages)
+            if getattr(self, "_harness_supports_reasoning_content", True):
+                return _attach_reasoning_to_payload(payload, source_messages)
+            return payload
 
     _REASONING_AWARE_CHAT_OPENAI[id(base_cls)] = _ReasoningAwareChatOpenAI
     return _ReasoningAwareChatOpenAI
@@ -927,3 +934,4 @@ def _build_bedrock(provider: ProviderConfig, model: ModelConfig, *, max_retries:
 
 
 __all__ = ["ChatModelFactory", "ModelAccess", "build_chat_model"]
+
