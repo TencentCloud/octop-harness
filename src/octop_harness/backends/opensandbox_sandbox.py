@@ -237,6 +237,39 @@ class OpenSandbox(BaseSandbox):
             return FILE_NOT_FOUND
         return message
 
+    # ── directory mutations (missing before; BackendWorkspace requires them) ──
+
+    def mkdir_path(self, path: str) -> None:
+        """Create directory (and parents) inside the remote sandbox."""
+        if not path.startswith("/"):
+            raise ValueError(f"OpenSandbox mkdir_path requires absolute path, got {path!r}")
+        quoted = shlex.quote(path)
+        result = self.execute(f"mkdir -p {quoted}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"mkdir failed for {path!r}")
+
+    def delete_path(self, path: str) -> None:
+        """Remove file or directory inside the remote sandbox."""
+        if not path.startswith("/"):
+            raise ValueError(f"OpenSandbox delete_path requires absolute path, got {path!r}")
+        quoted = shlex.quote(path)
+        result = self.execute(f"rm -rf {quoted}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"delete failed for {path!r}")
+
+    def move_path(self, src: str, dest: str) -> None:
+        """Rename or move a path inside the remote sandbox."""
+        if not src.startswith("/") or not dest.startswith("/"):
+            raise ValueError(
+                f"OpenSandbox move_path requires absolute paths, got {src!r} -> {dest!r}"
+            )
+        src_q = shlex.quote(src)
+        dest_q = shlex.quote(dest)
+        parent = shlex.quote(str(__import__("posixpath").dirname(dest)))
+        result = self.execute(f"mkdir -p {parent} && mv {src_q} {dest_q}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"move failed for {src!r} -> {dest!r}")
+
     def close(self) -> None:
         """Destroy the remote sandbox (idempotent)."""
         if self._closed:
