@@ -59,7 +59,7 @@ def skill_install(source: str) -> None:
     target = skills_path / source_path.name
     if target.exists():
         console.print(f"[yellow]Warning:[/] Skill '{source_path.name}' already exists. Overwriting.")
-        shutil.rmtree(target)
+        shutil.rmtree(target, ignore_errors=True)
 
     shutil.copytree(source_path, target)
     console.print(f"[green]Installed skill:[/] {source_path.name}")
@@ -74,5 +74,5 @@ def skill_remove(name: str) -> None:
         console.print(f"[red]Error:[/] Skill '{name}' not found")
         raise SystemExit(1)
 
-    shutil.rmtree(target)
+    shutil.rmtree(target, ignore_errors=True)
     console.print(f"[green]Removed skill:[/] {name}")
