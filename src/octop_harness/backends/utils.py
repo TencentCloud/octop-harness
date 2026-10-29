@@ -172,9 +172,9 @@ def is_local_class_backend(backend: object) -> bool:
 def delete_local_path(path: Path) -> None:
     """Remove a file or directory tree at *path* (must exist)."""
     if path.is_dir():
-        shutil.rmtree(path)
+        shutil.rmtree(path, ignore_errors=True)
     else:
-        path.unlink()
+        path.unlink(missing_ok=True)
 
 
 def mkdir_local_path(path: Path) -> None:
