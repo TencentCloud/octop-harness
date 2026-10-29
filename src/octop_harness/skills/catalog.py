@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import platform
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,28 @@ _BUILTIN_KIND = "builtin"
 _WORKSPACE_KIND = "workspace"
 _KIND_ORDER = {_BUILTIN_KIND: 0, _WORKSPACE_KIND: 1}
 SKILL_PRESENTATION_METADATA_VERSION = 1
+
+# Platform identifiers used in SKILL.md ``compatibility`` frontmatter values
+# that indicate macOS-only skills.  Case-insensitive substring match.
+_MACOS_TOKENS = ("macos", "darwin", "osx")
+
+
+def _skill_platform_compatible(meta: Mapping[str, Any]) -> bool:
+    """Return True when the skill's ``compatibility`` frontmatter allows this host."""
+    compat_raw = meta.get("compatibility")
+    if not compat_raw:
+        return True  # no restriction declared -> universally compatible
+    compat_str = str(compat_raw).lower()
+    is_macos_compat = any(tok in compat_str for tok in _MACOS_TOKENS)
+    is_this_macos = platform.system().lower() == "darwin"
+    if is_macos_compat and not is_this_macos:
+        logger.debug(
+            "skipping builtin skill: compatibility=%r but host is %s",
+            compat_raw,
+            platform.system(),
+        )
+        return False
+    return True
 
 
 def skill_slug_from_path(path: str | None) -> str | None:
@@ -159,6 +182,8 @@ async def _collect_skills_from_root(
             continue
         meta, _body = _parse_skill_frontmatter(manifest)
         if meta.get("removed"):
+            continue
+        if not _skill_platform_compatible(meta):
             continue
         display_name = str(meta.get("name") or slug)
         out[slug] = _summary_dict(
