@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import platform as _platform
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,74 @@ _BUILTIN_KIND = "builtin"
 _WORKSPACE_KIND = "workspace"
 _KIND_ORDER = {_BUILTIN_KIND: 0, _WORKSPACE_KIND: 1}
 SKILL_PRESENTATION_METADATA_VERSION = 1
+
+
+def _current_platform_tag() -> str:
+    """Return a normalised platform tag matching ``compatibility`` declarations."""
+    system = _platform.system().lower()
+    # platform.system() returns "Darwin"; skills declare "macos".
+    if system == "darwin":
+        return "macos"
+    # Windows reports as "Windows" → "windows", Linux as "Linux" → "linux".
+    return system
+
+
+def _is_platform_compatible(compatibility: str | None) -> bool:
+    """Return True when the current host satisfies a skill's ``compatibility``.
+
+    The ``compatibility`` field is a free-form string in each ``SKILL.md``
+    frontmatter.  Common shapes we understand:
+
+    - ``"macos only"``            — enabled on macOS, skipped everywhere else
+    - ``"macos"`` / ``"darwin"``  — equivalent to ``macos only``
+    - ``"linux"`` / ``"windows"`` — single-platform gating
+    - ``"macos, linux"``          — comma-separated allow-list
+    - missing / empty             — assume cross-platform, always enabled
+    - anything else               — fail open (True) so we never silently
+      disable a skill whose declaration we don't yet recognise
+    """
+    if not compatibility:
+        return True
+    declared = str(compatibility).strip().lower()
+    if not declared:
+        return True
+
+    current = _current_platform_tag()
+
+    # Normalise synonyms so "darwin" and "macos" are equivalent.
+    platform_synonyms = {
+        "macos": {"macos", "darwin", "mac", "apple"},
+        "darwin": {"macos", "darwin", "mac", "apple"},
+        "linux": {"linux", "ubuntu", "debian", "rhel", "posix"},
+        "windows": {"windows", "win", "win32", "wsl"},
+    }
+
+    # Split on commas first so "macos only, linux" parses as two entries.
+    parts = [p.strip() for p in declared.replace(";", ",").split(",") if p.strip()]
+    if not parts:
+        return True
+
+    # First pass: any part ending in "only" means that single platform is
+    # allowed and nothing else — e.g. "macos only" or "linux only".
+    for part in parts:
+        if part.endswith(" only"):
+            declared_platform = part[: -len(" only")].strip()
+            syns = platform_synonyms.get(current, {current})
+            if declared_platform in syns:
+                return True
+            # A trailing "only" is exclusive — once we see one, the answer
+            # is decided regardless of other parts.
+            return False
+
+    # Second pass: simple allow-list.  Any listed tag matches current?
+    for part in parts:
+        syns = platform_synonyms.get(current, {current})
+        if part in syns:
+            return True
+
+    # Fail open for declarations we didn't recognise — keeps existing
+    # behaviour for skills that didn't expect this gating.
+    return True
 
 
 def skill_slug_from_path(path: str | None) -> str | None:
@@ -48,7 +117,17 @@ def is_skill_enabled(
     slug: str,
     display_name: str,
     skills_disabled: frozenset[str] | set[str],
+    compatibility: str | None = None,
 ) -> bool:
+    """Return True when the skill should load for the current host.
+
+    Checks both the user's explicit ``skills_disabled`` set *and* the
+    ``compatibility`` field declared in the skill's frontmatter.  A skill
+    that disables itself for the current platform returns ``False`` even
+    when it is not in ``skills_disabled``.
+    """
+    if not _is_platform_compatible(compatibility):
+        return False
     return slug not in skills_disabled and display_name not in skills_disabled
 
 
@@ -160,6 +239,19 @@ async def _collect_skills_from_root(
         meta, _body = _parse_skill_frontmatter(manifest)
         if meta.get("removed"):
             continue
+        # Respect platform-gating declared in the skill's frontmatter.
+        # Skills marked "macos only" never appear on Linux/Windows, so the
+        # system prompt never carries a "go read this skill" instruction
+        # that the host cannot actually execute.
+        compatibility = meta.get("compatibility")
+        if compatibility and not _is_platform_compatible(compatibility):
+            logger.info(
+                "skipping skill %s: declared compatibility %r does not match current platform %s",
+                slug,
+                compatibility,
+                _current_platform_tag(),
+            )
+            continue
         display_name = str(meta.get("name") or slug)
         out[slug] = _summary_dict(
             slug,
@@ -168,6 +260,7 @@ async def _collect_skills_from_root(
                 slug=slug,
                 display_name=display_name,
                 skills_disabled=skills_disabled,
+                compatibility=compatibility,
             ),
             kind=kind,
         )
