@@ -51,7 +51,7 @@ async def google_search(
         google_cse_id=cse_id,
         k=num_results,
     )
-    results = await asyncio.get_event_loop().run_in_executor(
+    results = await asyncio.get_running_loop().run_in_executor(
         None,
         lambda: search.results(query, num_results=num_results),
     )

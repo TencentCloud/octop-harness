@@ -55,7 +55,7 @@ class ModelAccess:
         if config is not None:
             import asyncio
 
-            return asyncio.get_event_loop().run_until_complete(
+            return asyncio.get_running_loop().run_until_complete(
                 self._protocol(protocol).call(messages, config, **kwargs),
             )
         response = self._chat_model.invoke(messages, config=config, **kwargs)
@@ -90,7 +90,7 @@ class ModelAccess:
                 out.append(chunk)
             return out
 
-        yield from asyncio.get_event_loop().run_until_complete(_collect())
+        yield from asyncio.get_running_loop().run_until_complete(_collect())
 
     async def astream(
         self,
