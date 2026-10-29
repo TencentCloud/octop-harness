@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from deepagents.middleware.skills import SkillMetadata
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain.agents.middleware.types import AgentState
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from octop_harness.config import HarnessAgentConfig
 
 logger = logging.getLogger(__name__)
+
 
 _FS_SKILL_TOOLS = frozenset({"ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete"})
 _SHELL_SKILL_TOOLS = frozenset({"execute", "bash", "shell"})
@@ -165,6 +166,10 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
     and shell command lines). Workspace-wide ``grep``/``glob`` with no skill
     path in the args is not rewritten.
 
+    User messages that start with ``/disabled-slug`` are rewritten to
+    strip the slash prefix — the LLM no longer sees an explicit skill
+    invoke and falls back to plain chat.
+
     System-prompt rendering is fully delegated to the downstream
     ``SkillsMiddleware`` added by :func:`deepagents.create_deep_agent`.
     This middleware exclusively updates state so that ``SkillsMiddleware``
@@ -253,7 +258,57 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
         )
         return request.override(state=new_state)
 
+    def _rewrite_disabled_slash_messages(
+        self,
+        request: ModelRequest,
+    ) -> ModelRequest:
+        """Strip ``/disabled-slug`` from user messages so the LLM falls back to chat.
+
+        When a user message starts with ``/some-skill`` and that skill is in
+        ``skills_disabled``, remove the leading slash-token so downstream
+        middleware and the model see a plain chat message instead of an
+        explicit skill invoke. Without this, the model may still attempt to
+        read ``skills/disabled/SKILL.md`` and gets blocked at tool-call time,
+        producing a confusing error.
+        """
+        disabled = self._config.skills_disabled
+        if not disabled:
+            return request
+
+        disabled_keys = set(disabled)
+        messages = list(request.messages)
+        rewritten: bool = False
+
+        for i, msg in enumerate(messages):
+            if not isinstance(msg, HumanMessage):
+                continue
+            content = msg.content
+            if not isinstance(content, str):
+                continue
+            slug = slash_skill_slug(content)
+            if slug is None:
+                continue
+            # Match against both slug and any enabled-name keys from disabled set
+            if slug not in disabled_keys:
+                continue
+            rewritten = True
+            # Remove the leading ``/slug`` token (and trailing whitespace).
+            rest = _SKILL_INVOKE_RE.sub("", content, count=1).lstrip()
+            logger.info(
+                "SkillFilter: stripped disabled slash invoke /%s from user message",
+                slug,
+            )
+            messages[i] = HumanMessage(content=rest if rest else "(disabled skill invoke removed)")
+
+        if not rewritten:
+            return request
+        # Rebuild the request with rewritten messages.
+        return request.override(messages=messages)
+
     def _apply_filter(self, request: ModelRequest) -> ModelRequest:
+        # First: rewrite any user messages that invoke disabled skills via /slug.
+        request = self._rewrite_disabled_slash_messages(request)
+
         raw_metadata = request.state.get("skills_metadata")
         metadata: list[SkillMetadata] = list(raw_metadata) if isinstance(raw_metadata, list) else []
 
