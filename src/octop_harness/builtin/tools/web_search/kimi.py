@@ -39,15 +39,20 @@ async def kimi_search(query: str) -> str:
         return "Error: kimi_search requires the 'openai' package. Install with: pip install openai."
 
     client = AsyncOpenAI(api_key=api_key, base_url="https://api.moonshot.cn/v1")
+    # Model name is overridable via env so operators can follow Moonshot's
+    # model-lineage changes without a code rollout.  ``moonshot-v1-128k``
+    # was the default until the platform retired it for new accounts.
+    model_name = os.getenv("MOONSHOT_SEARCH_MODEL", "kimi-k2")
     # ``{"type": "web_search"}`` is a Moonshot-specific extension to the
     # tools field; it isn't part of OpenAI's typed schema. ``cast`` keeps
     # mypy quiet without weakening other type checks in this file.
     tools_payload = cast(Any, [{"type": "web_search"}])
     response = await client.chat.completions.create(
-        model="moonshot-v1-128k",
+        model=model_name,
         messages=[{"role": "user", "content": query}],
         tools=tools_payload,
         temperature=0.3,
     )
     message = response.choices[0].message
     return message.content or "No answer returned."
+
