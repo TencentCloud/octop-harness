@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import platform
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,47 @@ def is_skill_enabled(
     skills_disabled: frozenset[str] | set[str],
 ) -> bool:
     return slug not in skills_disabled and display_name not in skills_disabled
+
+
+# ── Platform compatibility ──────────────────────────────────────────────────
+
+def _current_platform_tag() -> str:
+    """Normalised platform tag used to match SKILL.md ``compatibility`` values."""
+    raw = platform.system().lower()
+    if raw == "darwin":
+        return "macos"
+    if raw == "windows":
+        return "windows"
+    if raw == "linux":
+        return "linux"
+    return raw  # e.g. "freebsd", "sunos" — pass through verbatim
+
+
+def _compatibility_allows(declared: str | None, current_tag: str) -> bool:
+    """Does *declared* compatibility string permit *current_tag*?
+
+    Values seen in the wild: ``"macos only"``, ``"macos only — requires ..."``,
+    ``"windows only"``, free-form notes. Anything not matching ``<os> only``
+    is treated as cross-platform.
+    """
+    if not declared:
+        return True
+    text = declared.strip().lower()
+    # Pattern: "<os> only" with optional trailing explanation.
+    for candidate in ("macos", "darwin", "windows", "win", "linux"):
+        marker = candidate + " only"
+        if text.startswith(marker):
+            # "darwin only" is the same platform as current_tag "macos".
+            return (candidate in ("macos", "darwin") and current_tag == "macos") or (
+                candidate in ("windows", "win") and current_tag == "windows"
+            ) or (candidate == "linux" and current_tag == "linux")
+    return True  # unrecognised → assume compatible
+
+
+def _skill_platform_ok(meta: Mapping[str, Any]) -> bool:
+    """Return True when this skill is usable on the current OS."""
+    compat = str(meta.get("compatibility") or "").strip() or None
+    return _compatibility_allows(compat, _current_platform_tag())
 
 
 def _parse_skill_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -160,6 +202,11 @@ async def _collect_skills_from_root(
         meta, _body = _parse_skill_frontmatter(manifest)
         if meta.get("removed"):
             continue
+        # Platform-specific builtin skills (e.g. ``macos only``) are skipped
+        # entirely on hosts that cannot run them — no need to tell the model
+        # about tools that do not exist.
+        if kind == _BUILTIN_KIND and not _skill_platform_ok(meta):
+            continue
         display_name = str(meta.get("name") or slug)
         out[slug] = _summary_dict(
             slug,
@@ -209,6 +256,9 @@ async def list_skill_summaries(
 
 __all__ = [
     "SKILL_PRESENTATION_METADATA_VERSION",
+    "_compatibility_allows",
+    "_current_platform_tag",
+    "_skill_platform_ok",
     "is_skill_enabled",
     "list_skill_summaries",
     "skill_identity_keys",
