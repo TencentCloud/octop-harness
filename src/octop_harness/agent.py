@@ -1794,7 +1794,13 @@ class HarnessAgent:
             "For new AI-generated artifacts, prefer a subdirectory such as "
             "`generated/` over the workspace root."
         )
-        if cfg.media_generation is None:
+        if _tool_has_media_generation(tools):
+            # Custom MCP connectors or explicit tool mounts provide media
+            # generation capacity even when the host-side media_generation
+            # config is missing or credential-less. Keep the tools listed
+            # in the request; do NOT warn the model away from them.
+            pass
+        elif cfg.media_generation is None:
             directive += (
                 " Image and video generation tools are not configured in this runtime. "
                 "If the user asks for generated media, state that configuration is required; "
@@ -1995,6 +2001,66 @@ class HarnessAgent:
             proto = resolve_protocol(key, self._graph)
             self._protocols[key] = proto
         return proto
+
+
+_MEDIA_TOOL_NAME_KEYWORDS = frozenset(
+    {
+        "generate_image",
+        "generate_video",
+        "image",
+        "video",
+        "dall",
+        "dalle",
+        "flux",
+        "stable_diffusion",
+        "stability",
+        "sdxl",
+        "tts",
+        "text_to_speech",
+        "speech",
+        "audio",
+        "embedding",
+    }
+)
+
+
+def _tool_name(tool: Any) -> str:
+    """Extract a string name from either a Pydantic BaseTool or a dict tool spec."""
+    if isinstance(tool, dict):
+        return str(tool.get("name") or "").strip()
+    name = getattr(tool, "name", None)
+    if isinstance(name, str):
+        return name.strip()
+    callable_name = getattr(tool, "__name__", None)
+    return str(callable_name) if isinstance(callable_name, str) else ""
+
+
+def _tool_has_media_generation(tools: list[Any]) -> bool:
+    """True when *tools* contains any media-generation capability.
+
+    The host-side ``media_generation`` config only covers the built-in image/
+    video provider. Custom MCP connectors (e.g. a stdio server exposing a
+    DALL-3 tool or a local FLUX bridge) also mount media-generation tools
+    but leave ``media_generation`` unset. When such tools are present we
+    must not inject the "Image and video generation tools are not configured"
+    negative directive, because that would cause the model to refuse calling
+    the mounted tool (GitHub issue #1983).
+    """
+    for tool in tools:
+        name = _tool_name(tool).lower()
+        if not name:
+            continue
+        if any(kw in name for kw in _MEDIA_TOOL_NAME_KEYWORDS):
+            return True
+        desc = ""
+        if isinstance(tool, dict):
+            desc = str(tool.get("description") or "").lower()
+        else:
+            d = getattr(tool, "description", None)
+            desc = str(d or "").lower() if isinstance(d, str) else ""
+        if desc and any(kw in desc for kw in _MEDIA_TOOL_NAME_KEYWORDS):
+            return True
+    return False
 
 
 async def _async_close_sqlite_connection(conn: Any) -> None:
