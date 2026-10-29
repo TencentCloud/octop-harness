@@ -75,7 +75,7 @@ def _write_provider_config(
     and writes back to disk.
     """
     # Load existing config or start fresh
-    data = json.loads(config_path.read_text()) if config_path.exists() else {}
+    data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
 
     # Ensure providers section
     if "providers" not in data:
