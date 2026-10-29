@@ -167,6 +167,7 @@ def _capture_imagemagick(path: str, display: str) -> None:
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=8,
             check=False,
         )
