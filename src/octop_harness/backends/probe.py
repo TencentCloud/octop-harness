@@ -66,7 +66,7 @@ def probe_backend(
         if backend is not None:
             close = getattr(backend, "close", None)
             if callable(close):
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(OSError):
                     close()
         _cleanup_probe_workspace(workspace, test_name)
 
@@ -111,8 +111,7 @@ def _probe_io_failure(op: str, raw: str | BaseException | None) -> ProbeResult:
 def _cleanup_probe_workspace(workspace: str, test_name: str) -> None:
     with contextlib.suppress(OSError):
         probe_file = Path(workspace) / test_name.lstrip("/")
-        if probe_file.exists():
-            probe_file.unlink()
+        probe_file.unlink(missing_ok=True)
     with contextlib.suppress(OSError):
         Path(workspace).rmdir()
 
@@ -148,7 +147,7 @@ def _delete_probe_object(
     if backend_type in {"docker", "opensandbox"}:
         execute = getattr(backend, "execute", None)
         if callable(execute):
-            with contextlib.suppress(Exception):
+            with contextlib.suppress((OSError, RuntimeError)):
                 execute(f"rm -f -- {test_path}")
             return True, None
         return False, "sandbox backend has no execute method"
@@ -161,10 +160,10 @@ def _delete_probe_object(
 
 def _delete_local_path(root: str, test_path: str) -> tuple[bool, str | None]:
     local = materialize_storage_path(test_path, host_mount=root)
-    if local is None or not local.exists():
+    if local is None:
         return True, None
     try:
-        local.unlink()
+        local.unlink(missing_ok=True)
         return True, None
     except OSError as exc:
         return False, str(exc)
