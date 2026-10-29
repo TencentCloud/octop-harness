@@ -376,11 +376,23 @@ class ContextUsage:
     def from_dict(cls, data: dict[str, Any] | None) -> ContextUsage:
         if not isinstance(data, dict):
             return empty_context_usage()
+
+        def _safe_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                logger.debug("ContextUsage.from_dict: non-int value %r, defaulting to %s", value, default)
+                return default
+
         segments_raw = data.get("segments") or {}
-        segments = {k: int(segments_raw.get(k, 0) or 0) for k in SEGMENT_KEYS if int(segments_raw.get(k, 0) or 0) > 0}
-        used_tokens = int(data.get("used_tokens") or 0)
-        input_tokens = int(data.get("input_tokens") or 0)
-        output_tokens = int(data.get("output_tokens") or 0)
+        segments = {
+            k: _safe_int(segments_raw.get(k, 0), 0)
+            for k in SEGMENT_KEYS
+            if _safe_int(segments_raw.get(k, 0), 0) > 0
+        }
+        used_tokens = _safe_int(data.get("used_tokens"), 0)
+        input_tokens = _safe_int(data.get("input_tokens"), 0)
+        output_tokens = _safe_int(data.get("output_tokens"), 0)
         source = data.get("source") or "empty"
         if source not in ("model_request", "empty"):
             source = "empty"
@@ -388,17 +400,17 @@ class ContextUsage:
         if source == "empty" and (used_tokens > 0 or input_tokens > 0 or segments):
             source = "model_request"
         return cls(
-            max_tokens=int(data.get("max_tokens") or DEFAULT_MAX_TOKENS),
+            max_tokens=_safe_int(data.get("max_tokens"), DEFAULT_MAX_TOKENS),
             used_tokens=used_tokens,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            uncached_input_tokens=int(data.get("uncached_input_tokens") or 0),
-            cache_read_tokens=int(data.get("cache_read_tokens") or 0),
-            cache_write_tokens=int(data.get("cache_write_tokens") or 0),
-            reasoning_tokens=int(data.get("reasoning_tokens") or 0),
+            uncached_input_tokens=_safe_int(data.get("uncached_input_tokens"), 0),
+            cache_read_tokens=_safe_int(data.get("cache_read_tokens"), 0),
+            cache_write_tokens=_safe_int(data.get("cache_write_tokens"), 0),
+            reasoning_tokens=_safe_int(data.get("reasoning_tokens"), 0),
             segments=segments,
             source=source,  # type: ignore[arg-type]
-            decision_saved=max(0, int(data.get("decision_saved") or 0)),
+            decision_saved=max(0, _safe_int(data.get("decision_saved"), 0)),
         )
 
     def with_max_tokens(self, max_tokens: int) -> ContextUsage:
