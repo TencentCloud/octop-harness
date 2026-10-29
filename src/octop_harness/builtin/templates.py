@@ -7,15 +7,60 @@ this module is the pure resource-reading layer it depends on.
 from __future__ import annotations
 
 import logging
+import platform
 from collections.abc import Callable
 from importlib import resources
 from importlib.resources.abc import Traversable
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
 MD_FILES_PACKAGE = "octop_harness.builtin.md_files"
 BUILTIN_SKILLS_PACKAGE = "octop_harness.builtin.skills"
 BUILTIN_AGENTS_PACKAGE = "octop_harness.builtin.agents"
+
+# Platform identifiers used in SKILL.md ``compatibility`` frontmatter values
+# that indicate macOS-only skills.  Case-insensitive substring match.
+_MACOS_TOKENS = ("macos", "darwin", "osx")
+
+
+def _skill_platform_compatible(skill_dir: Traversable) -> bool:
+    """Return True when the skill at *skill_dir* is compatible with this host."""
+    skill_md = skill_dir.joinpath("SKILL.md")
+    if not skill_md.is_file():
+        return True
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, UnicodeError):
+        return True
+    if not text.startswith("---\n"):
+        return True
+    end = text.find("\n---", 4)
+    if end == -1:
+        return True
+    raw = text[4:end]
+    try:
+        meta = yaml.safe_load(raw) or {}
+    except yaml.YAMLError:
+        return True
+    if not isinstance(meta, dict):
+        return True
+    compat_raw = meta.get("compatibility")
+    if not compat_raw:
+        return True
+    compat_str = str(compat_raw).lower()
+    is_macos_compat = any(tok in compat_str for tok in _MACOS_TOKENS)
+    is_this_macos = platform.system().lower() == "darwin"
+    if is_macos_compat and not is_this_macos:
+        logger.debug(
+            "skipping builtin skill %s: compatibility=%r but host is %s",
+            skill_dir.name,
+            compat_raw,
+            platform.system(),
+        )
+        return False
+    return True
 
 
 def iter_md_template_files(language: str) -> list[tuple[str, bytes]]:
@@ -70,7 +115,7 @@ def iter_builtin_skills(language: str) -> list[tuple[str, str, bytes, bool]]:
     ``en/``.
     """
     if language == "en":
-        return _iter_language_tree(BUILTIN_SKILLS_PACKAGE, "en", _is_skill_dir)
+        return _iter_language_tree(BUILTIN_SKILLS_PACKAGE, "en", _is_compatible_skill_dir)
 
     package_root: Traversable = resources.files(BUILTIN_SKILLS_PACKAGE)
     lang_dir = package_root.joinpath(language)
@@ -80,7 +125,7 @@ def iter_builtin_skills(language: str) -> list[tuple[str, str, bytes, bool]]:
         list(lang_dir.iterdir())
     except (FileNotFoundError, TypeError, OSError):
         # No language directory -> full fallback to "en".
-        return _iter_language_tree(BUILTIN_SKILLS_PACKAGE, "en", _is_skill_dir)
+        return _iter_language_tree(BUILTIN_SKILLS_PACKAGE, "en", _is_compatible_skill_dir)
 
     # File-level merge: collect "en" files, then overlay "language" files.
     merged: dict[str, tuple[str, bytes, bool]] = {}
@@ -88,13 +133,13 @@ def iter_builtin_skills(language: str) -> list[tuple[str, str, bytes, bool]]:
     # Pass 1: all "en" files (marked as fallback).
     en_dir = package_root.joinpath("en")
     for entry in en_dir.iterdir():
-        if entry.name.startswith((".", "__")) or not _is_skill_dir(entry):
+        if entry.name.startswith((".", "__")) or not _is_compatible_skill_dir(entry):
             continue
         _collect_files_merged(entry, f"{entry.name}/", "en", True, merged)
 
     # Pass 2: overlay "language" files (is_fallback=False).
     for entry in lang_dir.iterdir():
-        if entry.name.startswith((".", "__")) or not _is_skill_dir(entry):
+        if entry.name.startswith((".", "__")) or not _is_compatible_skill_dir(entry):
             continue
         _collect_files_merged(entry, f"{entry.name}/", language, False, merged)
 
@@ -209,6 +254,11 @@ def _is_skill_dir(entry: Traversable) -> bool:
     if not entry.is_dir():
         return False
     return entry.joinpath("SKILL.md").is_file()
+
+
+def _is_compatible_skill_dir(entry: Traversable) -> bool:
+    """Return True when *entry* is a skill dir compatible with this host."""
+    return _is_skill_dir(entry) and _skill_platform_compatible(entry)
 
 
 def _is_agent_md(entry: Traversable) -> bool:
