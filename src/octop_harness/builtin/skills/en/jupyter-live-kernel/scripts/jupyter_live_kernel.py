@@ -1026,9 +1026,9 @@ def _ensure_kernel_idle(server: ServerInfo, kernel_id: str, timeout: float) -> N
     prevents a class of flaky 'request_sent but recv failed' errors.
     """
     client = ServerClient(server, timeout=timeout)
-    deadline = time.time() + min(timeout, 10.0)
+    deadline = time.monotonic() + min(timeout, 10.0)
     last_state: str | None = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             model = _get_kernel_model(server, kernel_id, timeout=timeout, client=client)
         except HTTPCommandError:
@@ -1246,7 +1246,7 @@ def _execute_via_websocket(
 
     reply: dict[str, Any] | None = None
     events: list[dict[str, Any]] = []
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     request_sent = False
     ws = None
     try:
@@ -1258,7 +1258,7 @@ def _execute_via_websocket(
         ws.send(json.dumps(payload))
         request_sent = True
 
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             raw = ws.recv()
             msg = json.loads(raw)
             if not _belongs_to_execution(msg, msg_id):
@@ -1356,9 +1356,9 @@ def _get_kernel_model(
 
 def _wait_for_kernel_idle(server: ServerInfo, kernel_id: str, timeout: float) -> dict[str, Any]:
     client = ServerClient(server, timeout=timeout)
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     last_state: str | None = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             model = _get_kernel_model(server, kernel_id, timeout=timeout, client=client)
         except HTTPCommandError as exc:
