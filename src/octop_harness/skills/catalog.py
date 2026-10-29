@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import platform
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,64 @@ _BUILTIN_KIND = "builtin"
 _WORKSPACE_KIND = "workspace"
 _KIND_ORDER = {_BUILTIN_KIND: 0, _WORKSPACE_KIND: 1}
 SKILL_PRESENTATION_METADATA_VERSION = 1
+
+
+# Map platform.system() / sys.platform to the values found in SKILL.md
+# ``compatibility`` frontmatter.
+_PLATFORM_ALIASES = {
+    "Darwin": "macos",
+    "Linux": "linux",
+    "Windows": "windows",
+    "FreeBSD": "freebsd",
+    "OpenBSD": "openbsd",
+    "NetBSD": "netbsd",
+}
+
+
+def _current_platform() -> str:
+    """Normalized platform name matching SKILL.md compatibility values."""
+    return _PLATFORM_ALIASES.get(platform.system() or "", sys.platform.split("_", 1)[0].lower())
+
+
+def _parse_compatibility(value: Any) -> set[str]:
+    """Parse SKILL.md compatibility frontmatter into a set of platform names.
+
+    Accepted shapes:
+      - ``macos only``          -> ``{"macos"}``
+      - ``[macos, windows]``    -> ``{"macos", "windows"}``
+      - ``macos, windows``      -> ``{"macos", "windows"}``
+      - empty / missing         -> ``set()``  (universally compatible)
+    """
+    if not value:
+        return set()
+    items: list[str] = []
+    if isinstance(value, str):
+        # strip " only" / "only" qualifier and split on separators
+        cleaned = value.replace(" only", "").replace("only", "").strip()
+        items = [part.strip() for part in cleaned.replace(";", ",").split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        items = [str(v).replace(" only", "").strip() for v in value if str(v).strip()]
+    return {item.lower() for item in items}
+
+
+def _platform_compatible(meta: Mapping[str, Any]) -> bool:
+    """True when a skill's ``compatibility`` frontmatter allows the current platform.
+
+    Missing / empty ``compatibility`` means universally compatible (no filter).
+    Otherwise the current platform must appear in the allowed set.
+    """
+    compat = _parse_compatibility(meta.get("compatibility"))
+    if not compat:
+        return True
+    current = _current_platform()
+    if current in compat:
+        return True
+    # Allow "darwin" as an alias for "macos" in compatibility lists too.
+    if current == "macos" and "darwin" in compat:
+        return True
+    if current == "darwin" and "macos" in compat:
+        return True
+    return False
 
 
 def skill_slug_from_path(path: str | None) -> str | None:
@@ -159,6 +219,16 @@ async def _collect_skills_from_root(
             continue
         meta, _body = _parse_skill_frontmatter(manifest)
         if meta.get("removed"):
+            continue
+        if not _platform_compatible(meta):
+            # Built-in skill declares platform restriction we don't satisfy —
+            # skip silently so it doesn't appear as "enabled" in the catalog
+            # or get pushed into the system prompt (#135).
+            logger.debug(
+                "skipping platform-incompatible skill %s: %s",
+                slug,
+                meta.get("compatibility"),
+            )
             continue
         display_name = str(meta.get("name") or slug)
         out[slug] = _summary_dict(
