@@ -765,3 +765,37 @@ def test_middleware_stamps_the_reply_once_per_turn() -> None:
     second = mw.wrap_model_call(request, reply)
     assert "octop_decision" not in second.result[0].additional_kwargs
     assert scorer.calls == 1
+
+
+def test_middleware_preserves_always_apply_skills_and_gates_workflow_skills() -> None:
+    state = {
+        "skills_metadata": [
+            {"name": "writing-rules", "description": "Use when writing. alwaysApply: true"},
+            {
+                "name": "work-agreement-4-step",
+                "description": "Use ONLY for multi-step assignments. Skip for simple Q&A.",
+            },
+            {"name": "daily-focus-brief", "description": "Morning brief routine."},
+        ]
+    }
+    scorer = _Scorer({"skill:work-agreement-4-step": 0.05, "skill:daily-focus-brief": 0.05})
+    mw = DecisionMiddleware(config=_config(tools=False, team=False), scorer=scorer)
+    out = mw.wrap_model_call(_request(state=state, text="What time is it?"), lambda req: req)
+    assert [row["name"] for row in out.state["skills_metadata"]] == ["writing-rules"]
+
+
+def test_prepare_jev_image_asset_pads_small_images_and_encodes_jpeg() -> None:
+    import base64
+    import io
+    from PIL import Image
+    from octop_harness.decision.client import prepare_jev_image_asset
+
+    img = Image.new("RGB", (64, 64), (255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    asset = prepare_jev_image_asset(buf.getvalue())
+    assert asset is not None
+    assert asset["type"] == "image"
+    assert asset["format"] == "jpg"
+    decoded = Image.open(io.BytesIO(base64.b64decode(asset["data_base64"])))
+    assert decoded.size == (280, 280)
