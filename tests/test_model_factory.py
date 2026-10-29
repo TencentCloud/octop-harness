@@ -379,6 +379,170 @@ class TestReasoningContentRoundTrip:
         assert issubclass(first, ChatOpenAI)
 
 
+class TestGeminiToolCallSignatures:
+    @staticmethod
+    def _build(base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/") -> Any:
+        return build_chat_model(
+            ProviderConfig(id="example", base_url=base_url, api_key="sk-x"),
+            ModelConfig(id="gemini-test"),
+        )
+
+    @staticmethod
+    def _response() -> dict[str, Any]:
+        return {
+            "id": "response-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gemini-test",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-signed",
+                                "type": "function",
+                                "function": {"name": "weather", "arguments": '{"city":"Paris"}'},
+                                "extra_content": {"google": {"thought_signature": "opaque-test-signature"}},
+                            },
+                            {
+                                "id": "call-unsigned",
+                                "type": "function",
+                                "function": {"name": "weather", "arguments": '{"city":"London"}'},
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
+
+    @pytest.mark.parametrize("sdk_response", [False, True])
+    def test_signature_survives_response_and_history_round_trip(self, sdk_response: bool) -> None:
+        import json
+
+        from langchain_core.messages import HumanMessage, ToolMessage, messages_from_dict, messages_to_dict
+        from openai.types.chat import ChatCompletion
+
+        instance = self._build()
+        raw = self._response()
+        response = ChatCompletion.model_validate(raw) if sdk_response else raw
+        message = instance._create_chat_result(response).generations[0].message
+        # Association belongs to a tool-call ID, not its position in the list.
+        message.tool_calls.reverse()
+        history = messages_from_dict(json.loads(json.dumps(messages_to_dict([message]))))
+        payload = instance._get_request_payload(
+            [HumanMessage(content="Weather?"), *history, ToolMessage(content="Sunny", tool_call_id="call-signed")]
+        )
+        calls = {call["id"]: call for call in payload["messages"][1]["tool_calls"]}
+        assert calls["call-signed"]["extra_content"] == {"google": {"thought_signature": "opaque-test-signature"}}
+        assert "extra_content" not in calls["call-unsigned"]
+        assert calls["call-signed"]["function"]["arguments"] == '{"city": "Paris"}'
+
+    def test_stream_signature_arriving_after_tool_call_id_is_preserved(self) -> None:
+        from langchain_core.messages import AIMessageChunk, HumanMessage, message_chunk_to_message
+
+        instance = self._build()
+        first = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                **call,
+                            }
+                            for index, call in enumerate(self._response()["choices"][0]["message"]["tool_calls"])
+                        ],
+                    },
+                }
+            ]
+        }
+        # Move the signature to a later delta that identifies the call by index.
+        signature = first["choices"][0]["delta"]["tool_calls"][0].pop("extra_content")
+        last = {
+            "choices": [
+                {"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {}, "extra_content": signature}]}}
+            ]
+        }
+        chunks = [instance._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, None) for chunk in (first, last)]
+        message = message_chunk_to_message((chunks[0] + chunks[1]).message)
+        payload = instance._get_request_payload([HumanMessage(content="Weather?"), message])
+        calls = {call["id"]: call for call in payload["messages"][1]["tool_calls"]}
+        assert calls["call-signed"]["extra_content"] == signature
+        assert "extra_content" not in calls["call-unsigned"]
+
+    @pytest.mark.parametrize(
+        "base_url", ["https://api.example.com/v1", "https://generativelanguage.googleapis.com.evil.invalid/v1"]
+    )
+    def test_google_metadata_is_not_sent_to_other_endpoints(self, base_url: str) -> None:
+        message = self._build()._create_chat_result(self._response()).generations[0].message
+        payload = self._build(base_url)._get_request_payload([message])
+        assert all("extra_content" not in call for call in payload["messages"][0]["tool_calls"])
+
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_sdk_http_tool_round_trip(self, stream: bool) -> None:
+        import json
+
+        import httpx
+        from langchain_core.messages import HumanMessage, ToolMessage, message_chunk_to_message
+        from openai import AsyncOpenAI
+
+        requests: list[dict[str, Any]] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            requests.append(body)
+            response = self._response()
+            if len(requests) == 2:
+                response["choices"][0].update(finish_reason="stop", message={"role": "assistant", "content": "Done"})
+                return httpx.Response(200, json=response)
+            if not body.get("stream"):
+                return httpx.Response(200, json=response)
+            calls = response["choices"][0]["message"]["tool_calls"]
+            delta = {"role": "assistant", "tool_calls": [{"index": index, **call} for index, call in enumerate(calls)]}
+            events = [
+                {"index": 0, "delta": delta, "finish_reason": None},
+                {"index": 0, "delta": {}, "finish_reason": "tool_calls"},
+            ]
+            sse = "".join(
+                "data: " + json.dumps({**response, "object": "chat.completion.chunk", "choices": [event]}) + "\n\n"
+                for event in events
+            )
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=sse + "data: [DONE]\n\n")
+
+        instance = self._build()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            sdk = AsyncOpenAI(api_key="sk-x", base_url=instance.openai_api_base, http_client=http)
+            instance.async_client = sdk.chat.completions
+            instance.root_async_client = sdk
+            history = [HumanMessage(content="Weather?")]
+            if stream:
+                chunks = [chunk async for chunk in instance.astream(history)]
+                combined = chunks[0]
+                for chunk in chunks[1:]:
+                    combined += chunk
+                message = message_chunk_to_message(combined)
+            else:
+                message = await instance.ainvoke(history)
+            result = await instance.ainvoke(
+                [
+                    *history,
+                    message,
+                    ToolMessage(content="Sunny", tool_call_id="call-signed"),
+                    ToolMessage(content="Cloudy", tool_call_id="call-unsigned"),
+                ]
+            )
+            assert result.content == "Done"
+        calls = {call["id"]: call for call in requests[1]["messages"][1]["tool_calls"]}
+        assert calls["call-signed"]["extra_content"] == {"google": {"thought_signature": "opaque-test-signature"}}
+        assert "extra_content" not in calls["call-unsigned"]
+
+
 class TestCodexResponses:
     @staticmethod
     def _build(

@@ -23,6 +23,10 @@ We solve that with a small ``ChatOpenAI`` subclass that captures
 ``reasoning_content`` into ``AIMessage.additional_kwargs`` on parse and
 re-attaches it on serialize. The behaviour is no-op for providers that don't
 emit the field, so it's always-on for ``protocol="openai"``.
+
+Google's OpenAI-compatible endpoint also requires tool-call thought signatures
+to survive parsing, streamed chunk aggregation, and history replay. Keep those
+opaque values as message metadata and return them only to that endpoint.
 """
 
 from __future__ import annotations
@@ -334,6 +338,8 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: 
     kwargs["timeout"] = LLM_HTTP_TIMEOUT
     instance: BaseChatModel = cls(**kwargs)
     instance._harness_codex = is_codex  # type: ignore[attr-defined]
+    is_gemini = urlsplit(provider.base_url).hostname == "generativelanguage.googleapis.com"
+    object.__setattr__(instance, "_harness_gemini", is_gemini)
 
     fallback_instance: BaseChatModel | None = None
     # Codex is Responses-only; never retry it through Chat Completions.
@@ -342,6 +348,7 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: 
         fallback_kwargs["use_responses_api"] = False
         fallback_kwargs.pop("output_version", None)
         fallback_instance = cls(**fallback_kwargs)
+        object.__setattr__(fallback_instance, "_harness_gemini", is_gemini)
         object.__setattr__(instance, "_harness_api_fallback_model", fallback_instance)
         object.__setattr__(instance, "_harness_api_fallback_provider", provider.id)
         object.__setattr__(instance, "_harness_api_fallback_model_id", model.id)
@@ -451,7 +458,28 @@ def _fallback_model_for(instance: Any, exc: BaseException, kwargs: Mapping[str, 
     return fallback
 
 
-def _copy_reasoning_from_response(result: Any, response: Any) -> Any:
+def _copy_gemini_tool_call_metadata(message: Any, tool_calls: Any) -> None:
+    """Retain call IDs and signatures; stream indices let LangChain merge late metadata."""
+    from langchain_core.messages import AIMessage
+
+    if not isinstance(message, AIMessage) or not tool_calls:
+        return
+    metadata = []
+    for index, raw in enumerate(tool_calls):
+        call = raw if isinstance(raw, dict) else raw.model_dump()
+        entry: dict[str, Any] = {"index": call.get("index", index)}
+        if call.get("id"):
+            entry["id"] = call["id"]
+        extra = call.get("extra_content") or {}
+        google = extra.get("google") or {}
+        signature = google.get("thought_signature")
+        if isinstance(signature, str):
+            entry["signature"] = signature
+        metadata.append(entry)
+    message.additional_kwargs["_harness_gemini_tool_calls"] = metadata
+
+
+def _copy_reasoning_from_response(result: Any, response: Any, *, gemini: bool = False) -> Any:
     from langchain_core.messages import AIMessage
 
     if isinstance(response, dict):
@@ -462,6 +490,8 @@ def _copy_reasoning_from_response(result: Any, response: Any) -> Any:
                 continue
             reasoning = msg_dict.get("reasoning_content")
             message = getattr(gen, "message", None)
+            if gemini:
+                _copy_gemini_tool_call_metadata(message, msg_dict.get("tool_calls"))
             if reasoning and isinstance(message, AIMessage):
                 message.additional_kwargs.setdefault("reasoning_content", reasoning)
         return result
@@ -475,12 +505,14 @@ def _copy_reasoning_from_response(result: Any, response: Any) -> Any:
             extras = getattr(msg, "model_extra", None) or {}
             reasoning = extras.get("reasoning_content")
         message = getattr(gen, "message", None)
+        if gemini:
+            _copy_gemini_tool_call_metadata(message, getattr(msg, "tool_calls", None))
         if reasoning and isinstance(message, AIMessage):
             message.additional_kwargs.setdefault("reasoning_content", reasoning)
     return result
 
 
-def _copy_reasoning_from_chunk(gen_chunk: Any, chunk: dict[str, Any]) -> Any:
+def _copy_reasoning_from_chunk(gen_chunk: Any, chunk: dict[str, Any], *, gemini: bool = False) -> Any:
     from langchain_core.messages import AIMessageChunk
 
     if gen_chunk is None:
@@ -493,6 +525,8 @@ def _copy_reasoning_from_chunk(gen_chunk: Any, chunk: dict[str, Any]) -> Any:
         return gen_chunk
     reasoning = delta.get("reasoning_content")
     message = getattr(gen_chunk, "message", None)
+    if gemini:
+        _copy_gemini_tool_call_metadata(message, delta.get("tool_calls"))
     if reasoning and isinstance(message, AIMessageChunk):
         message.additional_kwargs.setdefault("reasoning_content", "")
         message.additional_kwargs["reasoning_content"] += reasoning
@@ -516,7 +550,9 @@ def _source_messages_for_payload(input_: Any, kwargs: dict[str, Any], convert_in
     return messages
 
 
-def _attach_reasoning_to_payload(payload: dict[str, Any], source_messages: list[Any]) -> dict[str, Any]:
+def _attach_reasoning_to_payload(
+    payload: dict[str, Any], source_messages: list[Any], *, gemini: bool = False
+) -> dict[str, Any]:
     from langchain_core.messages import AIMessage
 
     messages_out = payload.get("messages")
@@ -535,6 +571,18 @@ def _attach_reasoning_to_payload(payload: dict[str, Any], source_messages: list[
         reasoning = src.additional_kwargs.get("reasoning_content") if isinstance(src, AIMessage) else None
         if reasoning:
             msg_dict["reasoning_content"] = reasoning
+        if gemini:
+            signatures = {
+                entry["id"]: entry["signature"]
+                for entry in src.additional_kwargs.get("_harness_gemini_tool_calls", [])
+                if entry.get("id") and "signature" in entry
+            }
+            for call in msg_dict.get("tool_calls", []):
+                if call.get("id") in signatures:
+                    extra = dict(call.get("extra_content") or {})
+                    google = dict(extra.get("google") or {})
+                    google["thought_signature"] = signatures[call["id"]]
+                    call["extra_content"] = {**extra, "google": google}
     return payload
 
 
@@ -647,7 +695,11 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
                     yield _mark_api_fallback_chunk(chunk)
 
         def _create_chat_result(self, response: Any, generation_info: dict[str, Any] | None = None) -> Any:
-            return _copy_reasoning_from_response(super()._create_chat_result(response, generation_info), response)
+            return _copy_reasoning_from_response(
+                super()._create_chat_result(response, generation_info),
+                response,
+                gemini=getattr(self, "_harness_gemini", False),
+            )
 
         def _convert_chunk_to_generation_chunk(
             self,
@@ -658,6 +710,7 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             return _copy_reasoning_from_chunk(
                 super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info),
                 chunk,
+                gemini=getattr(self, "_harness_gemini", False),
             )
 
         def _get_request_payload(self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
@@ -675,7 +728,9 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
             if not source_messages:
                 return payload
-            return _attach_reasoning_to_payload(payload, source_messages)
+            return _attach_reasoning_to_payload(
+                payload, source_messages, gemini=getattr(self, "_harness_gemini", False)
+            )
 
     _REASONING_AWARE_CHAT_OPENAI[id(base_cls)] = _ReasoningAwareChatOpenAI
     return _ReasoningAwareChatOpenAI
