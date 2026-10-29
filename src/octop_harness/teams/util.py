@@ -1,4 +1,4 @@
-"""Peer-call helpers: one-shot requests and user-id coercion."""
+﻿"""Peer-call helpers: one-shot requests and user-id coercion."""
 
 from __future__ import annotations
 
@@ -122,12 +122,18 @@ def build_one_shot_request(
     thread_id: str | None = None,
     session_key: str | None = None,
     configurable: dict[str, Any] | None = None,
+    mcp_use_default: bool = True,
 ) -> ChatRequest:
     """Build a one-call request for *agent_id*.
 
     A fresh ``thread_id`` is generated when not supplied; pass an explicit
     id (typically :func:`derive_peer_thread_id`) to continue a peer thread.
     The callee sees only *text* — not the caller's conversation history.
+
+    ``mcp_use_default`` defaults to ``True`` so the callee agent's own
+    configured MCP servers are exposed. Peer ``ask_agent`` calls and inbox
+    follow-ups both run in the callee's runtime and should inherit its tool
+    bindings; explicit ``mcp_servers=[...]`` in ``configurable`` still wins.
     """
     extra = dict(configurable or {})
     if session_key:
@@ -138,6 +144,7 @@ def build_one_shot_request(
         user=str(user_id),
         agent_id=agent_id,
         source=source,
+        mcp_use_default=mcp_use_default,
         configurable=extra or None,
     )
 
@@ -155,3 +162,4 @@ __all__ = [
     "parse_peer_invoke_mode",
     "parse_team_peers",
 ]
+
