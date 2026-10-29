@@ -7,6 +7,7 @@ from octop_harness.middleware.conversation_mode import ConversationModeMiddlewar
 from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
 from octop_harness.middleware.mcp_tool_error import McpToolErrorMiddleware
 from octop_harness.middleware.media_offload import MediaOffloadMiddleware
+from octop_harness.middleware.loop_guard import LoopGuardMiddleware
 from octop_harness.middleware.memory import MemoryMiddleware
 from octop_harness.middleware.model_settings import (
     CONFIGURABLE_MAX_INPUT_TOKENS,
@@ -24,6 +25,7 @@ __all__ = [
     "ClientToolSearchMiddleware",
     "ConversationModeMiddleware",
     "FilesystemGuardMiddleware",
+    "LoopGuardMiddleware",
     "McpToolErrorMiddleware",
     "MediaOffloadMiddleware",
     "MemoryMiddleware",
