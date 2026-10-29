@@ -1,4 +1,4 @@
-"""``HarnessAgent`` — the public facade over ``deepagents.create_deep_agent``."""
+﻿"""``HarnessAgent`` — the public facade over ``deepagents.create_deep_agent``."""
 
 from __future__ import annotations
 
@@ -1550,7 +1550,12 @@ class HarnessAgent:
         if cfg.mcp_server_configs:
             chain.append(
                 MCPToolMiddleware(
-                    server_names=frozenset(cfg.mcp_server_configs),
+                    # Pass the live dict, not a frozenset snapshot.  Runtime
+                    # code appends to ``cfg.mcp_server_configs`` in place
+                    # (e.g. ``agent.append_mcp_tools`` + subsequent ChatRequest
+                    # targeting the new server).  MCPToolMiddleware re-snapshots
+                    # server names on every request, so mutations are visible.
+                    server_names=cfg.mcp_server_configs,
                     mcp_tool_names=self._mcp_tool_name_set,
                     default_servers=cfg.mcp_default_servers,
                 )
@@ -2065,3 +2070,4 @@ async def _new_async_saver(conn: Any) -> Any:
 
 
 __all__ = ["HarnessAgent", "InitResult"]
+

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -25,16 +25,24 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
     By default (no ``mcp_servers`` / ``mcp_use_default`` on :class:`~octop_harness.request.ChatRequest`)
     all MCP tools are stripped from the model's tool list. Callers must set
     ``mcp_servers=[...]`` or ``mcp_use_default=True`` to enable them.
+
+    ``server_names`` may be passed as a live dict (``mcp_server_configs``),
+    not only as a frozen set.  Every request calls ``set(self._server_names)``
+    so runtime mutations to the dict are picked up — the middleware does not
+    pin a snapshot at construction time.
     """
 
     def __init__(
         self,
         *,
-        server_names: frozenset[str],
+        server_names: Iterable[str] | Mapping[str, Any],
         mcp_tool_names: frozenset[str],
         default_servers: list[str] | None,
     ) -> None:
         super().__init__()
+        # Store the reference as-is (dict stays live across runtime mutations;
+        # frozenset is also accepted for static callers).  Every filter call
+        # re-snapshots via ``set(...)`` below.
         self._server_names = server_names
         self._mcp_tool_names = mcp_tool_names
         self._default_servers = list(default_servers) if default_servers else None
@@ -54,6 +62,13 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
         return await handler(self._apply_filter(request))
 
     def _apply_filter(self, request: ModelRequest) -> ModelRequest:
+        # Re-snapshot server names on every request.  When callers pass the
+        # live ``cfg.mcp_server_configs`` dict (our standard pattern since
+        # runtime server appends mutate it in place), this picks up new
+        # entries mounted after agent construction.  With a plain frozenset
+        # it is still correct — just redundant — so both shapes work.
+        known = set(self._server_names)
+
         configurable = runtime_config(request).get("configurable") or {}
         try:
             active = resolve_active_mcp_servers(
@@ -66,20 +81,20 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
             active = None
 
         if active is not None:
-            unknown = sorted(set(active) - self._server_names)
+            unknown = sorted(set(active) - known)
             if unknown:
                 logger.warning(
                     "ChatRequest references unknown MCP server(s) %s; configured: %s",
                     unknown,
-                    sorted(self._server_names),
+                    sorted(known),
                 )
-                active = [s for s in active if s in self._server_names]
+                active = [s for s in active if s in known]
 
         tools_in: list[BaseTool | dict[str, Any]] = list(request.tools or [])
         filtered = filter_tools_for_mcp_servers(
             tools_in,
             mcp_tool_names=self._mcp_tool_names,
-            server_names=self._server_names,
+            server_names=known,
             active_servers=active,
         )
         if active:
