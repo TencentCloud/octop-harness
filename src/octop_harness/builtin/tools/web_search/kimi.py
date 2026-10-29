@@ -1,9 +1,9 @@
-"""Kimi (Moonshot AI) built-in web search tool.
+""""Kimi (Moonshot AI) built-in web search tool.
 
-Kimi's ``moonshot-v1`` model has a native ``web_search`` tool that the
-model invokes itself; we treat the whole thing as a single black-box
+Kimi's kimi-k2 / moonshot-v1 models have a native `web_search` tool that
+the model invokes itself; we treat the whole thing as a single black-box
 "give me an answer with citations" call. Requires
-``MOONSHOT_API_KEY``.
+`MOONSHOT_API_KEY`.
 """
 
 from __future__ import annotations
@@ -12,6 +12,13 @@ import os
 from typing import Any, cast
 
 from langchain_core.tools import tool
+
+
+# Moonshot has rotated away from the legacy `moonshot-v1-*` family that
+# new API keys no longer have permission for (resource_not_found_error /
+# 404). Default to the current kimi-k2 series and let operators override
+# via `MOONSHOT_SEARCH_MODEL` when they need a different model.
+_DEFAULT_KIMI_MODEL = os.getenv("MOONSHOT_SEARCH_MODEL", "kimi-k2-0905")
 
 
 @tool
@@ -39,12 +46,12 @@ async def kimi_search(query: str) -> str:
         return "Error: kimi_search requires the 'openai' package. Install with: pip install openai."
 
     client = AsyncOpenAI(api_key=api_key, base_url="https://api.moonshot.cn/v1")
-    # ``{"type": "web_search"}`` is a Moonshot-specific extension to the
-    # tools field; it isn't part of OpenAI's typed schema. ``cast`` keeps
+    # `{"type": "web_search"}` is a Moonshot-specific extension to the
+    # tools field; it isn't part of OpenAI's typed schema. `cast` keeps
     # mypy quiet without weakening other type checks in this file.
     tools_payload = cast(Any, [{"type": "web_search"}])
     response = await client.chat.completions.create(
-        model="moonshot-v1-128k",
+        model=_DEFAULT_KIMI_MODEL,
         messages=[{"role": "user", "content": query}],
         tools=tools_payload,
         temperature=0.3,
