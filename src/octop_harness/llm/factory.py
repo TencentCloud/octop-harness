@@ -576,6 +576,103 @@ def _adapt_codex_instructions(payload: dict[str, Any], source_messages: list[Any
     ]
 
 
+# ---------------------------------------------------------------------------
+# Cumulative-vs-incremental streaming usage normalization
+# ---------------------------------------------------------------------------
+#
+# langchain-openai's `stream_usage=True` walks every streamed chunk and
+# calls `_update_token_usage` — a simple accumulator.  This is correct for
+# providers that emit **incremental** usage (each chunk reports only the
+# tokens added since the previous chunk) but catastrophically wrong for
+# providers like SiliconFlow that emit **cumulative** usage on every chunk
+# (each chunk reports the running total from chunk #1).  With cumulative
+# chunks, LangChain's accumulator produces `N × true_usage` where N is
+# the number of chunks — yielding an input_tokens number in the millions
+# and triggering premature context compaction.
+#
+# The helpers below detect cumulative-shape usage on the fly and convert
+# each chunk to the equivalent incremental usage before LangChain sees it,
+# so its own accumulator produces the correct final totals.
+
+
+def _chunk_raw_usage(chunk: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract the usage dict from a raw wire chunk dict."""
+    choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
+    if not choices:
+        return None
+    usage = choices[0].get("usage") if isinstance(choices[0], dict) else None
+    if not isinstance(usage, dict):
+        return None
+    return usage
+
+
+def _usage_token_values(usage: dict[str, Any]) -> tuple[int, int]:
+    """Return (input_tokens, output_tokens) from a raw usage dict."""
+    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    return input_tokens, output_tokens
+
+
+def _usage_token_diff(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    """Return `current` rewritten as a delta from `previous`.
+
+    Used when a provider emits **cumulative** usage on every streamed chunk.
+    The first chunk's input_tokens is preserved verbatim (prompt size does
+    not change mid-stream); subsequent chunks only contribute the *delta*
+    in output_tokens over the prior chunk.
+    """
+    cur_in, cur_out = _usage_token_values(current)
+    prev_in, prev_out = _usage_token_values(previous)
+    new_usage = dict(current)
+    new_usage["prompt_tokens"] = cur_in
+    new_usage["input_tokens"] = cur_in
+    new_usage["completion_tokens"] = max(0, cur_out - prev_out)
+    new_usage["output_tokens"] = max(0, cur_out - prev_out)
+    total = cur_in + max(0, cur_out - prev_out)
+    new_usage["total_tokens"] = total
+    return new_usage
+
+
+def _is_cumulative_usage(current: dict[str, Any], previous: dict[str, Any] | None) -> bool:
+    """Heuristic: True when `current` looks like cumulative vs. `previous`.
+
+    On every streamed chunk of a **cumulative** provider:
+
+    - `input_tokens` is stable across chunks (the prompt was fixed before
+      streaming began, so it never grows).
+    - `output_tokens` is strictly non-decreasing.
+
+    On an **incremental** provider both numbers jump between chunks and are
+    usually just the size of one chunk's delta.
+
+    We only mark cumulative when `input` is stable AND `output` is
+    non-decreasing AND both numbers look like they already reflect a full
+    call (bigger than any single chunk could produce).  This keeps the fix
+    off for OpenAI / DeepSeek / Anthropic (all incremental) while catching
+    SiliconFlow and any similar provider.
+    """
+    if previous is None:
+        return False
+    cur_in, cur_out = _usage_token_values(current)
+    prev_in, prev_out = _usage_token_values(previous)
+    # Incremental providers put tiny per-chunk numbers here.  Cumulative
+    # providers put the full-call counts.  64 input / 8 output is a safe
+    # threshold that survives the smallest non-trivial prompts.
+    if cur_in < 64 or cur_out < 8:
+        return False
+    if prev_in < 64 or prev_out < 8:
+        return False
+    # Cumulative: input_tokens stable, output_tokens non-decreasing.
+    if cur_in != prev_in:
+        return False
+    if cur_out < prev_out:
+        return False
+    # Incremental would show both numbers jumping.  Having input stable while
+    # output only grows monotonically with large values is a near-perfect
+    # fingerprint of cumulative usage.
+    return True
+
+
 def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
     """Return a ``ChatOpenAI`` subclass that round-trips ``reasoning_content``.
 
@@ -621,6 +718,10 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
                 return _mark_api_fallback_result(await fallback._agenerate(*args, **kwargs))
 
         def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            # Reset per-request chunk-usage state so concurrent requests do
+            # not cross-contaminate one another (class is cached, shared).
+            self._stream_usage_prev: dict[str, Any] | None = None
+            self._stream_usage_cumulative: bool = False
             yielded = False
             try:
                 for chunk in super()._stream(*args, **kwargs):
@@ -634,6 +735,8 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
                     yield _mark_api_fallback_chunk(chunk)
 
         async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            self._stream_usage_prev: dict[str, Any] | None = None
+            self._stream_usage_cumulative: bool = False
             yielded = False
             try:
                 async for chunk in super()._astream(*args, **kwargs):
@@ -655,6 +758,24 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             default_chunk_class: type[Any],
             base_generation_info: dict[str, Any] | None,
         ) -> Any:
+            # If this provider emits **cumulative** usage on every streamed
+            # chunk, LangChain's internal accumulator (`_update_token_usage`)
+            # would produce N× inflated totals.  Detect cumulative-shape
+            # chunks on the fly and convert each to the incremental delta
+            # that LangChain actually expects to accumulate.
+            raw_usage = _chunk_raw_usage(chunk)
+            if raw_usage is not None:
+                prev = getattr(self, "_stream_usage_prev", None)
+                if not getattr(self, "_stream_usage_cumulative", False):
+                    if _is_cumulative_usage(raw_usage, prev):
+                        self._stream_usage_cumulative = True
+                if getattr(self, "_stream_usage_cumulative", False) and prev is not None:
+                    delta = _usage_token_diff(raw_usage, prev)
+                    choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
+                    if choices and isinstance(choices[0], dict):
+                        choices[0]["usage"] = delta
+                self._stream_usage_prev = raw_usage
+
             return _copy_reasoning_from_chunk(
                 super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info),
                 chunk,
@@ -927,3 +1048,4 @@ def _build_bedrock(provider: ProviderConfig, model: ModelConfig, *, max_retries:
 
 
 __all__ = ["ChatModelFactory", "ModelAccess", "build_chat_model"]
+
