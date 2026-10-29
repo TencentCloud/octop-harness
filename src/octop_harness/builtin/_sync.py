@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import platform
 from dataclasses import dataclass, field
 from importlib import resources
 from importlib.resources.abc import Traversable
 from typing import TYPE_CHECKING
+
+import yaml
 
 from octop_harness.backends.workspace import DEFAULT_AGENTS_DIR, DEFAULT_BUILTIN_SKILLS_DIR
 
@@ -18,6 +21,76 @@ logger = logging.getLogger(__name__)
 VERSION_FILE = ".version"
 BUILTIN_SKILLS_PACKAGE = "octop_harness.builtin.skills"
 BUILTIN_AGENTS_PACKAGE = "octop_harness.builtin.agents"
+
+# Platform identifiers used in SKILL.md ``compatibility`` frontmatter values
+# that indicate macOS-only skills.  Case-insensitive substring match.
+_MACOS_TOKENS = ("macos", "darwin", "osx")
+
+
+def _skill_platform_compatible(skill_dir: Traversable) -> bool:
+    """Return True when the skill at *skill_dir* is compatible with this host."""
+    skill_md = skill_dir.joinpath("SKILL.md")
+    if not skill_md.is_file():
+        return True
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, UnicodeError):
+        return True
+    if not text.startswith("---\n"):
+        return True
+    end = text.find("\n---", 4)
+    if end == -1:
+        return True
+    raw = text[4:end]
+    try:
+        meta = yaml.safe_load(raw) or {}
+    except yaml.YAMLError:
+        return True
+    if not isinstance(meta, dict):
+        return True
+    compat_raw = meta.get("compatibility")
+    if not compat_raw:
+        return True
+    compat_str = str(compat_raw).lower()
+    is_macos_compat = any(tok in compat_str for tok in _MACOS_TOKENS)
+    is_this_macos = platform.system().lower() == "darwin"
+    if is_macos_compat and not is_this_macos:
+        logger.debug(
+            "skipping builtin skill %s: compatibility=%r but host is %s",
+            skill_dir.name,
+            compat_raw,
+            platform.system(),
+        )
+        return False
+    return True
+
+
+def _skill_entry_filter(entry: Traversable) -> bool:
+    """Entry filter: keep everything except macOS-only skill directories."""
+    if not entry.is_dir():
+        return True
+    if not entry.joinpath("SKILL.md").is_file():
+        return True
+    return _skill_platform_compatible(entry)
+
+
+def _copy_tree_to_workspace_filtered(
+    workspace: "BackendWorkspace",
+    source: Traversable,
+    dest_dir: str,
+    entry_filter,
+) -> None:
+    """Like :func:`_copy_tree_to_workspace` but skips entries failing *entry_filter*."""
+    for entry in source.iterdir():
+        if entry.name.startswith(("__", ".")):
+            continue
+        if not entry_filter(entry):
+            continue
+        entry_path = f"{dest_dir}/{entry.name}"
+        if entry.is_dir():
+            _copy_tree_to_workspace_filtered(workspace, entry, entry_path, entry_filter)
+        else:
+            workspace.write_text(entry_path, entry.read_text(encoding="utf-8"), force=True)
 
 
 @dataclass
@@ -75,7 +148,7 @@ def sync_builtin_skills_to_backend(
 
         if language == "en":
             # Simple case: just copy "en".
-            _copy_tree_to_workspace(workspace, package_root.joinpath("en"), root)
+            _copy_tree_to_workspace_filtered(workspace, package_root.joinpath("en"), root, _skill_entry_filter)
             workspace.write_text(f"{root}/{VERSION_FILE}", agent_version, force=True)
             return True, []
 
@@ -89,11 +162,11 @@ def sync_builtin_skills_to_backend(
 
         # Always start with "en" as the base.
         en_dir = package_root.joinpath("en")
-        _copy_tree_to_workspace(workspace, en_dir, root)
+        _copy_tree_to_workspace_filtered(workspace, en_dir, root, _skill_entry_filter)
 
         if has_language:
             # Overlay "language" files on top of "en".
-            _copy_tree_to_workspace(workspace, lang_dir, root)
+            _copy_tree_to_workspace_filtered(workspace, lang_dir, root, _skill_entry_filter)
         else:
             # No language directory at all -> record all paths as fallback.
             fallback_paths.extend(_collect_skill_paths(en_dir, root))
@@ -116,6 +189,8 @@ def _collect_skill_paths(lang_dir: Traversable, dest_root: str) -> list[str]:
         if entry.name.startswith(("__", ".")):
             continue
         if not entry.is_dir():
+            continue
+        if entry.joinpath("SKILL.md").is_file() and not _skill_platform_compatible(entry):
             continue
         _collect_paths_recursive(entry, f"{dest_root}/{entry.name}", out)
     return out
