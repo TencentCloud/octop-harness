@@ -23,7 +23,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from octop_harness.context_usage import catalog_saved_tokens, pending_decision_saved
-from octop_harness.decision.client import HttpDecisionClient
+from octop_harness.decision.client import HttpDecisionClient, prepare_jev_image_asset
 from octop_harness.decision.config import DecisionConfig
 from octop_harness.decision.select import Candidate, keep_confident, lexical_shortlist
 from octop_harness.middleware.peer import has_agent_at_mention
@@ -48,10 +48,43 @@ _QUESTION_LIMIT = 20
 _CATALOG_LIMIT = 12
 # Near misses stay. 0.6 still prefers a clear yes; 0.45 is kept while there is room.
 _KEEP_SLACK = 0.15
-# Filesystem, todos, memory, team dispatch, web lookup, and irreplaceable
-# delivery/browse/screenshot tools. Decision may still drop the long tail
-# (MCP/plugins, env file, media generation, etc.).
-# Dropping the core set makes the chat model print a raw tool call and stop.
+_PINNED_GATE_SKILLS = ("work-agreement-4-step",)
+
+
+def _is_always_apply_skill(row: dict[str, Any]) -> bool:
+    if row.get("alwaysApply") is True or row.get("always_apply") is True:
+        return True
+    desc = str(row.get("description") or "").lower()
+    return "alwaysapply: true" in desc or "alwaysapply:true" in desc
+
+
+def _always_kept_skills(rows: list[dict[str, Any]]) -> set[str]:
+    return {
+        name
+        for row in rows
+        if (name := str(row.get("name") or "").strip()) and _is_always_apply_skill(row)
+    }
+
+
+def _is_gate_skill(row: dict[str, Any]) -> bool:
+    if row.get("gateByDecision") is True or row.get("gate_by_decision") is True:
+        return True
+    name = str(row.get("name") or "").strip()
+    if name in _PINNED_GATE_SKILLS:
+        return True
+    desc = str(row.get("description") or "").lower()
+    return "skip for simple q&a" in desc
+
+
+def _gate_skill_names(rows: list[dict[str, Any]]) -> set[str]:
+    return {
+        name
+        for row in rows
+        if (name := str(row.get("name") or "").strip()) and _is_gate_skill(row)
+    }
+# Filesystem, todos, memory, team dispatch, and web lookup. These are the
+# agent's hands. Decision may drop the long tail (MCP, browser, media).
+# Dropping this set makes the chat model print a raw tool call and stop.
 # ask_agent / agent_list are how a team host schedules; they stay even when
 # every other tool is filtered out.
 _TOOLS_ALWAYS_KEPT = frozenset(
@@ -161,6 +194,74 @@ def _latest_user_text(request: ModelRequest) -> str:
         if isinstance(msg, HumanMessage):
             return _stringify_content(msg.content).strip()
     return ""
+
+
+_MAX_DECISION_IMAGES = 2
+_WORKSPACE_IMG_HINT_RE = re.compile(
+    r"Workspace path:\s*(/[^\n\r]+?\.(?:png|jpg|jpeg|webp|bmp|gif))\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_raw_images_from_message(msg: HumanMessage) -> list[bytes]:
+    import base64
+    from pathlib import Path
+
+    out: list[bytes] = []
+    content = getattr(msg, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if len(out) >= _MAX_DECISION_IMAGES:
+                break
+            if not isinstance(block, dict):
+                continue
+            btype = str(block.get("type") or "")
+            if btype in ("image_url", "image", "input_image"):
+                url_val = block.get("image_url") or block.get("url") or ""
+                url = str(url_val.get("url") or "") if isinstance(url_val, dict) else str(url_val)
+                if url.startswith("data:image/") and ";base64," in url:
+                    try:
+                        out.append(base64.b64decode(url.split(";base64,", 1)[1]))
+                        continue
+                    except Exception:
+                        pass
+                b64_direct = block.get("data")
+                if isinstance(b64_direct, str) and b64_direct:
+                    try:
+                        out.append(base64.b64decode(b64_direct))
+                        continue
+                    except Exception:
+                        pass
+    text = _stringify_content(content)
+    if len(out) < _MAX_DECISION_IMAGES and text:
+        for match in _WORKSPACE_IMG_HINT_RE.finditer(text):
+            if len(out) >= _MAX_DECISION_IMAGES:
+                break
+            p = Path(match.group(1).strip())
+            if p.is_file():
+                try:
+                    out.append(p.read_bytes())
+                except Exception:
+                    pass
+    return out
+
+
+def _latest_user_image_assets(request: ModelRequest) -> dict[str, dict[str, Any]] | None:
+    import uuid
+
+    messages = getattr(request, "messages", None) or []
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            raw_list = _extract_raw_images_from_message(msg)
+            if not raw_list:
+                return None
+            assets: dict[str, dict[str, Any]] = {}
+            for raw in raw_list:
+                asset = prepare_jev_image_asset(raw)
+                if asset is not None:
+                    assets[f"img-{uuid.uuid4().hex[:12]}"] = asset
+            return assets or None
+    return None
 
 
 def _tool_name(tool: Any) -> str:
@@ -293,10 +394,16 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
                 if work is None:
                     narrowed = request
                 else:
-                    probabilities = await self._scorer.score_async(
-                        state=_state_text(request, chinese=self._chinese),
-                        statements=work.statements,
-                    )
+                    import inspect
+
+                    score_kwargs: dict[str, Any] = {
+                        "state": _state_text(request, chinese=self._chinese),
+                        "statements": work.statements,
+                    }
+                    assets = _latest_user_image_assets(request)
+                    if assets and "assets" in inspect.signature(self._scorer.score_async).parameters:
+                        score_kwargs["assets"] = assets
+                    probabilities = await self._scorer.score_async(**score_kwargs)
                     narrowed = self._apply(request, work, probabilities)
             response = await _call_with_savings_async(request, narrowed, handler)
             return _stamp_decision(response, _PENDING_DECISION.get())
@@ -330,13 +437,19 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         request: ModelRequest,
         score: Callable[..., dict[str, float]],
     ) -> ModelRequest:
+        import inspect
+
         work = self._collect(request)
         if work is None:
             return request
-        probabilities = score(
-            state=_state_text(request, chinese=self._chinese),
-            statements=work.statements,
-        )
+        score_kwargs: dict[str, Any] = {
+            "state": _state_text(request, chinese=self._chinese),
+            "statements": work.statements,
+        }
+        assets = _latest_user_image_assets(request)
+        if assets and "assets" in inspect.signature(score).parameters:
+            score_kwargs["assets"] = assets
+        probabilities = score(**score_kwargs)
         return self._apply(request, work, probabilities)
 
     def _collect(self, request: ModelRequest) -> _Work | None:
@@ -373,11 +486,22 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
                 description=_clip(str(row.get("description") or ""), _BLURB_LIMIT),
             )
             for row in rows
-            if (name := str(row.get("name") or "").strip())
+            if (name := str(row.get("name") or "").strip()) and not _is_always_apply_skill(row)
         ]
         if len(candidates) < 2:
             return
-        chosen = lexical_shortlist(candidates, text, limit=_CATALOG_LIMIT)
+        gate_ids = _gate_skill_names(rows)
+        pinned = [item for item in candidates if item.id in gate_ids]
+        shortlisted = lexical_shortlist(candidates, text, limit=_CATALOG_LIMIT) or []
+        seen_ids: set[str] = set()
+        chosen: list[Candidate] = []
+        for item in [*pinned, *shortlisted]:
+            if item.id in seen_ids:
+                continue
+            seen_ids.add(item.id)
+            chosen.append(item)
+            if len(chosen) >= _CATALOG_LIMIT:
+                break
         if not chosen:
             return
         work.skill_rows = rows
@@ -565,6 +689,8 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         assert work.skill_ids is not None and work.skill_rows is not None
         scores = _prefixed(probabilities, "skill")
         asked, unasked = _split_asked(work.skill_ids, work.asked_skills)
+        always_kept = _always_kept_skills(work.skill_rows)
+        gate_names = _gate_skill_names(work.skill_rows)
         chosen = keep_confident(
             scores,
             asked,
@@ -573,8 +699,14 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
             slack=_KEEP_SLACK,
         )
         if chosen is None:
+            if gate_names and _fully_scored(scores, asked):
+                kept = set(always_kept)
+                return _narrow_skills(request, kept), self._part("skill", [], scores), kept
             return request, self._part("skill", None, scores), None
-        kept = set(chosen) | set(unasked)
+        if gate_names:
+            kept = set(chosen) | set(always_kept)
+        else:
+            kept = set(chosen) | set(unasked) | set(always_kept)
         return _narrow_skills(request, kept), self._part("skill", chosen, scores), kept
 
     def _apply_tools(
