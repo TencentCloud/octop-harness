@@ -75,7 +75,7 @@ def _write_provider_config(
     and writes back to disk.
     """
     # Load existing config or start fresh
-    data = json.loads(config_path.read_text()) if config_path.exists() else {}
+    data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
 
     # Ensure providers section
     if "providers" not in data:
@@ -107,7 +107,7 @@ def _write_provider_config(
 
     # Write config
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(data, indent=2) + "\n")
+    config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _select_from_list(prompt_text: str, options: list[str]) -> int:
