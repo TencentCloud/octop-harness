@@ -164,7 +164,10 @@ def _resolve_single(ref: AtRef, cwd: Path) -> None:
     ref.mime_type = mimetypes.guess_type(str(path))[0] or "text/plain"
 
     if ref.is_image:
-        ref.content = path.read_bytes()
+        try:
+            ref.content = path.read_bytes()
+        except OSError as e:
+            ref.error = str(e)
     else:
         try:
             ref.content = path.read_text(encoding="utf-8", errors="replace")
