@@ -49,5 +49,5 @@ async def brave_search(
     )
     # BraveSearch only exposes ``.run()``; off-load to a thread so the
     # event loop keeps spinning while the HTTP call is in flight.
-    result = await asyncio.get_event_loop().run_in_executor(None, search.run, query)
+    result = await asyncio.get_running_loop().run_in_executor(None, search.run, query)
     return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
