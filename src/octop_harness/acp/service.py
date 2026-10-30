@@ -307,9 +307,9 @@ class ACPService:
         try:
             if conversation.prompt_task is not None and not conversation.prompt_task.done():
                 conversation.prompt_task.cancel()
-                with contextlib.suppress(Exception):
+                with contextlib.suppress((asyncio.CancelledError, RuntimeError)):
                     await conversation.prompt_task
-            with contextlib.suppress(Exception):
+            with contextlib.suppress((OSError, RuntimeError)):
                 await asyncio.wait_for(
                     conversation.conn.close_session(session_id=conversation.acp_session_id),
                     timeout=5.0,
