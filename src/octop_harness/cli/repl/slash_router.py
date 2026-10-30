@@ -87,7 +87,11 @@ async def _list_cli_skills() -> list[dict[str, Any]]:
     if not root.is_dir():
         return []
     rows: list[dict[str, Any]] = []
-    for item in sorted(root.iterdir()):
+    try:
+        items = sorted(root.iterdir())
+    except OSError:
+        items = []
+    for item in items:
         if item.is_dir() and not item.name.startswith("."):
             rows.append({"name": item.name, "description": "", "enabled": True})
     return rows
