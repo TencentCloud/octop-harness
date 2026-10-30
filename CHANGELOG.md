@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add host-neutral inbound plugin registration, cancellation on unload/replacement and optional decision scoring contracts. Hosts supply Gateway execution.
+
 - Pin replies and visible thinking to the configured language, after workspace memory.
 
 ### Fixed

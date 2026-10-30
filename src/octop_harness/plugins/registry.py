@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from octop_harness.plugins.inbound import InboundHandler, validate_inbound_handler
 from octop_harness.plugins.manifest import PluginManifest
 
 ConfigField = dict[str, Any]
 ToolFn = Callable[..., Any]
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,6 +79,7 @@ class LoadedPlugin:
     skills_dir: Path | None = None
     diagnostics: list[str] = field(default_factory=list)
     context: Any | None = None
+    inbound: list[InboundHandler] = field(default_factory=list)
 
 
 class PluginRegistry:
@@ -96,9 +100,12 @@ class PluginRegistry:
         cls._instance = None
 
     def clear(self) -> None:
-        self._plugins.clear()
+        for plugin_id in list(self._plugins):
+            self.unregister(plugin_id)
 
     def register(self, loaded: LoadedPlugin) -> None:
+        for handler in loaded.inbound:
+            validate_inbound_handler(handler)
         if any(reg.plugin_id != loaded.manifest.id for reg in loaded.channels):
             raise ValueError("channel registration owner must match plugin ID")
         kinds = [reg.kind for reg in loaded.channels]
@@ -109,10 +116,23 @@ class PluginRegistry:
                 continue
             if set(kinds).intersection(reg.kind for reg in plugin.channels):
                 raise ValueError("channel kind is already owned by another plugin")
+        old = self._plugins.get(loaded.manifest.id)
+        if old is not None and old is not loaded:
+            self.unregister(loaded.manifest.id)
         self._plugins[loaded.manifest.id] = loaded
 
     def unregister(self, plugin_id: str) -> LoadedPlugin | None:
-        return self._plugins.pop(plugin_id, None)
+        removed = self._plugins.pop(plugin_id, None)
+        if removed is not None:
+            for handler in removed.inbound:
+                try:
+                    handler.close()
+                except Exception:
+                    logger.exception("inbound close failed: plugin=%s", plugin_id)
+        return removed
+
+    def all_inbound(self) -> list[InboundHandler]:
+        return [handler for plugin in self._plugins.values() for handler in plugin.inbound]
 
     def get(self, plugin_id: str) -> LoadedPlugin | None:
         return self._plugins.get(plugin_id)
