@@ -13,7 +13,11 @@ PLACEHOLDER = "__SERVER_NAME__"
 
 
 def list_templates() -> list[str]:
-    return sorted(path.stem for path in TEMPLATE_DIR.glob("*.py"))
+    try:
+        template_paths = list(TEMPLATE_DIR.glob("*.py"))
+    except OSError:
+        template_paths = []
+    return sorted(path.stem for path in template_paths)
 
 
 def render_template(template_name: str, server_name: str) -> str:
