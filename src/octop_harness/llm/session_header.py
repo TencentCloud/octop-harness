@@ -21,8 +21,6 @@ from typing import Any
 
 import httpx
 
-from octop_harness.llm.http_timeout import LLM_HTTP_TIMEOUT
-
 _CURRENT_SESSION_ID: ContextVar[str | None] = ContextVar("harness_session_id", default=None)
 _SESSION_HTTP_CLIENTS_ATTR = "_harness_session_http_clients"
 
@@ -95,13 +93,11 @@ def install_request_hook(client: httpx.Client | httpx.AsyncClient, header_name: 
 def session_http_clients(header_name: str) -> tuple[httpx.Client, httpx.AsyncClient]:
     """Dedicated httpx clients with the session-header hook installed.
 
-    Clients carry :data:`~octop_harness.llm.http_timeout.LLM_HTTP_TIMEOUT` so
-    they match the timeout passed to ChatOpenAI / ChatAnthropic. The SDK
-    request timeout is what actually bounds the call; keep both aligned.
-    ``trust_env=True`` keeps HTTP(S)_PROXY / ALL_PROXY.
+    ``timeout=None`` matches langchain-openai / langchain-anthropic (no 5s
+    httpx default). ``trust_env=True`` keeps HTTP(S)_PROXY / ALL_PROXY.
     """
-    sync_client = httpx.Client(timeout=LLM_HTTP_TIMEOUT, trust_env=True)
-    async_client = httpx.AsyncClient(timeout=LLM_HTTP_TIMEOUT, trust_env=True)
+    sync_client = httpx.Client(timeout=None, trust_env=True)
+    async_client = httpx.AsyncClient(timeout=None, trust_env=True)
     install_request_hook(sync_client, header_name)
     install_request_hook(async_client, header_name)
     return sync_client, async_client
@@ -125,7 +121,7 @@ def close_session_http_clients(instance: Any) -> None:
     with contextlib.suppress(AttributeError, TypeError):
         object.__setattr__(instance, _SESSION_HTTP_CLIENTS_ATTR, None)
     sync_client, async_client = pair
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError):
         sync_client.close()
     aclose = getattr(async_client, "aclose", None)
     if not callable(aclose):
@@ -133,7 +129,7 @@ def close_session_http_clients(instance: Any) -> None:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress((OSError, RuntimeError)):
             asyncio.run(aclose())
 
 
@@ -145,11 +141,11 @@ async def aclose_session_http_clients(instance: Any) -> None:
     with contextlib.suppress(AttributeError, TypeError):
         object.__setattr__(instance, _SESSION_HTTP_CLIENTS_ATTR, None)
     sync_client, async_client = pair
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError):
         sync_client.close()
     aclose = getattr(async_client, "aclose", None)
     if callable(aclose):
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             await aclose()
 
 
