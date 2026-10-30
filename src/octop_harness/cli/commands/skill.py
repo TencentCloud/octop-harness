@@ -34,7 +34,11 @@ def skill_list() -> None:
     table.add_column("Name", style="cyan")
     table.add_column("Path")
 
-    for item in sorted(skills_path.iterdir()):
+    try:
+        items = sorted(skills_path.iterdir())
+    except OSError:
+        items = []
+    for item in items:
         if item.is_dir() and not item.name.startswith("."):
             table.add_row(item.name, str(item))
 
