@@ -106,7 +106,7 @@ def close_memory_resources(memory: Any) -> None:
     """Release the backend connection and the checkpointer handle/pool."""
     pool = getattr(memory, "_checkpointer_pool", None)
     if pool is not None:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             close_fn = getattr(pool, "close", None)
             if callable(close_fn):
                 close_fn()
@@ -116,7 +116,7 @@ def close_memory_resources(memory: Any) -> None:
     if checkpointer is not None:
         cp_conn = getattr(checkpointer, "conn", None)
         if cp_conn is not None and cp_conn is not pool:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError):
                 cp_conn.close()
     backend = getattr(memory, "backend", None)
     close_fn = getattr(backend, "close", None)
