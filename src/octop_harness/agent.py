@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -36,11 +36,7 @@ from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.llm.session_header import session_header_scope
 from octop_harness.mcp import load_mcp_tools, mcp_tool_names, validate_mcp_default_servers
 from octop_harness.memory import MemoryRuntime
-from octop_harness.memory.policy import (
-    manual_documents_locked,
-    memory_system_prompt,
-    render_memory_policy_prompt,
-)
+from octop_harness.memory.policy import manual_documents_locked, render_memory_policy_prompt
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
 from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
@@ -93,27 +89,6 @@ def _tool_name_of(tool: Any) -> str:
         if isinstance(raw, str):
             return raw
     return ""
-
-
-_SUMMARIZATION_FACTORY_LOCK = threading.Lock()
-
-
-@contextlib.contextmanager
-def _patched_summarization_factory(factory: Callable[..., Any]) -> Iterator[None]:
-    """Swap deepagents' summarization factory for one graph build.
-
-    The factory is a process-wide attribute. The lock covers the swap and the
-    build so two agents cannot capture each other's wrapper.
-    """
-    import deepagents.graph as deepagents_graph
-
-    with _SUMMARIZATION_FACTORY_LOCK:
-        previous = deepagents_graph.create_summarization_middleware  # type: ignore[attr-defined]
-        deepagents_graph.create_summarization_middleware = factory  # type: ignore[attr-defined]
-        try:
-            yield
-        finally:
-            deepagents_graph.create_summarization_middleware = previous  # type: ignore[attr-defined]
 
 
 class HarnessAgent:
@@ -1311,7 +1286,7 @@ class HarnessAgent:
                 sources=memory_paths,
                 # AGENTS.md owns memory policy. Suppress upstream's default
                 # edit_file learning instructions, keeping only the wrapper.
-                system_prompt=memory_system_prompt(language=self._config.language),
+                system_prompt="<agent_memory>\n{agent_memory}\n</agent_memory>",
                 add_cache_control=True,
             ),
             *self._build_middleware(),
@@ -1407,7 +1382,7 @@ class HarnessAgent:
         """Close the backend when it exposes a ``close`` hook (idempotent)."""
         close = getattr(self._backend, "close", None)
         if callable(close):
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError):
                 close()
 
     def _build_tools(self) -> list[Any]:
@@ -1786,9 +1761,6 @@ class HarnessAgent:
             f"(e.g. `{work_dir_text.rstrip('/')}/notes.txt`). "
             "Do not treat `/` as the workspace: `/` is the backend root "
             "(often the user home directory on Windows). "
-            "For glob, a relative path such as `.` or `docs` is this workspace, and "
-            "path='/' searches from the backend root. Patterns such as `*`, `**`, "
-            "`**/*`, and `*.md` need that path; do not omit it. "
             "Do not invent host home prefixes like `/home/...` or `/Users/...`. "
             "Leave the workspace only when the user explicitly asks. "
             "For new AI-generated artifacts, prefer a subdirectory such as "
@@ -1854,23 +1826,21 @@ class HarnessAgent:
 
         def _capture_summarization_middleware(*args: Any, **kwargs: Any) -> Any:
             from octop_harness.middleware.memory_recall import count_tokens_with_recall
-            from octop_harness.middleware.summarization_limits import (
-                SUMMARY_INPUT_TOKEN_LIMIT,
-                harden_summarization_middleware,
-            )
 
             # Summarization wraps the memory middleware and sees clean state
             # messages. Include their recall snapshots in its budget/keep math.
             kwargs.setdefault("token_counter", count_tokens_with_recall)
-            # deepagents' factory leaves this unset, so compaction resends the
-            # whole evicted history. Cap it before the summary model sees it.
-            kwargs.setdefault("trim_tokens_to_summarize", SUMMARY_INPUT_TOKEN_LIMIT)
-            mw = harden_summarization_middleware(orig_factory(*args, **kwargs))
+            mw = orig_factory(*args, **kwargs)
             captured.append(mw)
             return mw
 
-        with _patched_summarization_factory(_capture_summarization_middleware):
+        deepagents_graph.create_summarization_middleware = (  # type: ignore[attr-defined]
+            _capture_summarization_middleware
+        )
+        try:
             graph = deepagents.create_deep_agent(**kwargs)
+        finally:
+            deepagents_graph.create_summarization_middleware = orig_factory  # type: ignore[attr-defined]
         if captured:
             self._summarization_mw = captured[-1]
         return graph
@@ -2017,23 +1987,23 @@ def _sync_close_sqlite_connection(conn: Any) -> None:
     """
     raw = getattr(conn, "_connection", None)
     if raw is not None:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             raw.close()
     stop_fn = getattr(conn, "stop", None)
     if callable(stop_fn):
-        with contextlib.suppress(Exception):
+        with contextlib.suppress((OSError, RuntimeError)):
             fut = stop_fn()
             if fut is not None:
                 try:
                     asyncio.get_running_loop()
                 except RuntimeError:
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress((OSError, RuntimeError)):
                         asyncio.run(fut)
     if raw is None:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress((OSError, RuntimeError)):
                 asyncio.run(conn.close())
 
 
