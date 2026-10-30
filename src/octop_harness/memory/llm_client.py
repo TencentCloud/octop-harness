@@ -15,6 +15,9 @@ Extract uses **one** model, not a light/heavy pair. Resolution order:
 
 ``tier`` only changes the timeout. If a ref fails (expired subscription,
 400, missing model), ``call_llm`` tries the next one in that list.
+When a provider rejects an explicit temperature, retry that model once
+without the override before falling back. Transport retries keep their
+own bounded budget and reuse the corrected request options.
 
 Failure discipline
 ------------------
@@ -234,21 +237,33 @@ class HarnessAgentLLMClient:
         output_limit = getattr(model, "_harness_max_output_tokens", None)
         if max_tokens is not None and isinstance(output_limit, int) and output_limit > 0:
             max_tokens = min(max_tokens, output_limit)
-        bound_model = bind_call_options(
-            model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            response_format=response_format,
-            timeout_s=self._light_timeout_s if tier == "light" else self._heavy_timeout_s,
-            extra_body=_aux_extra_body(ref, self._thinking, extra_body),
-        )
         messages = build_text_messages(prompt, system=system)
 
-        for attempt in range(self._max_retries + 1):
+        attempt = 0
+        while True:
+            bound_model = bind_call_options(
+                model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                response_format=response_format,
+                timeout_s=self._light_timeout_s if tier == "light" else self._heavy_timeout_s,
+                extra_body=_aux_extra_body(ref, self._thinking, extra_body),
+            )
             try:
-                response = bound_model.invoke(messages)
+                response = bound_model.invoke(messages, config={"callbacks": []})
                 return stringify_content(response.content)
             except Exception as exc:
+                if temperature is not None and _is_temperature_rejection(exc):
+                    logger.info(
+                        "Memory LLM model=%s rejected temperature=%s (tier=%s); retrying without the override",
+                        ref,
+                        temperature,
+                        tier,
+                    )
+                    # Rebind the original model so the rejected value is not
+                    # inherited. None also prevents a second parameter retry.
+                    temperature = None
+                    continue
                 if attempt < self._max_retries and _is_transient(exc):
                     delay = min(60.0, self._retry_backoff_s * 2**attempt)
                     logger.info(
@@ -259,12 +274,21 @@ class HarnessAgentLLMClient:
                         type(exc).__name__,
                     )
                     time.sleep(delay)
+                    attempt += 1
                     continue
                 detail = str(exc).strip() or type(exc).__name__
                 raise LLMClientError(
                     f"chat model {ref!r} failed for tier={tier!r}: {type(exc).__name__}: {detail}",
                 ) from exc
-        raise AssertionError("unreachable")
+
+
+def _is_temperature_rejection(exc: BaseException) -> bool:
+    """Recognize parameter errors without retrying auth or server failures.
+
+    Some adapters raise plain exceptions without an HTTP status. For SDK
+    HTTP errors, only bad-request / validation responses qualify.
+    """
+    return getattr(exc, "status_code", None) in (None, 400, 422) and "temperature" in str(exc).lower()
 
 
 def _is_transient(exc: BaseException) -> bool:

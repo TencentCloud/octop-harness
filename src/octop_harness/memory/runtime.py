@@ -165,6 +165,7 @@ class MemoryRuntime:
         # recompile used to leak one more maintenance beat.
         previous = self._middleware
         if previous is not None and self._middleware_kwargs == kwargs:
+            self._bind_manual_review_scheduler(previous)
             return previous
         self._middleware = MemoryMiddleware(**kwargs)
         self._middleware_kwargs = kwargs
@@ -173,7 +174,15 @@ class MemoryRuntime:
             # letting them run beside the new ones.
             with contextlib.suppress(Exception):
                 previous.shutdown()
+        self._bind_manual_review_scheduler(self._middleware)
         return self._middleware
+
+    def _bind_manual_review_scheduler(self, middleware: MemoryMiddleware) -> None:
+        """Point saves at this middleware's background review, when the service supports it."""
+        service = self._service
+        setter = getattr(service, "set_manual_review_scheduler", None) if service is not None else None
+        if setter is not None:
+            setter(middleware.schedule_manual_review)
 
     def end_session(
         self,

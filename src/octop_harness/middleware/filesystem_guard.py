@@ -217,6 +217,68 @@ def _check_fs_permission(
     return "allow"
 
 
+_BASENAME_WIDE_GLOBS = frozenset({"*", "**", "**/*"})
+_GLOB_PATH_MESSAGE = (
+    "Error: glob pattern {pattern!r} needs an explicit path. "
+    "A relative path such as '.' is this workspace; path='/' searches from the backend root."
+)
+_GLOB_ESCAPE_MESSAGE = (
+    "Error: glob path {path!r} leaves the workspace. "
+    "Use a workspace-relative path, or path='/' to search from the backend root."
+)
+
+
+def _basename_wide_glob(pattern: str) -> bool:
+    """True when omitting ``path`` would walk every depth from the backend root."""
+    normalized = pattern.strip().replace("\\", "/")
+    return normalized in _BASENAME_WIDE_GLOBS or "/" not in normalized
+
+
+def _explicit_glob_root(path: str) -> bool:
+    """``/`` and other absolute paths choose a search root on purpose."""
+    return path.strip().replace("\\", "/").startswith("/") or is_windows_absolute_path(path)
+
+
+def _relative_glob_leaves_workspace(path: str, workspace: BackendWorkspace) -> bool:
+    try:
+        workspace_root = Path(workspace.resolve_path(".")).resolve()
+        target = Path(workspace.resolve_path(path)).resolve()
+        target.relative_to(workspace_root)
+    except (OSError, PermissionError, ValueError):
+        return True
+    return False
+
+
+def unbounded_glob_block_reason(
+    tool_name: str,
+    params: dict[str, Any],
+    *,
+    workspace: BackendWorkspace | None = None,
+) -> str | None:
+    """Require an explicit search root for basename-wide glob patterns.
+
+    A pattern without ``/`` matches the file name at every depth. With no path,
+    deepagents starts that walk at the backend root. A relative path stays in
+    the workspace; ``/`` is an explicit backend-root search. A pattern that
+    already contains ``/``, such as ``**/*.md``, is root-relative and is left
+    to the backend.
+    """
+    pattern = params.get("pattern")
+    if _tool_base_name(tool_name) != "glob" or not isinstance(pattern, str):
+        return None
+    normalized = pattern.strip()
+    if not _basename_wide_glob(normalized):
+        return None
+    path = params.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return _GLOB_PATH_MESSAGE.format(pattern=normalized)
+    if _explicit_glob_root(path):
+        return None
+    if workspace is not None and _relative_glob_leaves_workspace(path, workspace):
+        return _GLOB_ESCAPE_MESSAGE.format(path=path.strip())
+    return None
+
+
 def filesystem_guard_block_reason(
     permissions: list[FilesystemPermission],
     *,
@@ -375,10 +437,14 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         tool_name, call_id = _tool_call_meta(request)
         raw_args: Any = request.tool_call.get("args") or {}
         params: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
-        reason = self._memory_write_block_reason(tool_name, params) or filesystem_guard_block_reason(
-            self._permissions,
-            tool_name=tool_name,
-            params=params,
+        reason = (
+            unbounded_glob_block_reason(tool_name, params, workspace=self._workspace)
+            or self._memory_write_block_reason(tool_name, params)
+            or filesystem_guard_block_reason(
+                self._permissions,
+                tool_name=tool_name,
+                params=params,
+            )
         )
         if reason is None:
             return None
@@ -449,4 +515,5 @@ __all__ = [
     "is_windows_absolute_path",
     "path_outside_root_tool_message",
     "rewrite_legacy_windows_fs_path",
+    "unbounded_glob_block_reason",
 ]

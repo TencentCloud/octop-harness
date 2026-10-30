@@ -116,7 +116,8 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
 
         Use when the user asks you to remember something. Store one concise
         fact per call; only confirm remembering after this tool succeeds.
-        MEMORY.md and USER.md are user-maintained and must be left unchanged.
+        Do not read USER.md or MEMORY.md to save a fact. Those files stay
+        in the session snapshot, and document reconciliation runs later.
 
         Args:
             content: The fact to remember, preserving its scope and qualifiers.
@@ -125,20 +126,10 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
         if not content.strip():
             return "memory_save failed: content is empty"
         try:
-            saved = service.save(content.strip(), topic=topic)
+            service.save(content.strip(), topic=topic)
         except Exception as exc:  # pragma: no cover - fail softly at the tool boundary; pylint: disable=broad-except
             logger.warning("memory_save failed: %s", exc, exc_info=True)
             return f"memory_save failed: {exc.__class__.__name__}"
-        review = saved.metadata.get("manual_document_review")
-        if saved.metadata.get("manual_document_conflict"):
-            return (
-                "This fact conflicts with user-maintained USER.md/MEMORY.md and was moved to a review candidate. "
-                "Tell the user about the conflict; do not claim it is confirmed. Manual documents take priority."
-            )
-        if isinstance(review, dict) and review.get("status") != "complete":
-            return (
-                "Memory saved to octop-memory, but manual-document review is incomplete. Tell the user it needs review."
-            )
         return "Memory saved to octop-memory."
 
     return [memory_search, memory_get, memory_save]  # type: ignore[list-item]

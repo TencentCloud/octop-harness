@@ -9,22 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add `ManagedMCPClient` for persistent, task-owned MCP sessions and resources.
-- Add optional `you` web-search provider (`you_search`). Explicit `["you"]` works without an API key (free tier, 100/day per IP); set `YDC_API_KEY` for the keyed endpoint and higher limits. Joins `auto` only when `YDC_API_KEY` is set, so the default tool set is unchanged.
+- Pin replies and visible thinking to the configured language, after workspace memory.
 
 ### Fixed
 
-- Preserve object, array and enum arguments in MCP tool schemas.
-- Retain paused request identity, tool selections and locale across HITL resume and nested approvals, isolated by thread.
+- Retry memory model calls once without an explicit temperature when the provider rejects it, including auxiliary-model fallbacks, while preserving request options and bounded transport retries (TencentCloud/Octop#835).
+- Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
+- Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
+- LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic/Bedrock; OpenAI shape 600s request / 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
 
 ### 修复
 
-- 提前结束 agent 流（例如 human-in-the-loop 暂停）时关闭内层异步生成器，避免 `harness_session_id` 在另一个 context 里 reset 并打出 `ContextVar ... created in a different Context`（#89）。
 - 修复 `MCPToolMiddleware` 持有 server 名单构造期快照的问题：改为每轮实时读取 `mcp_server_configs`，运行时动态挂载（`append_mcp_tools` 后原地写入 config）的 MCP server 不再被每轮工具过滤清零；默认路径（未选 MCP 的 turn）行为不变。`server_names` 参数放宽为 `Mapping | AbstractSet` 以支持活引用（#93）。
 
 ### 变更
 
-- 记忆规则从工作区 `AGENTS.md` 模板移到编译期系统提示。结构化记忆开启时，Agent 用 `memory_save`，`USER.md` / `MEMORY.md` 只读；关闭时改为直接编辑这两份文件，删除和移动仍被拦住。`manual_document_policy` 可改成始终由用户维护，或即使记忆开启也允许 Agent 修改。已有工作区里的旧记忆段保留，系统提示优先于它们。
+- `HttpDecisionClient` 在非 strict 模式下，传输或 HTTP 失败重试后抛出 `DecisionRequestError`，不再返回空结果。成功但解析不出概率时仍返回空 map。
+
+## [1.0.5] - 2026-10-24
+
+### 新增
+
+- 可选网页搜索：you.com、腾讯元宝 SearchPro、DeepSeek Search。
+- 新增 `ManagedMCPClient`，支持持久 MCP 会话。
+- 刷新腾讯云 HAI 预设，DeepSeek Flash 标为多模态。
+
+### 修复
+
+- MCP 工具失败改为工具错误结果，本轮继续，并保留参数 schema。
+- HITL 恢复时保留请求身份、工具选择和语言。
+- 决策筛选保留发文件、浏览和截图工具。
+- 提前结束 agent 流时关闭内层生成器，避免 ContextVar 报错。
+- 修复中文 Windows 下 shell 的 UTF-8 输出被丢弃。
+
+### 变更
+
+- 记忆开关决定 `USER.md` / `MEMORY.md` 只读还是可编辑，并可用 `manual_document_policy` 覆盖。
 
 ## [1.0.4] - 2026-10-16
 
@@ -57,10 +77,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ChatGPT Codex 端点使用无状态流式 Responses 请求，将主系统提示词映射到 instructions，后续系统消息保留为 developer；显式 instructions 原样保留，并保留多轮工具历史；将 langchain-openai 最低版本提高至 1.3.3，避免无状态历史引用未存储条目。
 - 减少启动和对话过程中的重复诊断日志，保留需要关注的错误与告警。
-
-### 修复
-
-- shell 后端不再按宿主 locale 解码子进程输出：中文 Windows（cp936）下 `execute` 的 UTF-8 输出会被静默丢弃（`<no output>` + 退出码 0），现改为按 UTF-8 → 宿主 locale → GBK 依次解码，全都不匹配时才降级为替换字符（TencentCloud/Octop#1959）。
 
 ## [1.0.2] - 2026-10-09
 
