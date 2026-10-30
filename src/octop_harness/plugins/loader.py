@@ -19,8 +19,12 @@ logger = logging.getLogger(__name__)
 def discover_plugin_dirs(plugins_root: Path) -> list[Path]:
     if not plugins_root.is_dir():
         return []
+    try:
+        items = sorted(plugins_root.iterdir())
+    except OSError:
+        return []
     out: list[Path] = []
-    for item in sorted(plugins_root.iterdir()):
+    for item in items:
         if item.is_dir() and (item / "plugin.yaml").is_file():
             out.append(item)
     return out
@@ -33,12 +37,14 @@ def _install_requires(plugin_dir: Path, requires: tuple[str, ...]) -> None:
             [sys.executable, "-m", "pip", "install", "-r", str(req_file)],
             check=False,
             capture_output=True,
+            timeout=600,
         )
     if requires:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", *requires],
             check=False,
             capture_output=True,
+            timeout=600,
         )
 
 
