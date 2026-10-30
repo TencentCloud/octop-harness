@@ -810,7 +810,12 @@ class BackendWorkspace:
             if not local.is_dir():
                 return None
             entries: list[dict[str, Any]] = []
-            for child in sorted(local.iterdir()):
+            try:
+                children = sorted(local.iterdir())
+            except OSError as exc:
+                logger.warning("BackendWorkspace.list_dir could not read %s: %s", local, exc)
+                return None
+            for child in children:
                 # Always workspace-relative (``skills/demo``), never basename-only —
                 # the dashboard maps entry paths to ``/skills/demo`` API calls.
                 rel = child.relative_to(self._workspace_dir).as_posix()
