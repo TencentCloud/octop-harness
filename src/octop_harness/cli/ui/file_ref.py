@@ -155,7 +155,11 @@ def _resolve_single(ref: AtRef, cwd: Path) -> None:
         return
 
     ref.resolved_path = path
-    ref.size = path.stat().st_size
+    try:
+        ref.size = path.stat().st_size
+    except OSError as e:
+        ref.error = str(e)
+        return
 
     if ref.size > MAX_INLINE_BYTES:
         ref.error = f"file too large ({ref.size // 1024}KB > {MAX_INLINE_BYTES // 1024}KB)"
