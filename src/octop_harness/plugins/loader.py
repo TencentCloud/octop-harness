@@ -33,12 +33,14 @@ def _install_requires(plugin_dir: Path, requires: tuple[str, ...]) -> None:
             [sys.executable, "-m", "pip", "install", "-r", str(req_file)],
             check=False,
             capture_output=True,
+            timeout=600,
         )
     if requires:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", *requires],
             check=False,
             capture_output=True,
+            timeout=600,
         )
 
 
