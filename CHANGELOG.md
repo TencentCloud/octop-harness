@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
 - LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic/Bedrock; OpenAI shape 600s request / 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
 
+### 修复
+
+- 修复 `MCPToolMiddleware` 持有 server 名单构造期快照的问题：改为每轮实时读取 `mcp_server_configs`，运行时动态挂载（`append_mcp_tools` 后原地写入 config）的 MCP server 不再被每轮工具过滤清零；默认路径（未选 MCP 的 turn）行为不变。`server_names` 参数放宽为 `Mapping | AbstractSet` 以支持活引用（#93）。
+
 ### 变更
 
 - `HttpDecisionClient` 在非 strict 模式下，传输或 HTTP 失败重试后抛出 `DecisionRequestError`，不再返回空结果。成功但解析不出概率时仍返回空 map。
