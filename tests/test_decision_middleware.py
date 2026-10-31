@@ -75,10 +75,12 @@ def _tool(name: str, description: str = "") -> MagicMock:
 
 
 def _note(request: ModelRequest) -> str:
-    if not request.messages:
-        return ""
-    content = request.messages[-1].content
-    return content if isinstance(content, str) else str(content)
+    for msg in reversed(request.messages or []):
+        content = msg.content
+        text = content if isinstance(content, str) else str(content)
+        if text.lstrip().startswith(("[本轮说明]", "[turn note]")):
+            return text
+    return ""
 
 
 def _config(**overrides: Any) -> DecisionConfig:
@@ -1062,6 +1064,107 @@ def test_turn_selection_does_not_change_the_cached_prefix() -> None:
     assert scorer.calls == 2
 
 
+def test_unscored_turn_keeps_the_same_cached_prefix() -> None:
+    rows = [{"name": f"skill-{index}", "description": "zzz"} for index in range(16)]
+    rows.append({"name": "pdf", "description": "读取 pdf"})
+    bullets = "\n".join(f"- **{row['name']}**: {row['description']}" for row in rows)
+    prompt = f"**Available Skills:**\n\n{bullets}\n\n**How to Use Skills (Progressive Disclosure):**\ntail\n"
+    tools = [_tool("read_file", "读取文件")]
+    tools.extend(_tool(f"misc-{index}", "zzz") for index in range(16))
+    tools.append(_tool("read_pdf", "读取 pdf"))
+    scorer = _Scorer({"skill:pdf": 0.95, "tool:read_pdf": 0.95})
+    mw = DecisionMiddleware(config=_config(team=False, tool_min_count=2), scorer=scorer)
+
+    def make(text: str) -> ModelRequest:
+        return ModelRequest(
+            model=MagicMock(),
+            messages=[HumanMessage(content=text)],
+            system_message=SystemMessage(content=prompt),
+            tool_choice=None,
+            tools=list(tools),
+            response_format=None,
+            state={"skills_metadata": [dict(row) for row in rows]},
+            runtime=MagicMock(),
+            model_settings={},
+        )
+
+    missed = mw.wrap_model_call(make("你好"), lambda item: item)
+    matched = mw.wrap_model_call(make("读 pdf"), lambda item: item)
+    assert missed.system_message.content == matched.system_message.content
+    assert "tail" in missed.system_message.content
+    assert "- **pdf**:" not in missed.system_message.content
+    assert (
+        [tool.name for tool in missed.tools]
+        == [tool.name for tool in matched.tools]
+        == [
+            "read_file",
+            "call_deferred_tool",
+        ]
+    )
+    assert _note(missed) == ""
+    assert "skill-0" not in _note(matched) and "misc-0" not in _note(matched)
+    assert "pdf" in _note(matched) and "read_pdf" in _note(matched)
+    assert scorer.calls == 1
+
+
+def test_turn_notes_merge_into_one_message() -> None:
+    from octop_harness.middleware.turn_note import insert_turn_note, is_turn_note
+
+    user = HumanMessage(content="[turn note]\nhi")
+    assert not is_turn_note(user)
+    once = insert_turn_note([user, AIMessage(content="先看一下")], "[turn note]\nroster")
+    twice = insert_turn_note(once, "[本轮说明]\n技能:\npdf")
+    notes = [msg for msg in twice if is_turn_note(msg)]
+    assert len(notes) == 1
+    assert notes[0] is not user
+    assert notes[0].content.startswith("[turn note]")
+    assert "roster" in notes[0].content and "pdf" in notes[0].content
+    assert user.content == "[turn note]\nhi"
+    assert isinstance(twice[2], AIMessage)
+
+
+def test_user_message_prefixed_like_a_turn_note_is_still_scored() -> None:
+    from octop_harness.middleware.turn_note import is_turn_note
+
+    tools = [_tool("read_file", "读取文件"), *(_tool(f"misc_{index}", "unrelated") for index in range(8))]
+    tools.append(_tool("read_pdf", "读取 pdf"))
+    scorer = _Scorer({"tool:read_pdf": 0.95})
+    mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
+    user = HumanMessage(content="[turn note]\n读取 pdf")
+    out = mw.wrap_model_call(_request(tools=tools, messages=[user]), lambda item: item)
+    assert out.messages[0] is user
+    assert not is_turn_note(out.messages[0])
+    assert is_turn_note(out.messages[1])
+    assert "read_pdf" in str(out.messages[1].content)
+    assert scorer.calls == 1
+
+
+def test_turn_note_stays_after_the_user_message() -> None:
+    tools = [_tool("read_file", "读取文件"), *(_tool(f"misc_{index}", "unrelated") for index in range(8))]
+    tools.append(_tool("read_pdf", "读取 pdf"))
+    scorer = _Scorer({"tool:read_pdf": 0.95})
+    mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
+    user = HumanMessage(content="读取 pdf")
+    first = mw.wrap_model_call(_request(tools=tools, messages=[user]), lambda item: item)
+    second = mw.wrap_model_call(
+        _request(
+            tools=tools,
+            messages=[
+                user,
+                AIMessage(content="先看一下"),
+                ToolMessage(content="ok", tool_call_id="c1"),
+            ],
+        ),
+        lambda item: item,
+    )
+    assert first.messages[0].content == "读取 pdf"
+    assert first.messages[1].content == second.messages[1].content
+    assert "read_pdf" in second.messages[1].content
+    assert isinstance(second.messages[2], AIMessage)
+    assert isinstance(second.messages[3], ToolMessage)
+    assert scorer.calls == 1
+
+
 def test_deferred_tool_call_forwards_to_the_selected_tool() -> None:
     tools = [_tool(f"misc_{index}", "unrelated") for index in range(8)]
     real = _tool("read_pdf", "读取 pdf")
@@ -1111,3 +1214,67 @@ def test_deferred_tool_call_forwards_to_the_selected_tool() -> None:
     )
     assert isinstance(missing, ToolMessage)
     assert missing.status == "error"
+
+
+def test_turn_note_points_at_the_scanned_skill_path_and_direct_file_tools() -> None:
+    prompt = (
+        "**Available Skills:**\n"
+        "\n"
+        "- **daily-hot-news**: 抓取热搜\n"
+        "  -> Read `/.octop/workspaces/C10WX7/skills/daily-hot-news/SKILL.md` for full instructions\n"
+        "\n"
+        "**How to Use Skills (Progressive Disclosure):**\n"
+    )
+    scanned = "/.octop/workspaces/C10WX7/.octop/skills/daily-hot-news/SKILL.md"
+    state = {
+        "skills_metadata": [
+            {"name": "daily-hot-news", "description": "抓取热搜", "path": scanned},
+            {"name": "xlsx", "description": "表格", "path": "/.octop/workspaces/C10WX7/.octop/skills/xlsx/SKILL.md"},
+        ]
+    }
+    tools = [_tool("read_file", "读取文件"), *_tool_batch(8)]
+    mw = DecisionMiddleware(
+        config=_config(team=False, tool_min_count=2),
+        scorer=_Scorer({"skill:daily-hot-news": 0.98, "skill:xlsx": 0.1, "tool:misc_0": 0.95}),
+    )
+    request = ModelRequest(
+        model=MagicMock(),
+        messages=[HumanMessage(content="看热搜")],
+        system_message=SystemMessage(content=prompt),
+        tool_choice=None,
+        tools=tools,
+        response_format=None,
+        state=state,
+        runtime=MagicMock(),
+        model_settings={},
+    )
+    out = mw.wrap_model_call(request, lambda item: item)
+    note = _note(out)
+    assert f"直接调用 read_file 读取 `{scanned}`" in note
+    assert "/.octop/workspaces/C10WX7/skills/daily-hot-news/SKILL.md" not in note
+    assert "xlsx" not in note
+    assert "下面列出的工具才用 call_deferred_tool" in note
+    assert "read_file、ls、glob、grep、execute 固定在工具列表里" in note
+    assert "misc_0" in note
+    assert [tool.name for tool in out.tools if tool.name == "read_file"] == ["read_file"]
+
+    blocked = mw.wrap_tool_call(
+        ToolCallRequest(
+            tool_call={
+                "name": "call_deferred_tool",
+                "args": {"name": "read_file", "arguments": {"file_path": scanned}},
+                "id": "c-read",
+            },
+            tool=None,  # type: ignore[arg-type]
+            state={},  # type: ignore[arg-type]
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        lambda item: ToolMessage(content="should-not-run", tool_call_id="c-read"),
+    )
+    assert isinstance(blocked, ToolMessage)
+    assert blocked.status == "error"
+    assert "直接调用" in str(blocked.content)
+
+
+def _tool_batch(count: int) -> list[Any]:
+    return [_tool(f"misc_{index}", "unrelated") for index in range(count)]

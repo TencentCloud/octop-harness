@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Awaitable, Callable
+import threading
+from collections.abc import Awaitable, Callable, Sequence
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 
 from deepagents.middleware.skills import SkillMetadata
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
     from octop_harness.config import HarnessAgentConfig
 
 logger = logging.getLogger(__name__)
+_SKILLS_LOCATION_LOCK = threading.Lock()
 
 _FS_SKILL_TOOLS = frozenset({"ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete"})
 _SHELL_SKILL_TOOLS = frozenset({"execute", "bash", "shell"})
@@ -42,6 +45,59 @@ def _skill_dir_markers(system_files_path: str = "") -> tuple[str, ...]:
         f"/{prefix}/_builtin_skills/",
         *_BASE_SKILL_DIR_MARKERS,
     )
+
+
+def _is_canonical_skills_root(path: str) -> bool:
+    """True for the ``.octop/skills`` directory, not legacy ``skills/`` or builtins."""
+    parts = PurePosixPath(path.replace("\\", "/").rstrip("/")).parts
+    return len(parts) >= 2 and parts[-2] == ".octop" and parts[-1] == "skills"
+
+
+def format_skills_locations(sources: Sequence[str], labels: Sequence[str]) -> str:
+    """Location lines for the skills system prompt.
+
+    Load order is unchanged: the last source still wins a name collision and
+    keeps the ``(higher priority)`` label. ``.octop/skills`` is listed first
+    because the model reads the list from the top.
+    """
+    last = len(sources) - 1
+    rows: list[tuple[bool, str]] = []
+    for index, (source_path, label) in enumerate(zip(sources, labels, strict=True)):
+        suffix = " (higher priority)" if index == last else ""
+        line = f"**{label} Skills**: `{source_path}`{suffix}"
+        rows.append((_is_canonical_skills_root(source_path), line))
+    ordered = [line for canonical, line in rows if canonical]
+    ordered.extend(line for canonical, line in rows if not canonical)
+    return "\n".join(ordered)
+
+
+def install_canonical_skill_location_order() -> None:
+    """Show ``.octop/skills`` first when deepagents renders skill locations.
+
+    deepagents 0.7.x writes this list in ``SkillsMiddleware._format_skills_locations``
+    and exposes no ordering hook. The replacement is process-wide and idempotent.
+    The lock covers the swap. The upstream method is kept and used when this
+    formatter fails or the call no longer matches that 0.7.x signature.
+    """
+    from deepagents.middleware.skills import SkillsMiddleware
+
+    with _SKILLS_LOCATION_LOCK:
+        current = SkillsMiddleware._format_skills_locations
+        if getattr(current, "_octop_canonical_first", False) or not callable(current):
+            return
+
+        def _format(self: Any, *args: Any, **kwargs: Any) -> str:
+            try:
+                if args or kwargs:
+                    raise TypeError("skills location formatter signature changed")
+                return format_skills_locations(self.sources, self.source_labels)
+            except Exception:
+                logger.debug("canonical skill location order failed; using upstream format", exc_info=True)
+                return current(self, *args, **kwargs)
+
+        _format._octop_canonical_first = True  # type: ignore[attr-defined]
+        _format._octop_original = current  # type: ignore[attr-defined]
+        SkillsMiddleware._format_skills_locations = _format  # type: ignore[method-assign]
 
 
 def _tool_base_name(name: str) -> str:

@@ -164,6 +164,9 @@ class BubbledLocalShellBackend(HarnessLocalShellBackend):
         )
         self._bwrap_path: str | None = bwrap_path
         self._system_files_path = normalize_system_files_path(system_files_path)
+        # File tools and the jailed shell both use rootfs paths. Relative
+        # paths stay under ``/`` instead of the host workspace directory.
+        self.virtual_tool_root = True
 
     def _skill_extra_binds(self) -> list[tuple[str, str]]:
         if self._workspace_dir is None:

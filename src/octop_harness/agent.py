@@ -1597,8 +1597,8 @@ class HarnessAgent:
         if cfg.middleware:
             chain.extend(cfg.middleware)
 
-        # After other prompt injectors so the optional ``@`` roster is a suffix
-        # (stable prefix stays cacheable). Before tools_filter so peer tools
+        # The optional ``@`` roster is a turn note, so the system prompt stays
+        # cacheable. Before tools_filter so peer tools
         # can still be hidden via ``tools_disabled``.
         if cfg.team_enabled and self._team_manager is not None:
             from octop_harness.middleware.peer import PeerAgentMiddleware
@@ -1776,7 +1776,7 @@ class HarnessAgent:
         }
         base_prompt = cfg.system_prompt.rstrip() if cfg.system_prompt else ""
         work_dir = self._agent_visible_workspace_dir()
-        # Soft policy for the model only — no tool rewrite / resolve remapping.
+        # Model guidance for the stable workspace default and opt-in document bases.
         work_dir_text = work_dir.as_posix()
         directive = (
             f"Your working directory is {work_dir_text}. "
@@ -1784,6 +1784,11 @@ class HarnessAgent:
             "edit_file, glob, grep) inside this workspace — prefer relative paths "
             f"such as `.` or `SOUL.md`, or paths under {work_dir_text} "
             f"(e.g. `{work_dir_text.rstrip('/')}/notes.txt`). "
+            "Relative filesystem paths resolve from this workspace by default. "
+            "When following a relative reference from a file, pass that file's "
+            "containing absolute directory as `base_dir`; the runtime consumes "
+            "that argument before the filesystem tool runs. For execute, pass "
+            "that directory as `cwd` when a command must run beside the file. "
             "Do not treat `/` as the workspace: `/` is the backend root "
             "(often the user home directory on Windows). "
             "For glob, a relative path such as `.` or `docs` is this workspace, and "
@@ -1844,6 +1849,9 @@ class HarnessAgent:
         # Capture the main-agent SummarizationMiddleware (last factory call)
         # so ``/compact`` can retune keep on that instance (same backend /
         # session id / apply-event) instead of building a second MW.
+        from octop_harness.middleware.skill_filter import install_canonical_skill_location_order
+
+        install_canonical_skill_location_order()
         import deepagents.graph as deepagents_graph
 
         orig_factory = getattr(deepagents_graph, "create_summarization_middleware", None)

@@ -333,6 +333,70 @@ class TestReasoningContentRoundTrip:
         assert len(assistants) == 1
         assert assistants[0]["reasoning_content"] == "thinking again"
 
+    def test_payload_drops_binary_file_blocks(self) -> None:
+        """Office bytes must not be serialized as OpenAI ``file_data`` parts."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        instance = self._build()
+        original = [
+            {
+                "type": "file",
+                "base64": "UEsDBBQAAAAI-pptx",
+                "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "filename": "iron-man.pptx",
+            }
+        ]
+        tool = ToolMessage(content=list(original), tool_call_id="call_1")
+        messages = [
+            HumanMessage(content="这个文件啥内容"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "read_file",
+                        "args": {"file_path": "inbound/iron-man.pptx"},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            tool,
+        ]
+
+        payload = instance._get_request_payload(messages)
+
+        blob = str(payload["messages"])
+        assert "UEsDBBQAAAAI-pptx" not in blob
+        assert "file_data" not in blob
+        assert "not sent to the model" in blob
+        assert tool.content == original
+
+    def test_payload_keeps_image_blocks_while_dropping_files(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        provider = ProviderConfig(
+            id="example",
+            base_url="https://api.example.com/v1",
+            api_key="sk-x",
+            protocol="openai",
+        )
+        instance = build_chat_model(provider, ModelConfig(id="vision", input=["text", "image"]))
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": "see"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,aaaa"}},
+                {"type": "file", "base64": "UEsDBBQAAAAI-pptx", "mime_type": "application/pdf"},
+            ]
+        )
+
+        payload = instance._get_request_payload([message])
+
+        content = payload["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert any(block.get("type") == "image_url" for block in content if isinstance(block, dict))
+        assert all(block.get("type") != "file" for block in content if isinstance(block, dict))
+        assert message.content[2]["type"] == "file"
+
     def test_payload_unchanged_when_reasoning_content_absent(self) -> None:
         """No ``reasoning_content`` injected for normal AIMessages."""
         from langchain_core.messages import AIMessage, HumanMessage

@@ -75,7 +75,9 @@ def test_ask_filters_write_and_keeps_read() -> None:
     names = [getattr(t, "name", None) for t in (out.tools or [])]
     assert names == ["read_file", "web_fetch"]
     assert out.state.get("skills_metadata") == []
-    assert "Ask mode" in str(out.system_message.content)
+    assert out.system_message is not None
+    assert out.system_message.content == "base"
+    assert "Ask mode" in str(out.messages[-1].content)
 
 
 def test_ask_allows_host_read_tools() -> None:
@@ -103,7 +105,8 @@ def test_plan_keeps_write_file_and_blocks_execute() -> None:
         out = apply_conversation_mode_to_request(request)
     names = [getattr(t, "name", None) for t in (out.tools or [])]
     assert names == ["write_file", "edit_file", "read_file"]
-    assert "Plan mode" in str(out.system_message.content)
+    assert out.system_message is None
+    assert "Plan mode" in str(out.messages[-1].content)
 
 
 def test_craft_passthrough() -> None:

@@ -10,12 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Pin replies and visible thinking to the configured language, after workspace memory.
+- Filesystem tools accept workspace-relative paths. `base_dir` resolves a path from a document directory, and `execute` accepts `cwd` for that command only.
 
 ### Fixed
 
+- Per-turn mode hints, peer rosters, and decision shortlists sit after the user message, so the system prompt and core tool list stay cacheable. A user message that starts with the turn-note label stays user text.
+- OpenAI-compatible requests drop inline office and PDF file blocks. Images stay.
 - Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
 - Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
 - LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic/Bedrock; OpenAI shape 600s request / 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
+
+### Changed
+
+- `.octop/skills` is listed first in the skills location prompt. The last source still wins a name collision.
+- An unscored decision turn keeps the same cached system prompt and core tool list. If scoring cannot be reached, the full catalog stays in the turn note.
 
 ### 变更
 
