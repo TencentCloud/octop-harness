@@ -6,7 +6,7 @@ import asyncio
 import atexit
 import contextlib
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -351,6 +351,21 @@ def close_acp_service(service_key: str) -> None:
         _schedule_close(previous)
 
 
+_CLOSE_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _spawn_close(loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, None]) -> None:
+    """Schedule *coro* on *loop* keeping a strong reference until it finishes.
+
+    ``asyncio`` only keeps a weak reference to a running task, so a bare
+    ``loop.create_task(...)`` can be garbage-collected mid-flight -- most
+    visibly at interpreter shutdown, when the close would never run.
+    """
+    task = loop.create_task(coro)
+    _CLOSE_TASKS.add(task)
+    task.add_done_callback(_CLOSE_TASKS.discard)
+
+
 def _schedule_close(service: ACPService) -> None:
     try:
         loop = asyncio.get_running_loop()
@@ -358,7 +373,7 @@ def _schedule_close(service: ACPService) -> None:
         loop = None
     if loop is not None and not loop.is_closed():
         if loop.is_running():
-            loop.create_task(service.close_all_sessions())
+            _spawn_close(loop, service.close_all_sessions())
         else:
             loop.run_until_complete(service.close_all_sessions())
         return
@@ -379,7 +394,7 @@ def _shutdown_services() -> None:
         loop = asyncio.get_running_loop()
         if loop.is_running():
             for service in services:
-                loop.create_task(service.close_all_sessions())
+                _spawn_close(loop, service.close_all_sessions())
             return
     except RuntimeError:
         pass
