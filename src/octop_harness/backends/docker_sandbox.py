@@ -679,7 +679,7 @@ class DockerSandbox(BaseSandbox):
             return self._clamp_to_workspace(raw)
 
         if not raw.startswith("/"):
-            rel = raw.lstrip("./")
+            rel = raw.removeprefix("./")
             if not rel or rel == ".":
                 return root
             return self._clamp_to_workspace(f"{root}/{rel}")
@@ -699,7 +699,7 @@ class DockerSandbox(BaseSandbox):
         if raw.startswith("/"):
             normalized = _normalize_container_path(raw)
         else:
-            normalized = _normalize_container_path(f"{root}/{raw.lstrip('./')}")
+            normalized = _normalize_container_path(f"{root}/{raw.removeprefix('./')}")
         if normalized == root:
             return "/"
         prefix = root + "/"
