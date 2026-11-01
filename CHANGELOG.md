@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
 - Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
 - LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic/Bedrock; OpenAI shape 600s request / 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
+- Read a workspace `.env` that is not valid UTF-8 as unreadable instead of raising: a file saved in another encoding (e.g. GBK on Windows) aborted agent spawn and every Docker sandbox execution.
 
 ### 变更
 

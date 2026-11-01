@@ -94,7 +94,8 @@ def load_dotenv_path(path: str | Path | None) -> dict[str, str]:
         return {}
     try:
         return parse_env_text(file.read_text(encoding="utf-8"))
-    except OSError:
+    except (OSError, UnicodeDecodeError):  # a non-UTF-8 .env is unreadable, not fatal
+        logger.debug("failed to read dotenv path", exc_info=True)
         return {}
 
 
