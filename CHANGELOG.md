@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 将 octop-memory 最低依赖提高到 1.0.3，确保后台手动文档审核入口可用，并带入长会话分批提炼、游标持久化及未决审计状态修复。
 - OpenSandbox 可以创建、删除和移动工作区路径。专家启动、技能卸载和工作区重命名不再因为沙箱没有这些操作而失败。
+- Stream OpenAI-Responses reasoning summaries as `reasoning` events; previously the `reasoning` content blocks were dropped silently, so Responses-API models showed no visible thinking.
 
 ### 变更
 
@@ -44,13 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 回复和可见思考固定使用配置的语言，并排在工作区记忆之后。
 
-### 修复
-
-- 经 `call_deferred_tool` 调用的可用核心工具会直接执行；已禁用的工具仍然不可用。
-- 记忆模型因 temperature 被拒绝时，省略 temperature 再试一次（TencentCloud/Octop#835）。
-- 压缩摘要只发送更短的历史；仍然放不下时才用占位内容。
-- 只有文件名的 glob 必须带路径。
-- LLM HTTP 调用带有显式超时，上游挂起不会一直卡住本轮。
 
 ### 变更
 
