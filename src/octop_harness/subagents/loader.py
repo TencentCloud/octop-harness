@@ -20,13 +20,16 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def parse_agent_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    if not text.startswith("---\n"):
+    # Files authored on Windows carry CRLF line endings; normalize first so
+    # ``---\n`` anchors and the closing fence are found regardless of EOL style.
+    normalized = text.replace("\r\n", "\n")
+    if not normalized.startswith("---\n"):
         return {}, text
-    end = text.find("\n---", 4)
+    end = normalized.find("\n---", 4)
     if end == -1:
         return {}, text
-    raw = text[4:end]
-    body = text[end + 4 :].lstrip("\n")
+    raw = normalized[4:end]
+    body = normalized[end + 4 :].lstrip("\n")
     try:
         meta = yaml.safe_load(raw) or {}
         if not isinstance(meta, dict):
