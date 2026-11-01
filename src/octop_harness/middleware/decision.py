@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -38,6 +39,43 @@ from octop_harness.teams.profile import peer_description
 from octop_harness.teams.util import coerce_user_id
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DecisionDispatchSnapshot:
+    """Misroutes of core tools, and dispatcher calls that named nothing runnable."""
+
+    core_forwards: dict[str, int]
+    unknown: int
+
+
+class _DispatchCounters:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._core: dict[str, int] = {}
+        self._unknown = 0
+
+    def core_forward(self, tool: str) -> None:
+        with self._lock:
+            self._core[tool] = self._core.get(tool, 0) + 1
+        logger.info("decision forwarded core tool through call_deferred_tool: %s", tool)
+
+    def unknown(self) -> None:
+        with self._lock:
+            self._unknown += 1
+
+    def snapshot(self) -> DecisionDispatchSnapshot:
+        with self._lock:
+            return DecisionDispatchSnapshot(dict(self._core), self._unknown)
+
+
+_DISPATCH = _DispatchCounters()
+
+
+def decision_dispatch_snapshot() -> DecisionDispatchSnapshot:
+    """Process-wide counts for dispatcher misroutes. Tool names stay low-cardinality."""
+    return _DISPATCH.snapshot()
+
 
 # Set while one model call is being scored, then copied onto that reply so
 # history can show the same row the live stream already showed.
@@ -236,9 +274,11 @@ def _unused_deferred_call(name: str, arguments: dict[str, Any] | None = None) ->
 
 def _make_deferred_tool(chinese: bool) -> StructuredTool:
     description = (
-        "调用本轮说明里列出的工具。不要直接调用那些工具名。"
+        "调用本轮说明里列出的长尾工具。函数列表里已有的工具请按原名直接调用。"
         if chinese
-        else "Call a tool listed in the turn note. Do not call that tool name directly."
+        else (
+            "Call a long-tail tool listed in the turn note. Call tools already in the function list by their own names."
+        )
     )
     return StructuredTool.from_function(
         name=_DEFERRED_TOOL_NAME,
@@ -368,8 +408,7 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         if isinstance(forwarded, ToolMessage):
             return forwarded
         if isinstance(forwarded, ToolCallRequest):
-            call_id = str(request.tool_call.get("id") or "")
-            return _retarget_tool_result(handler(forwarded), call_id)
+            return self._finish_forwarded(request, forwarded, handler(forwarded))
         blocked = self._blocked_ask(request)
         if blocked is not None:
             return blocked
@@ -385,8 +424,7 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         if isinstance(forwarded, ToolMessage):
             return forwarded
         if isinstance(forwarded, ToolCallRequest):
-            call_id = str(request.tool_call.get("id") or "")
-            return _retarget_tool_result(await handler(forwarded), call_id)
+            return self._finish_forwarded(request, forwarded, await handler(forwarded))
         blocked = self._blocked_ask(request)
         if blocked is not None:
             return blocked
@@ -659,6 +697,7 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         incoming = list(request.tools or [])
         stable: list[Any] = []
         deferred: list[Any] = []
+        direct: list[Any] = []
         has_long_tail = False
         for tool in incoming:
             name = _tool_name(tool)
@@ -669,6 +708,11 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
             # depend on this turn's scores.
             if not name or isinstance(tool, dict) or name in _TOOLS_ALWAYS_KEPT:
                 stable.append(tool)
+                # Core tools stay directly callable. Models still route them
+                # through the dispatcher after reading the turn note; keep the
+                # objects so that misroute runs the tool instead of erroring.
+                if name in _TOOLS_ALWAYS_KEPT and not isinstance(tool, dict):
+                    direct.append(tool)
                 continue
             has_long_tail = True
             if name in kept:
@@ -678,7 +722,7 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
             stable.append(self._deferred_call_tool)
         if has_long_tail or saw_dispatcher:
             request = request.override(tools=stable)
-        self._remember_deferred(request, deferred if has_long_tail else [])
+        self._remember_deferred(request, [*direct, *deferred] if has_long_tail else [])
         return request, _deferred_tool_note(deferred, chinese=self._chinese)
 
     def _remember_deferred(self, request: ModelRequest, tools: list[Any]) -> None:
@@ -711,11 +755,23 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         call_id = str(request.tool_call.get("id") or "")
         tool = self._deferred_catalog(request).get(target)
         if tool is None or not target:
-            missing = target or "(empty)"
-            text = f"没有名为 {missing} 的本轮工具。" if self._chinese else f"No turn tool named {missing}."
+            _DISPATCH.unknown()
+            text = _missing_deferred_tool(target, chinese=self._chinese)
             return ToolMessage(content=text, name=_DEFERRED_TOOL_NAME, tool_call_id=call_id, status="error")
         forwarded = cast(ToolCall, {**request.tool_call, "name": target, "args": payload})
         return request.override(tool_call=forwarded, tool=cast(BaseTool, tool))
+
+    def _finish_forwarded(
+        self,
+        request: ToolCallRequest,
+        forwarded: ToolCallRequest,
+        result: ToolMessage | Command[Any],
+    ) -> ToolMessage | Command[Any]:
+        target = str(forwarded.tool_call.get("name") or "")
+        if target in _TOOLS_ALWAYS_KEPT:
+            _DISPATCH.core_forward(target)
+        call_id = str(request.tool_call.get("id") or "")
+        return _retarget_tool_result(result, call_id, forwarded_name=target)
 
     def _apply_skills(self, work: _Work, probabilities: dict[str, float]) -> tuple[dict[str, Any], set[str] | None]:
         assert work.skill_ids is not None and work.skill_rows is not None
@@ -1337,23 +1393,53 @@ def _deferred_tool_note(tools: list[Any], *, chinese: bool) -> str:
             line += "\n  " + schema
         lines.append(line)
     header = (
-        "工具: 用 call_deferred_tool 调用, name 填工具名, arguments 填参数。"
+        "工具: 下面列出的才用 call_deferred_tool 调用, name 填工具名, arguments 填参数。"
+        "函数列表里已有的工具, 例如 read_file、current_time、web_fetch, 请直接按原名调用。"
         if chinese
-        else "Tools: call call_deferred_tool with name and arguments."
+        else (
+            "Tools: call call_deferred_tool only for the tools listed below, with name and arguments. "
+            "Tools already in the function list, such as read_file, current_time, and web_fetch, "
+            "are called by their own names."
+        )
     )
     return header + "\n" + "\n".join(lines)
 
 
-def _retarget_tool_result(result: ToolMessage | Command[Any], call_id: str) -> ToolMessage | Command[Any]:
+def _missing_deferred_tool(target: str, *, chinese: bool) -> str:
+    """Name a dispatcher miss without claiming a tool the model cannot see."""
+    missing = target or "(empty)"
+    if chinese:
+        return f"没有名为 {missing} 的本轮工具。"
+    return f"No turn tool named {missing}."
+
+
+def _retarget_tool_result(
+    result: ToolMessage | Command[Any],
+    call_id: str,
+    *,
+    forwarded_name: str,
+) -> ToolMessage | Command[Any]:
     """Keep the tool message paired with the model's ``call_deferred_tool`` call."""
     if isinstance(result, ToolMessage):
-        return result.model_copy(update={"name": _DEFERRED_TOOL_NAME, "tool_call_id": call_id or result.tool_call_id})
+        extra = dict(result.additional_kwargs or {})
+        if forwarded_name:
+            extra["octop_forwarded_tool"] = forwarded_name
+        return result.model_copy(
+            update={
+                "name": _DEFERRED_TOOL_NAME,
+                "tool_call_id": call_id or result.tool_call_id,
+                "additional_kwargs": extra,
+            }
+        )
     if isinstance(result, Command) and isinstance(result.update, dict):
         messages = result.update.get("messages")
         if isinstance(messages, list):
             rewritten = dict(result.update)
             rewritten["messages"] = [
-                _retarget_tool_result(item, call_id) if isinstance(item, ToolMessage) else item for item in messages
+                _retarget_tool_result(item, call_id, forwarded_name=forwarded_name)
+                if isinstance(item, ToolMessage)
+                else item
+                for item in messages
             ]
             return replace(result, update=rewritten)
     return result
