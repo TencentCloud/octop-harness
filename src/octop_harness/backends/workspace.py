@@ -408,6 +408,26 @@ class BackendWorkspace:
             return [canonical]
         return [logical_dir, canonical]
 
+    def _legacy_listing_fragment(self, path: str) -> str | None:
+        """Workspace-relative listing target for a legacy-first system dir.
+
+        ``skills`` / ``agents`` are remapped onto ``.octop/...`` for storage.
+        When the workspace root itself carries a real directory with that
+        name, directory listings must show **that** tree instead — otherwise
+        dashboards advertise ``skills/`` at the root but open it onto the
+        canonical ``.octop/skills`` content and hide the user's own skills
+        (TencentCloud/Octop#2612). ``None`` keeps the normal mapping.
+        """
+        if not self._system_files_path:
+            return None
+        raw = _strip_relative_prefix(str(path).strip().replace("\\", "/"))
+        if raw.startswith("/") or raw.startswith("~"):
+            return None
+        first = raw.split("/", 1)[0]
+        if first not in LEGACY_READ_ROOT_DIRS or not (self._workspace_dir / first).is_dir():
+            return None
+        return _strip_relative_prefix(raw)
+
     def _read_fragments(self, path: str) -> list[str]:
         """Ordered workspace-relative fragments to probe on read (canonical first)."""
         s = str(path).strip().replace("\\", "/")
@@ -804,9 +824,15 @@ class BackendWorkspace:
         return None
 
     def list_dir(self, path: str = ".") -> list[Any] | None:
-        key = self._backend_storage_key(path)
+        legacy = self._legacy_listing_fragment(path)
+        key = None if legacy is not None else self._backend_storage_key(path)
         if key is None:
-            local = self._local_path_for_relative(path) if path not in (".", "") else self._workspace_dir
+            if legacy is not None:
+                local = Path(self._resolve_root_fragment(legacy))
+            elif path not in (".", ""):
+                local = self._local_path_for_relative(path)
+            else:
+                local = self._workspace_dir
             if not local.is_dir():
                 return None
             entries: list[dict[str, Any]] = []
@@ -896,16 +922,24 @@ class BackendWorkspace:
         if err:
             raise OSError(f"BackendWorkspace.awrite_text failed for {key!r}: {err}")
 
+    async def _als_local(self, path: str) -> LsResult | None:
+        """Local listing path shared by als() fallbacks; keeps als return count low."""
+        entries = await asyncio.to_thread(self.list_dir, path)
+        if entries is None:
+            return None
+        from deepagents.backends.protocol import LsResult as _LsResult
+
+        return _LsResult(error=None, entries=entries)
+
     async def als(self, path: str = ".") -> LsResult | None:
+        if self._legacy_listing_fragment(path) is not None:
+            # Legacy-first system dir with a real workspace-root tree: list it
+            # through the unmapped local path instead of the canonical key.
+            return await self._als_local(path)
         key = self._backend_storage_key(path)
         als_fn = getattr(self._backend, "als", None)
         if key is None or als_fn is None:
-            entries = await asyncio.to_thread(self.list_dir, path)
-            if entries is None:
-                return None
-            from deepagents.backends.protocol import LsResult as _LsResult
-
-            return _LsResult(error=None, entries=entries)
+            return await self._als_local(path)
         try:
             result = await als_fn(key)
         except BACKEND_CALL_ERRORS:
