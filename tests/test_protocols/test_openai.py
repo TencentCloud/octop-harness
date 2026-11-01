@@ -339,3 +339,18 @@ class TestParseOpenAIRequest:
 
         assert isinstance(messages[0], HumanMessage)
         assert messages[0].content == "result"
+
+    def test_null_content_coerced_to_empty_string(self) -> None:
+        """_parse_openai_request accepts content:null (assistant tool-call turns)."""
+        request = {
+            "messages": [
+                {"role": "user", "content": "List the files"},
+                {"role": "assistant", "content": None},
+            ]
+        }
+
+        messages, _config = OpenAIProtocol._parse_openai_request(request)
+
+        assert len(messages) == 2
+        assert isinstance(messages[1], AIMessage)
+        assert messages[1].content == ""
