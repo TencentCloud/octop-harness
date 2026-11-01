@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Execute core tools such as `read_file` when the model routes them through `call_deferred_tool`, instead of reporting that the tool is missing. Disabled tools stay unavailable.
 - Retry memory model calls once without an explicit temperature when the provider rejects it, including auxiliary-model fallbacks, while preserving request options and bounded transport retries (TencentCloud/Octop#835).
 - Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
 - Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
