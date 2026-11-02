@@ -299,13 +299,21 @@ async def _run_streaming_action(
         return f"ACP execution error: {exc}"
 
     body = "\n\n".join(chunks).strip()
+    closing_event = result.get("event") if isinstance(result.get("event"), dict) else final_event
     if result.get("status") == "permission_required":
         suspended = result.get("suspended_permission")
         permission_text = format_permission_required(suspended) if suspended is not None else ""
         return "\n\n".join(part for part in (body, permission_text) if part) or "Permission required."
 
-    return body or format_final_response(
+    if body:
+        # Tool events alone are an incomplete turn summary: the agent's closing
+        # text arrives in result["event"] (ACPHostedClient.finish_prompt), not
+        # through on_message, so append it instead of dropping it.
+        closing = render_event_text(closing_event) if closing_event else None
+        return f"{body}\n\n{closing}" if closing else body
+
+    return format_final_response(
         runner_name=runner_name,
         execution_cwd=execution_cwd,
-        final_event=result.get("event") if isinstance(result.get("event"), dict) else final_event,
+        final_event=closing_event,
     )
