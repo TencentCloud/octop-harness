@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from octop_harness.backends import resolve_backend, spec_supports_execution
+from octop_harness.backends.workspace import BackendWorkspace
 
 
 def _msg(text: str) -> SimpleNamespace:
@@ -109,3 +111,60 @@ class TestLifecycle:
         assert downloaded[0].content == b"hello"
         rejected = backend.upload_files([("relative.txt", b"x")])
         assert rejected[0].error is not None
+
+
+class TestPathOperations:
+    """mkdir_path / delete_path / move_path run through the sandbox shell."""
+
+    def test_mkdir_path_quotes_argument(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        backend.mkdir_path("/a dir/sub")
+        assert sandbox.commands.run.call_args.args[0] == "mkdir -p '/a dir/sub'"
+
+    def test_delete_path_quotes_argument(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        backend.delete_path("/a dir/sub; rm -rf /")
+        assert sandbox.commands.run.call_args.args[0] == "rm -rf '/a dir/sub; rm -rf /'"
+
+    def test_move_path_creates_parent_then_moves(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        backend.move_path("/old file.txt", "/new dir/file.txt")
+        assert sandbox.commands.run.call_args.args[0] == "mkdir -p '/new dir' && mv '/old file.txt' '/new dir/file.txt'"
+
+    def test_failures_raise_oserror(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        sandbox.commands.run.return_value = _execution(stdout="", stderr="boom", exit_code=1)
+        with pytest.raises(OSError, match="boom"):
+            backend.mkdir_path("/x")
+        with pytest.raises(OSError, match="boom"):
+            backend.delete_path("/x")
+        with pytest.raises(OSError, match="boom"):
+            backend.move_path("/x", "/y")
+
+
+class TestWorkspacePathOperations:
+    """BackendWorkspace mkdir / delete / move dispatch through the sandbox (issue #1813)."""
+
+    def test_mkdir_delete_move_do_not_raise(self, mock_opensandbox: Any, tmp_path: Path) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        ws = BackendWorkspace(backend, tmp_path)
+        ws.mkdir("projects/demo")
+        ws.move("projects/demo", "projects/renamed")
+        ws.delete("projects/renamed")
+        assert [call.args[0] for call in sandbox.commands.run.call_args_list] == [
+            "mkdir -p /projects/demo",
+            "mkdir -p /projects && mv /projects/demo /projects/renamed",
+            "rm -rf /projects/renamed",
+        ]
+
+    async def test_amkdir_falls_back_to_sync(self, mock_opensandbox: Any, tmp_path: Path) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        ws = BackendWorkspace(backend, tmp_path)
+        await ws.amkdir("async-dir")
+        assert sandbox.commands.run.call_args.args[0] == "mkdir -p /async-dir"

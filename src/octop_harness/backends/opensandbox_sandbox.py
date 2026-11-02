@@ -15,6 +15,7 @@ import contextlib
 import logging
 import shlex
 from datetime import timedelta
+from pathlib import PurePosixPath
 from typing import Any
 
 from deepagents.backends.protocol import (
@@ -236,6 +237,23 @@ class OpenSandbox(BaseSandbox):
         if "FILE_NOT_FOUND" in message or "no such file" in message.lower():
             return FILE_NOT_FOUND
         return message
+
+    def mkdir_path(self, path: str) -> None:
+        result = self.execute(f"mkdir -p {shlex.quote(path)}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"mkdir failed for {path!r}")
+
+    def delete_path(self, path: str) -> None:
+        result = self.execute(f"rm -rf {shlex.quote(path)}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"delete failed for {path!r}")
+
+    def move_path(self, src: str, dest: str) -> None:
+        result = self.execute(
+            f"mkdir -p {shlex.quote(str(PurePosixPath(dest).parent))} && mv {shlex.quote(src)} {shlex.quote(dest)}"
+        )
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"move failed for {src!r} -> {dest!r}")
 
     def close(self) -> None:
         """Destroy the remote sandbox (idempotent)."""
