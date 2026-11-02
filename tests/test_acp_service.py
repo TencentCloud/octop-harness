@@ -28,3 +28,21 @@ def test_schedule_close_keeps_task_reference() -> None:
         assert task not in acp_service._CLOSE_TASKS
 
     asyncio.run(scenario())
+
+
+def test_close_tasks_do_not_accumulate() -> None:
+    """Repeated scheduling must not leak entries: the set drains as tasks finish."""
+
+    async def scenario() -> None:
+        for _ in range(100):
+            stub = _StubService()
+            stub._release = asyncio.Event()
+            stub._release.set()
+            acp_service._schedule_close(stub)  # type: ignore[arg-type]
+        # Every schedule went through _spawn_close and was retained on creation.
+        assert len(acp_service._CLOSE_TASKS) == 100
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not acp_service._CLOSE_TASKS
+
+    asyncio.run(scenario())

@@ -357,9 +357,9 @@ _CLOSE_TASKS: set[asyncio.Task[None]] = set()
 def _spawn_close(loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, None]) -> None:
     """Schedule *coro* on *loop* keeping a strong reference until it finishes.
 
-    ``asyncio`` only keeps a weak reference to a running task, so a bare
-    ``loop.create_task(...)`` can be garbage-collected mid-flight -- most
-    visibly at interpreter shutdown, when the close would never run.
+    ``asyncio`` documents that the event loop may only keep a weak reference to
+    a task and recommends holding an explicit one; this helper is that
+    reference. No mid-flight collection was reproduced locally (see PR body).
     """
     task = loop.create_task(coro)
     _CLOSE_TASKS.add(task)
