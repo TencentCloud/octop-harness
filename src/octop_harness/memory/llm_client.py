@@ -36,6 +36,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
+from langchain_core.runnables.config import var_child_runnable_config
 from octop_memory.ports.llm import LLMClientError, LLMTier
 
 from octop_harness.llm.invoke_helpers import bind_call_options, build_text_messages, stringify_content
@@ -250,7 +251,7 @@ class HarnessAgentLLMClient:
                 extra_body=_aux_extra_body(ref, self._thinking, extra_body),
             )
             try:
-                response = bound_model.invoke(messages, config={"callbacks": []})
+                response = _invoke_detached(bound_model, messages)
                 return stringify_content(response.content)
             except Exception as exc:
                 if temperature is not None and _is_temperature_rejection(exc):
@@ -280,6 +281,28 @@ class HarnessAgentLLMClient:
                 raise LLMClientError(
                     f"chat model {ref!r} failed for tier={tier!r}: {type(exc).__name__}: {detail}",
                 ) from exc
+
+
+def _invoke_detached(model: Any, messages: list[Any]) -> Any:
+    """Invoke an auxiliary model outside the enclosing turn's callback tree.
+
+    Memory extraction / reconciliation runs *inside* a user turn. A plain
+    ``config={"callbacks": []}`` is not enough: the model is a
+    ``RunnableBinding``, so merging its config re-applies the callbacks that
+    ``var_child_runnable_config`` inherited from the turn. The run is then
+    reported as part of the turn and the recorder persists the raw
+    reconciliation JSON as an extra assistant message.
+
+    Clearing the context variable for the duration of the call removes that
+    parent, so no ``on_chat_model_start`` reaches the turn's handlers. The
+    memory client's own session header metadata travels in a dedicated
+    context variable and is unaffected.
+    """
+    token = var_child_runnable_config.set(None)
+    try:
+        return model.invoke(messages, config={"callbacks": []})
+    finally:
+        var_child_runnable_config.reset(token)
 
 
 def _is_temperature_rejection(exc: BaseException) -> bool:
