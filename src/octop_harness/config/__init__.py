@@ -345,8 +345,10 @@ class ModelConfig:
             summarization thresholds.
         context_window: Total input + output context window (0 = unknown). For
             legacy configurations this defaults to ``max_input_tokens``.
-        max_output_tokens: Maximum generated/output tokens (0 = unknown). This
-            is metadata unless a host explicitly configures ``max_tokens``.
+        max_output_tokens: Maximum generated/output tokens (0 = unknown). The
+            anthropic protocol builder forwards this as the request
+            ``max_tokens`` cap; other builders currently use it as metadata
+            only.
         api_mode: OpenAI-compatible generation API selection. Defaults to
             Chat Completions; set ``"responses"`` to use ``/v1/responses``.
         api_fallback: Optional protocol fallback. ``"chat_completions"`` retries
@@ -437,7 +439,10 @@ class ModelConfig:
         """Reverse of :meth:`to_dict`.
 
         Legacy entries that only contain one of ``context_window`` or
-        ``max_input_tokens`` use that value for both fields.
+        ``max_input_tokens`` use that value for both fields. A legacy
+        ``max_tokens`` key (the OpenAI API name for the output cap, still
+        written by some host UIs) is honoured as an alias for
+        ``max_output_tokens`` when the canonical key is absent.
         """
         max_input = int(data.get("max_input_tokens") or 0)
         context_window = int(data.get("context_window") or 0)
@@ -445,6 +450,7 @@ class ModelConfig:
             max_input = context_window
         if context_window <= 0:
             context_window = max_input
+        max_output = int(data.get("max_output_tokens") or data.get("max_tokens") or 0)
         return cls(
             id=data["id"],
             name=data.get("name", ""),
@@ -453,7 +459,7 @@ class ModelConfig:
             thinking=data.get("thinking"),
             max_input_tokens=max_input,
             context_window=context_window,
-            max_output_tokens=int(data.get("max_output_tokens") or 0),
+            max_output_tokens=max_output,
             api_mode=data.get("api_mode", "chat_completions"),
             api_fallback=data.get("api_fallback", "none"),
             native_tool_search=bool(data.get("native_tool_search", False)),

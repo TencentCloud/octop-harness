@@ -84,6 +84,20 @@ class TestModelConfigSerialization:
         assert m.max_input_tokens == 1_000_000
         assert m.context_window == 1_000_000
 
+    def test_from_dict_accepts_legacy_max_tokens_alias(self) -> None:
+        """A legacy ``max_tokens`` key is honoured as the output cap alias.
+
+        Some host UIs persist the OpenAI-style ``max_tokens`` key instead of
+        the canonical ``max_output_tokens``; without the alias the registered
+        cap silently reads as 0 and never reaches the request.
+        """
+        m = ModelConfig.from_dict({"id": "mm", "context_window": 1_000_000, "max_tokens": 128_000})
+        assert m.max_output_tokens == 128_000
+
+    def test_from_dict_canonical_max_output_tokens_wins_over_alias(self) -> None:
+        m = ModelConfig.from_dict({"id": "mm", "max_output_tokens": 8_192, "max_tokens": 128_000})
+        assert m.max_output_tokens == 8_192
+
     def test_from_dict_keeps_context_input_and_output_limits_distinct(self) -> None:
         m = ModelConfig.from_dict(
             {
