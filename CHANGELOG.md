@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 华为云 OBS 客户端改为传入单个秒级超时。原先传入 `(connect, read)` 元组，探测和浏览会在 `socket.settimeout` 上报 `'tuple' object cannot be interpreted as an integer`（Octop#2971）。
 - 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。
 - `browser_use` 打开页面时使用与 `web_fetch` 相同的地址检查，并拒绝用配置名或截图路径跳出目录。
+- anthropic 协议构造 `ChatAnthropic` 时传入登记的 `max_output_tokens`。模型名不在 langchain-anthropic 内置 profile 表内（中转/非官方模型）时会静默回落 4096，而 Messages 协议下思考块计入 `max_tokens` 预算，思考型模型因此整轮只输出思考、正文为空（`stop_reason=max_tokens`）。
+- `ModelConfig.from_dict` 兼容历史 `max_tokens` 键，作为 `max_output_tokens` 的别名（仅当规范键缺席或为 0 时生效）。
 
 ## [1.0.11] - 2026-11-17
 
