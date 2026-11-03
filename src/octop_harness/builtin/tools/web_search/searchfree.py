@@ -28,7 +28,7 @@ DEFAULT_ENDPOINT = os.environ.get(
 async def searchfree_search(
     query: str,
     max_results: int = 5,
-    search_depth: str = "advanced",
+    search_depth: str = "basic",
 ) -> str:
     """Search the open web via the free ``searchfree.site`` endpoint.
 
@@ -39,8 +39,8 @@ async def searchfree_search(
     Args:
         query: The search query string.
         max_results: Max number of results to return (default 5).
-        search_depth: ``"basic"`` (faster) or ``"advanced"`` (default —
-            does a richer retrieval pass on the upstream side).
+        search_depth: ``"basic"`` (default — faster) or ``"advanced"``
+            (richer retrieval pass on the upstream side).
 
     Returns:
         A JSON string with the search payload, or a plain-text error
