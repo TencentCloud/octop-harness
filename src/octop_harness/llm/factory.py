@@ -888,6 +888,14 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retrie
     # Enable extended thinking when model.thinking is explicitly True.
     if model.thinking is True:
         kwargs["thinking"] = {"type": "adaptive"}
+    # Honor the registered output cap. ChatAnthropic silently falls back to a
+    # 4096-token default when the model name is absent from its built-in profile
+    # table (any relayed / non-first-party model). Under the Messages protocol
+    # thinking blocks count against max_tokens, so that fallback starves
+    # thinking models into emitting thinking-only responses with an empty text
+    # block (stop_reason="max_tokens").
+    if model.max_output_tokens > 0:
+        kwargs["max_tokens"] = model.max_output_tokens
     # ChatAnthropic's ``timeout`` (default_request_timeout) is a plain float.
     kwargs["timeout"] = LLM_HTTP_TIMEOUT.read
     instance_a: BaseChatModel = ChatAnthropic(**kwargs)
