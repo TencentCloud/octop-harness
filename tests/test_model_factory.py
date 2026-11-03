@@ -195,6 +195,38 @@ class TestBuildChatModel:
         assert instance._harness_native_tool_search is True
         assert instance._harness_tool_search_provider == "anthropic"
 
+    def test_anthropic_registered_max_output_tokens_reaches_constructor(self) -> None:
+        """A registered output cap must be forwarded to ``ChatAnthropic``.
+
+        ChatAnthropic silently falls back to 4096 tokens when the model name is
+        absent from its built-in profile table. Thinking blocks count against
+        that budget, so relayed thinking models would otherwise exhaust it and
+        return thinking-only responses with an empty text block.
+        """
+        provider = ProviderConfig(
+            id="relay",
+            base_url="https://relay.example.com",
+            api_key="sk-y",
+            protocol="anthropic",
+        )
+        model = ModelConfig(id="relay-thinking-model", max_output_tokens=128_000)
+        with patch("langchain_anthropic.ChatAnthropic") as mock_cls:
+            build_chat_model(provider, model)
+        assert mock_cls.call_args.kwargs["max_tokens"] == 128_000
+
+    def test_anthropic_unregistered_max_output_tokens_stays_absent(self) -> None:
+        """Without a registered cap the kwarg is omitted (langchain default)."""
+        provider = ProviderConfig(
+            id="anthropic",
+            base_url="https://api.anthropic.com",
+            api_key="sk-y",
+            protocol="anthropic",
+        )
+        model = ModelConfig(id="claude-x")
+        with patch("langchain_anthropic.ChatAnthropic") as mock_cls:
+            build_chat_model(provider, model)
+        assert "max_tokens" not in mock_cls.call_args.kwargs
+
     def test_bedrock_protocol_reports_clear_import_error_when_missing(self) -> None:
         """When ``langchain_aws`` is not importable, surface a clear instruction."""
         provider = ProviderConfig(

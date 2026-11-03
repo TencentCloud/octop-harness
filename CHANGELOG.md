@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- anthropic 协议构造 `ChatAnthropic` 时传入登记的 `max_output_tokens`。模型名不在 langchain-anthropic 内置 profile 表内（中转/非官方模型）时会静默回落 4096，而 Messages 协议下思考块计入 `max_tokens` 预算，思考型模型因此整轮只输出思考、正文为空（`stop_reason=max_tokens`）。
+- `ModelConfig.from_dict` 兼容历史 `max_tokens` 键，作为 `max_output_tokens` 的别名（仅当规范键缺席时生效）。
+
 ## [1.0.6] - 2026-11-01
 
 ### 新增
