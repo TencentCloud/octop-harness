@@ -109,3 +109,23 @@ class TestLifecycle:
         assert downloaded[0].content == b"hello"
         rejected = backend.upload_files([("relative.txt", b"x")])
         assert rejected[0].error is not None
+
+    def test_mkdir_path_uses_execute(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        backend.mkdir_path("/workspace/skills")
+        assert sandbox.commands.run.call_args[0][0] == "mkdir -p /workspace/skills"
+
+    def test_mkdir_path_quotes_shell_metacharacters(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        backend.mkdir_path("/workspace/a b;rm -rf /")
+        command = sandbox.commands.run.call_args[0][0]
+        assert command == "mkdir -p '/workspace/a b;rm -rf /'"
+
+    def test_mkdir_path_raises_on_failure(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        sandbox.commands.run.return_value = _execution(stdout="", stderr="denied", exit_code=1)
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        with pytest.raises(OSError, match="denied"):
+            backend.mkdir_path("/workspace/skills")

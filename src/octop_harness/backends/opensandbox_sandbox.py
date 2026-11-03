@@ -217,6 +217,19 @@ class OpenSandbox(BaseSandbox):
                 responses.append(FileDownloadResponse(path=path, content=content, error=None))
         return responses
 
+    def mkdir_path(self, path: str) -> None:
+        """Create *path* (and parents) inside the sandbox.
+
+        The SDK exposes no directory API, but :meth:`execute` is always
+        available, so ``mkdir -p`` is enough.  Without this the workspace
+        falls back to a local mount, finds none, and raises
+        ``BackendOperationNotSupportedError`` — which breaks agent bootstrap
+        (e.g. creating ``skills/``).
+        """
+        result = self.execute(f"mkdir -p {shlex.quote(path)}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"mkdir failed for {path!r}")
+
     def _classify_read_error(self, path: str, exc: Exception) -> str:
         quoted = shlex.quote(path)
         probe = self.execute(
