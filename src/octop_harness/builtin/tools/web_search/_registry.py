@@ -4,8 +4,9 @@ Each provider declares a *required env-var tuple*. A provider is
 considered "available" iff every variable in its tuple is non-empty.
 Providers with an empty tuple (``()``) need no configuration and are
 therefore always available — that's the case for ``searchfree``, the
-zero-config public fallback. ``you`` also needs no env vars when named
-explicitly, but only joins ``auto`` once ``YDC_API_KEY`` is set.
+zero-config public fallback. ``you`` and ``keenable`` also need no env
+vars when named explicitly, but only join ``auto`` once ``YDC_API_KEY``
+or ``KEENABLE_API_KEY`` (respectively) is set.
 
 The registry exposes two entry points:
 
@@ -19,7 +20,8 @@ Policies accepted by ``HarnessAgentConfig.web_search_tools``:
 - ``False`` (default): no web-search tools are auto-loaded.
 - ``True`` / ``"auto"``: every provider whose env vars are present is
   loaded. ``searchfree`` always qualifies; ``you`` joins only when
-  ``YDC_API_KEY`` is set (see ``_AUTO_REQUIRED_ENV``).
+  ``YDC_API_KEY`` is set and ``keenable`` only when ``KEENABLE_API_KEY``
+  is set (see ``_AUTO_REQUIRED_ENV``).
 - ``"all"``: every provider is loaded *unconditionally* — useful for
   testing; tools without their env var return an "Error: ..." string
   on invocation.
@@ -35,7 +37,7 @@ import os
 from collections.abc import Iterable
 from typing import Any, Literal, cast
 
-WebSearchToolName = Literal["tavily", "brave", "deepseek", "google", "kimi", "yuanbao", "searchfree", "you"]
+WebSearchToolName = Literal["tavily", "brave", "deepseek", "google", "kimi", "yuanbao", "searchfree", "you", "keenable"]
 
 # ``provider name → (required env vars, lazy loader returning a langchain tool)``.
 # Loaders are deliberately lazy so importing this module is cheap.
@@ -89,6 +91,12 @@ def _load_you() -> Any:
     return you_search
 
 
+def _load_keenable() -> Any:
+    from octop_harness.builtin.tools.web_search.keenable import keenable_search
+
+    return keenable_search
+
+
 WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     "tavily": (("TAVILY_API_KEY",), _load_tavily),
     "brave": (("BRAVE_API_KEY",), _load_brave),
@@ -102,6 +110,9 @@ WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     # ``you`` works without a key when named explicitly; ``YDC_API_KEY``
     # raises its limits. See ``_AUTO_REQUIRED_ENV`` for the ``auto`` gate.
     "you": ((), _load_you),
+    # ``keenable`` works without a key when named explicitly;
+    # ``KEENABLE_API_KEY`` raises its limits. Same ``auto`` gate as ``you``.
+    "keenable": ((), _load_keenable),
 }
 
 # Providers that need no env vars when named explicitly but should only join
@@ -109,6 +120,7 @@ WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
 # default tool set unchanged for users who never set the variable.
 _AUTO_REQUIRED_ENV: dict[str, tuple[str, ...]] = {
     "you": ("YDC_API_KEY",),
+    "keenable": ("KEENABLE_API_KEY",),
 }
 
 

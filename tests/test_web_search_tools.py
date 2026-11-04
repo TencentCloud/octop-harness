@@ -40,6 +40,7 @@ class TestRegistry:
             "yuanbao",
             "searchfree",
             "you",
+            "keenable",
         }
 
     def test_provider_available_all_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,6 +72,7 @@ class TestLoadWebSearchTools:
             "MOONSHOT_API_KEY",
             "TENCENTCLOUD_WSA_APIKEY",
             "YDC_API_KEY",
+            "KEENABLE_API_KEY",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -111,6 +113,7 @@ class TestLoadWebSearchTools:
             "yuanbao_search",
             "searchfree_search",
             "you_search",
+            "keenable_search",
         }
 
     def test_auto_includes_you_only_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,6 +123,14 @@ class TestLoadWebSearchTools:
 
     def test_explicit_you_works_without_key(self) -> None:
         assert [t.name for t in load_web_search_tools(["you"])] == ["you_search"]
+
+    def test_auto_includes_keenable_only_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert "keenable_search" not in {t.name for t in load_web_search_tools("auto")}
+        monkeypatch.setenv("KEENABLE_API_KEY", "kn")
+        assert "keenable_search" in {t.name for t in load_web_search_tools("auto")}
+
+    def test_explicit_keenable_works_without_key(self) -> None:
+        assert [t.name for t in load_web_search_tools(["keenable"])] == ["keenable_search"]
 
     def test_explicit_list_loads_named_providers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TAVILY_API_KEY", "tav")
@@ -909,4 +920,119 @@ class TestYouSearch:
 
         with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body={"results": {"web": []}}), [])):
             result = await mod.you_search.ainvoke({"query": "hi"})
+        assert result == "No results found."
+
+
+# ---------------------------------------------------------------------------
+# keenable_search (keyless by default, KEENABLE_API_KEY optional)
+# ---------------------------------------------------------------------------
+
+
+class _KeenableResp:
+    def __init__(self, status_code: int = 200, body: Any = None, headers: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.headers = headers or {}
+
+    def json(self) -> Any:
+        return self._body
+
+
+def _keenable_client(resp: _KeenableResp, calls: list[dict[str, Any]]) -> type:
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            """No-op."""
+
+        async def post(self, url: str, json: dict[str, Any], headers: dict[str, str]) -> _KeenableResp:
+            calls.append({"url": url, "json": json, "headers": headers})
+            return resp
+
+    return _FakeClient
+
+
+_KEENABLE_BODY = {
+    "results": [
+        {
+            "title": "Example",
+            "url": "https://example.com",
+            "description": "",
+            "snippet": "  page text  ",
+            "published_at": "2026-01-01T00:00:00Z",
+            "acquired_at": "2026-01-02T00:00:00Z",
+        },
+        {"title": "No URL", "url": "", "description": "", "snippet": "dropped"},
+    ]
+}
+
+
+class TestKeenableSearch:
+    @pytest.fixture(autouse=True)
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("KEENABLE_API_KEY", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_keyless_uses_public_endpoint(self) -> None:
+        from octop_harness.builtin.tools.web_search import keenable as mod
+
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _keenable_client(_KeenableResp(body=_KEENABLE_BODY), calls)):
+            result = await mod.keenable_search.ainvoke({"query": "hello", "max_results": 3})
+        assert calls[0]["url"] == mod.FREE_ENDPOINT
+        assert calls[0]["json"] == {"query": "hello", "max_results": 3}
+        assert calls[0]["headers"]["X-Keenable-Title"] == "octop-harness"
+        assert "X-API-Key" not in calls[0]["headers"]
+        assert json.loads(result) == [
+            {
+                "title": "Example",
+                "url": "https://example.com",
+                "snippet": "page text",
+                "published_at": "2026-01-01T00:00:00Z",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_key_uses_keyed_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import keenable as mod
+
+        monkeypatch.setenv("KEENABLE_API_KEY", "kn-test")
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _keenable_client(_KeenableResp(body=_KEENABLE_BODY), calls)):
+            await mod.keenable_search.ainvoke({"query": "hello", "max_results": 50})
+        assert calls[0]["url"] == mod.KEYED_ENDPOINT
+        assert calls[0]["json"] == {"query": "hello", "max_results": 20}
+        assert calls[0]["headers"]["X-API-Key"] == "kn-test"
+        assert calls[0]["headers"]["X-Keenable-Title"] == "octop-harness"
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_returns_plain_text(self) -> None:
+        from octop_harness.builtin.tools.web_search import keenable as mod
+
+        resp = _KeenableResp(status_code=429, headers={"Retry-After": "30"})
+        with patch.object(mod.httpx, "AsyncClient", _keenable_client(resp, [])):
+            result = await mod.keenable_search.ainvoke({"query": "hi"})
+        assert "HTTP 429" in result
+        assert "Retry after 30s" in result
+        assert "KEENABLE_API_KEY" in result
+
+    @pytest.mark.asyncio
+    async def test_bad_key_returns_plain_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import keenable as mod
+
+        monkeypatch.setenv("KEENABLE_API_KEY", "bad")
+        with patch.object(mod.httpx, "AsyncClient", _keenable_client(_KeenableResp(status_code=401), [])):
+            result = await mod.keenable_search.ainvoke({"query": "hi"})
+        assert "HTTP 401" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_results(self) -> None:
+        from octop_harness.builtin.tools.web_search import keenable as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _keenable_client(_KeenableResp(body={"results": []}), [])):
+            result = await mod.keenable_search.ainvoke({"query": "hi"})
         assert result == "No results found."

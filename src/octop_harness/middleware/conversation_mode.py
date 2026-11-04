@@ -47,6 +47,7 @@ ASK_READ_TOOLS: frozenset[str] = frozenset(
         "yuanbao_search",
         "searchfree_search",
         "you_search",
+        "keenable_search",
         "current_time",
     }
 )

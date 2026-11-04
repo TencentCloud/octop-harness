@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 可选网页搜索 `keenable`（`keenable_search`）。显式配置 `["keenable"]` 无需 API key（每 IP 每小时 1000 次）；设置 `KEENABLE_API_KEY` 走带 key 的端点并提高限额。仅在设置 `KEENABLE_API_KEY` 后才加入 `auto`，默认工具集不变。
+
 ## [1.0.7] - 2026-11-04
 
 ### 修复
