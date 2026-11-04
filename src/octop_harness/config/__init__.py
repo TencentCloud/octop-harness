@@ -439,8 +439,14 @@ class ModelConfig:
         Legacy entries that only contain one of ``context_window`` or
         ``max_input_tokens`` use that value for both fields.
         """
-        max_input = int(data.get("max_input_tokens") or 0)
-        context_window = int(data.get("context_window") or 0)
+        def _safe_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        max_input = _safe_int(data.get("max_input_tokens"), 0)
+        context_window = _safe_int(data.get("context_window"), 0)
         if max_input <= 0:
             max_input = context_window
         if context_window <= 0:
@@ -453,7 +459,7 @@ class ModelConfig:
             thinking=data.get("thinking"),
             max_input_tokens=max_input,
             context_window=context_window,
-            max_output_tokens=int(data.get("max_output_tokens") or 0),
+            max_output_tokens=_safe_int(data.get("max_output_tokens"), 0),
             api_mode=data.get("api_mode", "chat_completions"),
             api_fallback=data.get("api_fallback", "none"),
             native_tool_search=bool(data.get("native_tool_search", False)),
