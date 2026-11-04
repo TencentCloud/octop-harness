@@ -109,3 +109,45 @@ class TestLifecycle:
         assert downloaded[0].content == b"hello"
         rejected = backend.upload_files([("relative.txt", b"x")])
         assert rejected[0].error is not None
+
+    def test_mkdir_path_quotes_the_path(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        backend.mkdir_path("/workspace/a b;rm -rf /")
+        command = sandbox.commands.run.call_args.args[0]
+        assert command == "mkdir -p '/workspace/a b;rm -rf /'"
+
+    def test_mkdir_path_nonzero_exit_raises(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        sandbox.commands.run.return_value = _execution(stdout="denied", exit_code=1)
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        with pytest.raises(OSError, match="denied"):
+            backend.mkdir_path("/workspace/skills")
+
+    def test_delete_path_quotes_the_path(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        backend.delete_path("/skills/a b;rm -rf /")
+        command = sandbox.commands.run.call_args.args[0]
+        assert command == "rm -rf '/skills/a b;rm -rf /'"
+
+    def test_delete_path_nonzero_exit_raises(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        sandbox.commands.run.return_value = _execution(stdout="busy", exit_code=1)
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        with pytest.raises(OSError, match="busy"):
+            backend.delete_path("/skills/demo")
+
+    def test_move_path_creates_parent_and_quotes(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        backend.move_path("/old;rm", "/new name/file;x")
+        command = sandbox.commands.run.call_args.args[0]
+        assert command == "mkdir -p '/new name' && mv '/old;rm' '/new name/file;x'"
+
+    def test_move_path_nonzero_exit_raises(self, mock_opensandbox: Any) -> None:
+        _sync, sandbox, _conn = mock_opensandbox
+        sandbox.commands.run.return_value = _execution(stdout="missing", exit_code=1)
+        backend = resolve_backend({"type": "opensandbox", "domain": "127.0.0.1:8080"})
+        with pytest.raises(OSError, match="missing"):
+            backend.move_path("/skills/old", "/skills/new")
