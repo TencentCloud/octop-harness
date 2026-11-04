@@ -7,21 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [1.0.7] - 2026-11-04
 
-- Pin replies and visible thinking to the configured language, after workspace memory.
+### 修复
 
-### Fixed
+- 将 octop-memory 最低依赖提高到 1.0.3，确保后台手动文档审核入口可用，并带入长会话分批提炼、游标持久化及未决审计状态修复。
+- OpenSandbox 可以创建、删除和移动工作区路径。专家启动、技能卸载和工作区重命名不再因为沙箱没有这些操作而失败。
+
+### 变更
+
+- SearchFree 网页搜索的默认 `search_depth` 从 `advanced` 改为更快的 `basic`，仍可显式选择 `advanced`。
+
+## [1.0.6] - 2026-11-01
+
+### 新增
+
+- 回复和可见思考固定使用配置的语言，并排在工作区记忆之后。
+
+### 修复
 
 - Keep memory databases open until accepted background workers finish during runtime shutdown, including workers from replaced middleware and session-end extraction before graph construction (TencentCloud/Octop#484).
 - Retry memory model calls once without an explicit temperature when the provider rejects it, including auxiliary-model fallbacks, while preserving request options and bounded transport retries (TencentCloud/Octop#835).
 - Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
 - Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
 - LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic/Bedrock; OpenAI shape 600s request / 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
+- 经 `call_deferred_tool` 调用的可用核心工具会直接执行；已禁用的工具仍然不可用。
+- 记忆模型因 temperature 被拒绝时，省略 temperature 再试一次（TencentCloud/Octop#835）。
+- 压缩摘要只发送更短的历史；仍然放不下时才用占位内容。
+- 只有文件名的 glob 必须带路径。
+- LLM HTTP 调用带有显式超时，上游挂起不会一直卡住本轮。
 
 ### 变更
 
-- `HttpDecisionClient` 在非 strict 模式下，传输或 HTTP 失败重试后抛出 `DecisionRequestError`，不再返回空结果。成功但解析不出概率时仍返回空 map。
+- `HttpDecisionClient` 在非 strict 模式下，传输或 HTTP 失败重试后抛出 `DecisionRequestError`，不再返回空结果。
+- `desktop` 与 `all` 的 Pillow 下限改为 `>=13.0.0`，避开 12.3.0 及更早版本的图片解码漏洞。
 
 ## [1.0.5] - 2026-10-24
 
