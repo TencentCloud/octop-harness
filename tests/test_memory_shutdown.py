@@ -226,3 +226,56 @@ def test_worker_can_close_its_own_runtime(tmp_path: Path) -> None:
         assert not mw._submit_background(work, label="extract", background=False)
     finally:
         runtime.close()
+
+
+@pytest.mark.parametrize("kind", ["capture", "maintenance"])
+def test_close_preserves_real_background_database_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, kind: str
+) -> None:
+    from octop_memory.pipeline import lifecycle
+
+    runtime = make_runtime(tmp_path)
+    memory = runtime.memory
+    mw = middleware(runtime)
+    entered, release, closed = (threading.Event() for _ in range(3))
+    target = memory.backend if kind == "capture" else lifecycle
+    attribute = "save_raw_batch" if kind == "capture" else "run_gc"
+    original = getattr(target, attribute)
+    close_backend = memory.backend.close
+
+    def delayed(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    def close() -> None:
+        close_backend()
+        closed.set()
+
+    monkeypatch.setattr(target, attribute, delayed)
+    monkeypatch.setattr(memory.backend, "close", close)
+    try:
+        if kind == "capture":
+            turn = MagicMock()
+            turn.config = {"configurable": {"thread_id": "shutdown-thread", "user": "tester"}}
+            human = HumanMessage(content="Project Aurora uses PostgreSQL for durable storage.")
+            answer = AIMessage(content="I recorded the project requirement.")
+            mw.before_model({"messages": [human]}, turn)
+            mw.after_model({"messages": [human, answer]}, turn)
+        else:
+            mw._submit_maintenance()
+        assert entered.wait(5)
+        runtime.close()
+        assert not closed.is_set(), "shutdown closed SQLite while an accepted worker still needed it"
+    finally:
+        release.set()
+        runtime.close()
+        with mw._background_condition:
+            assert mw._background_condition.wait_for(lambda: mw._background_active == 0, timeout=5)
+        assert closed.wait(5)
+
+    assert "Cannot operate on a closed database" not in caplog.text
+    assert_closed(memory)
+    if kind == "capture":
+        with closing(sqlite3.connect(tmp_path / "memory.sqlite")) as conn:
+            assert conn.execute("SELECT count(*) FROM shutdown_test_raw_events").fetchone()[0] == 2

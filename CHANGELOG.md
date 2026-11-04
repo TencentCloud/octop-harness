@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 记忆运行时关闭后，等待已提交的后台采集、提炼和维护任务完成再释放数据库，避免数据库已关闭错误和对话记忆丢失；同时覆盖配置变更前的旧中间件及图构建前的会话提炼（TencentCloud/Octop#484）。
+
 ## [1.0.7] - 2026-11-04
 
 ### 修复
@@ -26,11 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
-- Keep memory databases open until accepted background workers finish during runtime shutdown, including workers from replaced middleware and session-end extraction before graph construction (TencentCloud/Octop#484).
-- Retry memory model calls once without an explicit temperature when the provider rejects it, including auxiliary-model fallbacks, while preserving request options and bounded transport retries (TencentCloud/Octop#835).
-- Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
-- Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
-- LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic/Bedrock; OpenAI shape 600s request / 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
 - 经 `call_deferred_tool` 调用的可用核心工具会直接执行；已禁用的工具仍然不可用。
 - 记忆模型因 temperature 被拒绝时，省略 temperature 再试一次（TencentCloud/Octop#835）。
 - 压缩摘要只发送更短的历史；仍然放不下时才用占位内容。
