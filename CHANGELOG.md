@@ -11,7 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 召回追加在用户原文和附件之后，以带来源和角色标记的历史引用隔离旧问题和指令；冻结每轮快照，保留已有 checkpoint 的精确重放和请求公共前缀（TencentCloud/Octop#2043）。
 - 召回 DEBUG 日志附完整查询长度和 SHA-256 指纹，长查询可检索、对账，无需输出查询原文（TencentCloud/Octop#811）。
+- 记忆运行时关闭后，等待已提交的后台采集、提炼和维护任务完成再释放数据库，避免数据库已关闭错误和对话记忆丢失；同时覆盖配置变更前的旧中间件及图构建前的会话提炼（TencentCloud/Octop#484）。
+
+## [1.0.7] - 2026-11-04
+
+### 修复
+
+- 将 octop-memory 最低依赖提高到 1.0.3，确保后台手动文档审核入口可用，并带入长会话分批提炼、游标持久化及未决审计状态修复。
 - OpenSandbox 可以创建、删除和移动工作区路径。专家启动、技能卸载和工作区重命名不再因为沙箱没有这些操作而失败。
+
+### 变更
+
+- SearchFree 网页搜索的默认 `search_depth` 从 `advanced` 改为更快的 `basic`，仍可显式选择 `advanced`。
 
 ## [1.0.6] - 2026-11-01
 
