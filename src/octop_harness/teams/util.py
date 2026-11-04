@@ -122,6 +122,7 @@ def build_one_shot_request(
     thread_id: str | None = None,
     session_key: str | None = None,
     configurable: dict[str, Any] | None = None,
+    mcp_use_default: bool = True,
 ) -> ChatRequest:
     """Build a one-call request for *agent_id*.
 
@@ -138,6 +139,7 @@ def build_one_shot_request(
         user=str(user_id),
         agent_id=agent_id,
         source=source,
+        mcp_use_default=mcp_use_default,
         configurable=extra or None,
     )
 
