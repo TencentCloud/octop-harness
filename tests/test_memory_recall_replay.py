@@ -126,15 +126,15 @@ def test_multimodal_replay_and_message_rewrite_do_not_restore_removed_content() 
     # Same message_to_dict / messages_from_dict path used by Octop archive/fork.
     restored = messages_from_dict([message_to_dict(m) for m in history])
     sent = send(mw, restored).messages[0]
-    assert sent.content[:2] == blocks
+    assert sent.content[1:] == blocks
     assert len(sent.content) == 3
     assert restored[0].content == blocks
-    assert "image_url" not in restored[0].additional_kwargs[RECALL_SNAPSHOT_KEY]["suffix"]
+    assert "image_url" not in restored[0].additional_kwargs[RECALL_SNAPSHOT_KEY]["prefix"]
     # A provider adapter mutating a nested block must not alter persisted input
     # or invalidate the original-content fingerprint on the next tool step.
-    sent.content[1]["image_url"]["url"] = "https://example.com/normalized.png"
+    sent.content[2]["image_url"]["url"] = "https://example.com/normalized.png"
     assert restored[0].content == blocks
-    assert send(mw, restored).messages[0].content[:2] == blocks
+    assert send(mw, restored).messages[0].content[1:] == blocks
     rewritten = restored[0].model_copy(update={"content": "attachment removed"})
     assert send(mw, [rewritten]).messages[0].content == "attachment removed"
     assert RECALL_SNAPSHOT_KEY not in send(mw, [rewritten]).messages[0].additional_kwargs
@@ -372,7 +372,7 @@ def test_real_recall_survives_database_reopen_without_polluting_raw(tmp_path: Pa
         # Capture is the real MemoryService write path, not a spy.
         rows = reopened.search_raw("ALPHA", limit=20)
         assert any(row.content == "ALPHA deadline" for row in rows)
-        assert all("<memory-context>" not in row.content for row in rows)
+        assert all("<memory-context" not in row.content for row in rows)
     finally:
         reopened.delete_thread(namespace)
         if backend == "postgres":
