@@ -103,9 +103,21 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
 - Eligible conversation content is captured as **L0 raw events**, then distilled asynchronously into **L2 atoms** (`AtomCard`s) and **L3 entity pages**. Runtime failures are excluded; normal troubleshooting knowledge and explicit remember requests remain eligible.
 - Model failures raise after retries; retry eligibility follows LangChain's defaults, with the existing retry budget and backoff settings. Callers must handle exceptions from `call()` / streaming. Checkpoints retain failed tasks without adding a synthetic assistant reply. Hosts display errors separately; automatic team failure notifications use `configurable.octop_memory_capture_exclude=true` to keep diagnostics out of memory.
 - Powered by the octop-memory middleware; memory travels with the workspace.
-- Recall is frozen once per user turn and appended to the model-facing user message,
-  keeping the system prompt stable. Checkpoints preserve recall snapshots for exact
-  replay while chat history and capture retain the original user text.
+- Recall is frozen once per user turn as a quoted historical reference appended
+  **after** the original user text and attachments, with explicit source/role
+  markers. This keeps the shared request prefix intact through the current user
+  input. The system policy forbids treating recalled questions as new requests.
+  The system prompt stays stable across turns and old v1 snapshots replay exactly;
+  history and capture retain the original user text. Tool continuations and later
+  turns reuse each historical snapshot instead of refreshing earlier recall.
+- For recall diagnostics, enable DEBUG on `octop_harness.middleware.memory`.
+  `recall_inject` logs `query_chars` and `query_sha256` (the first 16 hex digits of
+  SHA-256 over the complete UTF-8 query passed to recall, after stripping outer
+  whitespace). Compute the same fingerprint from a suspected query to search and
+  correlate logs; long queries are not truncated before hashing, and raw query
+  text is not logged.
+  Set `memory_recall_inject_enabled=False` on `HarnessAgentConfig` to disable
+  fresh automatic recall while retaining memory tools and exact replay of old turns.
 
 Memory extraction can be configured independently of main chat:
 `memory_extract_max_tokens` sets the candidate/episode output budget (default
@@ -129,6 +141,8 @@ beyond a single request timeout.
 #### Host-owned memory restore
 
 Hosts can use `MemoryMiddleware.pause_background(timeout=120)` as a context manager after pausing graph admission. It drains capture, extraction and maintenance workers for that middleware only, skips new background submissions while paused, and resumes admission on exit or timeout. Keep it held while closing and recreating the memory runtime; other experts remain independent.
+
+Ordinary memory runtime shutdown stops accepting background work immediately and returns without waiting. The runtime retains its shared database claim until all accepted workers finish, including workers from middleware replaced during configuration changes. With no pending work, resources are released immediately. `MemoryMiddleware.shutdown(on_idle=callback)` lets resource owners receive the same completion signal; the callback runs once outside the worker lock, immediately when idle or on the last worker's thread. Shutdown does not keep the process alive; hosts that need to await workers should drain them before exiting.
 
 #### Tools & skills
 - Built-in tools: browser (octop-browser), web search, files, ``ask_user_question`` for
