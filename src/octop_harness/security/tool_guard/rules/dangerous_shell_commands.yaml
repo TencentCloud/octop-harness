@@ -116,7 +116,7 @@
 - id: TOOL_CMD_OBFUSCATED_EXEC
   tools: [bash, execute]
   params: [command]
-  category: code_execution
+  category: defense_evasion
   severity: HIGH
   patterns:
     - "\\bbase64\\s+(-d|--decode)\\s*\\|\\s*\\b(bash|sh|zsh)\\b"
