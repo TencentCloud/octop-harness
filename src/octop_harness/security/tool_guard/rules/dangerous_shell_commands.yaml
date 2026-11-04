@@ -308,3 +308,135 @@
     - "^\\s*#"
   description: "Command uses Zsh-specific builtins that can bypass security checks"
   remediation: "Block Zsh module/builtin commands. These provide raw file I/O, network, and execution capabilities that bypass normal permission checks."
+
+# =========================================================================
+# Windows / PowerShell Attack Rules
+# =========================================================================
+# The rule set above has no Windows coverage. On a Windows host an agent
+# could base64-decode a hidden script, pipe Invoke-WebRequest output into
+# Invoke-Expression, register a Run key, dump LSASS, or disable Defender
+# -- and the guard would still report is_safe. These rules close that gap.
+
+# ── PowerShell Base64 Payload Execution ─────────────────────────────────
+# EncodedCommand and EncodeCommand let an attacker hide arbitrary PowerShell
+# payloads from regex / human review by base64-encoding them on the wire.
+- id: TOOL_CMD_PS_ENCODED_COMMAND
+  tools: [bash, execute]
+  params: [command]
+  category: code_execution
+  severity: CRITICAL
+  patterns:
+    - "(?:powershell|pwsh)\\s+(?:-|\\/)e(?:c|xec(?:utionpolicy)?|ncodedcommand)?\\b"
+    - "(?:powershell|pwsh)\\s+.*\\[Convert\\]::FromBase64String"
+    - "IEX\\s*\\([^)]*\\[Convert\\]::FromBase64String"
+  description: "PowerShell command uses -EncodedCommand or decodes base64 before execution"
+  remediation: "Block. Encoded payloads hide intent from both humans and static analysis. Require plain-text scripts."
+
+# ── mshta: HTML Application Script Execution ────────────────────────────
+# mshta.exe runs HTA / VBScript files outside the normal PowerShell
+# execution model and is a common APT dropper.
+- id: TOOL_CMD_MSHTA_EXEC
+  tools: [bash, execute]
+  params: [command]
+  category: code_execution
+  severity: CRITICAL
+  patterns:
+    - "\\bmshta(?:\\.exe)?\\b"
+  description: "Uses mshta.exe which runs HTML Application / VBScript outside normal execution"
+  remediation: "Block. mshta is a common APT dropper and should not be used by agents."
+
+# ── Windows Process Dump Tools ─────────────────────────────────────────
+# Dump privileged process memory (LSASS, SAM, SYSTEM ...) to retrieve
+# credentials. Requires admin; on an attacker machine the agent's own
+# privilege makes this a one-click credential exfiltration.
+- id: TOOL_CMD_PROCESS_DUMP
+  tools: [bash, execute]
+  params: [command]
+  category: privilege_escalation
+  severity: CRITICAL
+  patterns:
+    - "\\bprocdump(?:64)?(?:\\.exe)?\\b"
+    - "\\bMiniDump(?:\\.exe)?\\b"
+    - "\\bwer\\s+-dump\\b"
+    - "\\brundll32(?:\\.exe)?\\b\\s+comsvcs\\.dll,\\s+MiniDump\\b"
+    - "\\b(?:tasklist|pslist|Get-Process)\\b.*\\b(system|lsass|winlogon|explorer)\\b"
+    - "\\bsecdump(?:\\.exe)?\\b"
+    - "\\bcomsvcs\\.dll\\b.*MiniDump"
+  description: "Tool dump memory of privileged Windows processes (LSASS/SAM/SYSTEM)"
+  remediation: "Block. These tools extract credentials and sensitive state from the host."
+
+# ── Windows Registry Persistence (Run / RunOnce) ──────────────────────
+- id: TOOL_CMD_REG_PERSISTENCE
+  tools: [bash, execute]
+  params: [command]
+  category: privilege_escalation
+  severity: CRITICAL
+  patterns:
+    - "\\b(?:HKCU|HKLM|HKEY_CURRENT_USER|HKEY_LOCAL_MACHINE)\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\(?:Run|RunOnce|RunServices)\\b"
+    - "\\bSet-ItemProperty\\b.*\\\\Run(?:Once)?\"?\\s"
+    - "\\bNew-ItemProperty\\b.*\\\\Run(?:Once)?\"?\\s"
+    - "\\breg\\s+(?:add|import)\\b.*\\\\(?:Run|RunOnce|RunServices)\\b"
+  description: "Attempts to add or modify Windows Run / RunOnce registry keys for persistence"
+  remediation: "Block. Registry Run/RunOnce keys auto-launch code on login and are a primary persistence mechanism."
+
+# ── Windows Defender Tampering ───────────────────────────────────────────
+# Turning off Defender / tampering with its signatures is a classic
+# attacker prelude. Covers both PowerShell Set-MpPreference and registry.
+- id: TOOL_CMD_DEFENDER_TAMPERING
+  tools: [bash, execute]
+  params: [command]
+  category: privilege_escalation
+  severity: CRITICAL
+  patterns:
+    - "\\bSet-MpPreference\\b.*-(?:DisableRealtimeMonitoring|DisableAntiSpyware|DisableAntiVirus|DisableAutomaticUpdates|DisableSubmitSamples|DisableBlockAtFirstSeen)\\s+\\$?true\\b"
+    - "\\bSet-MpPreference\\b.*-Disable\\w+\\s+\\$?true\\b"
+    - "\\b(?:HKLM|HKCU)\\\\Software\\\\Microsoft\\\\Windows Defender\\\\(?:Real-Time Protection|Spynet|SigThreats)\\b"
+    - "\\bRemove-MpPreference\\b"
+  description: "Attempts to disable Windows Defender real-time protection or tamper with its configuration"
+  remediation: "Block. Disabling or tampering with antivirus is a precursor to malware execution."
+
+# ── Windows Event Log / Audit Tampering ─────────────────────────────────
+# Wiping or clearing event logs erases the audit trail of an attack.
+- id: TOOL_CMD_EVENT_LOG_TAMPERING
+  tools: [bash, execute]
+  params: [command]
+  category: defense_evasion
+  severity: HIGH
+  patterns:
+    - "\\bwevtutil(?:\\.exe)?\\b\\s+(?:ce|cl)\\b"
+    - "\\bClear-WinEvent\\b"
+    - "\\bRemove-Item\\b.*\\\\Microsoft\\\\Windows\\\\EventLog\\\\System\\.evtx"
+    - "\\bRemove-Item\\b.*\\\\Microsoft\\\\Windows\\\\EventLog\\\\Security\\.evtx"
+  description: "Clears or wipes Windows event logs, removing the audit trail"
+  remediation: "Block. Agents must not destroy audit or forensic data."
+
+# ── Scheduled Task Persistence (Windows Task Scheduler) ────────────────
+- id: TOOL_CMD_SCHTASKS_PERSISTENCE
+  tools: [bash, execute]
+  params: [command]
+  category: privilege_escalation
+  severity: CRITICAL
+  patterns:
+    - "\\bschtasks(?:\\.exe)?\\b\\s+(?:create|change|run)\\b"
+    - "\\bRegister-ScheduledTask\\b"
+    - "\\bNew-ScheduledTaskAction\\b"
+    - "\\b(?:at|schtasks)(?:\\.exe)?\\b.*(?:/create|/change|/run)\\b"
+  description: "Attempts to create or modify Windows Scheduled Tasks for persistence"
+  remediation: "Block. Agents must not create background scheduled tasks that survive the session."
+
+# ── PowerShell Invoke-Expression with Attacker Input ───────────────────
+# IEX / Invoke-Expression eval arbitrary strings; combined with network
+# fetch (Invoke-WebRequest, curl, iwr) this is the canonical PowerShell
+# one-liner dropper.
+- id: TOOL_CMD_PS_INVOKE_EXPRESSION
+  tools: [bash, execute]
+  params: [command]
+  category: code_execution
+  severity: CRITICAL
+  patterns:
+    - "\\bIEX\\b\\s*\\(.*(?:Invoke-WebRequest|Invoke-RestMethod|curl|iwr)\\b"
+    - "\\bInvoke-Expression\\b\\s*\\(.*(?:Invoke-WebRequest|Invoke-RestMethod|curl|iwr)\\b"
+    - "(?:Invoke-WebRequest|iwr|curl)\\b.*\\bIEX\\b"
+    - "\\bInvoke-Expression\\b.*\\(.*\\.Content\\b"
+  description: "PowerShell downloads a remote payload and immediately eval()s it"
+  remediation: "Block. Never execute content pulled from the network without prior inspection."
