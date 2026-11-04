@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- 将 octop-memory 最低依赖提高到 1.0.3，确保后台手动文档审核入口可用，并带入长会话分批提炼、游标持久化及未决审计状态修复。
 - OpenSandbox 可以创建、删除和移动工作区路径。专家启动、技能卸载和工作区重命名不再因为沙箱没有这些操作而失败。
 
 ## [1.0.6] - 2026-11-01
