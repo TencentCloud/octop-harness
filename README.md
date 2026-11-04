@@ -202,6 +202,8 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 ## How to Use
 
+Current release: **1.0.7**. See the [release notes](CHANGELOG.md).
+
 ### Prerequisites
 - **Python 3.12+**
 - A model provider API key (OpenAI / Anthropic / Bedrock / compatible)
