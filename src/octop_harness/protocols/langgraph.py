@@ -29,16 +29,42 @@ def _is_internal_model_stream(metadata: Any) -> bool:
 
 
 def _content_block_delta(block: Any) -> tuple[str, str]:
-    """Split a streamed content block into (text, reasoning) delta parts."""
+    """Split a streamed content block into (text, reasoning) delta parts.
+
+    Handles both plain string text and list-valued ``text`` / ``thinking``
+    fields emitted by Anthropic/OpenAI-Responses content-block streams where
+    a block may contain nested part lists.
+    """
     if isinstance(block, str):
         return block, ""
     if not isinstance(block, dict):
         return "", ""
     block_type = block.get("type", "text")
+
+    def _as_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            parts: list[str] = []
+            for v in value:
+                if isinstance(v, str):
+                    parts.append(v)
+                elif isinstance(v, dict):
+                    # Nested part (e.g. {"type": "text", "text": "..."})
+                    t = v.get("text") or v.get("thinking") or v.get("content")
+                    if isinstance(t, str):
+                        parts.append(t)
+                else:
+                    parts.append(str(v))
+            return "".join(parts)
+        if isinstance(value, str):
+            return value
+        return str(value)
+
     if block_type == "thinking":
-        return "", str(block.get("thinking") or "")
+        return "", _as_text(block.get("thinking"))
     if block_type == "text":
-        return str(block.get("text") or ""), ""
+        return _as_text(block.get("text")), ""
     return "", ""
 
 

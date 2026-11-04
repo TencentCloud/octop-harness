@@ -21,8 +21,17 @@ class ThinkSplitter:
         """Whether the parser is currently inside a think block."""
         return self._in_think
 
-    def feed(self, text: str) -> tuple[str, str]:
-        """Consume an incremental text delta."""
+    def feed(self, text: str | list[str]) -> tuple[str, str]:
+        """Consume an incremental text delta.
+
+        Accepts either a plain string delta or a list of text segments (as
+        produced by Anthropic/OpenAI-Responses content-block streams where a
+        single block may split across multiple streaming items).
+        """
+        if isinstance(text, list):
+            text = "".join(str(t) for t in text if t is not None)
+        if not isinstance(text, str):
+            text = str(text) if text is not None else ""
         if not text:
             return "", ""
 
