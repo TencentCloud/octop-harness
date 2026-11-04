@@ -10,6 +10,7 @@ import pytest
 from octop_harness.config import ModelConfig, ProviderConfig
 from octop_harness.llm.factory import (
     ChatModelFactory,
+    _DEFAULT_REQUEST_TIMEOUT_S,
     _get_reasoning_aware_chat_openai,
     _is_responses_api_unsupported_error,
     build_chat_model,
@@ -62,6 +63,25 @@ class TestBuildChatModel:
         with patch.object(cls, "__init__", return_value=None) as mock_init:
             build_chat_model(provider, model)
         assert mock_init.call_args.kwargs["stream_usage"] is False
+
+    def test_openai_passes_finite_request_timeout(self) -> None:
+        """A finite timeout is required so a silent provider cannot hang a worker (#2241)."""
+        provider = ProviderConfig(
+            id="example",
+            base_url="https://api.example.com/v1",
+            api_key="sk-x",
+            protocol="openai",
+        )
+        model = ModelConfig(id="gpt-X")
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            build_chat_model(provider, model)
+        timeout = mock_init.call_args.kwargs.get("timeout")
+        assert timeout is not None
+        assert timeout > 0
+        assert timeout == _DEFAULT_REQUEST_TIMEOUT_S
 
     def test_openai_native_tool_search_enables_responses_api(self) -> None:
         provider = ProviderConfig(

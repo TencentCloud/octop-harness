@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 回复和可见思考固定使用配置的语言，并排在工作区记忆之后。
 
+- Bound OpenAI-compatible chat-model requests with a default 600s timeout. `langchain-openai` leaves `request_timeout=None`, which the OpenAI SDK treats as "never time out" (not "use the default"), so a provider that accepts the connection but never responds can pin a gateway worker indefinitely and leave every agent unresponsive until restart (#2241).
 ### 修复
 
 - 经 `call_deferred_tool` 调用的可用核心工具会直接执行；已禁用的工具仍然不可用。
