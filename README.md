@@ -130,6 +130,8 @@ beyond a single request timeout.
 
 Hosts can use `MemoryMiddleware.pause_background(timeout=120)` as a context manager after pausing graph admission. It drains capture, extraction and maintenance workers for that middleware only, skips new background submissions while paused, and resumes admission on exit or timeout. Keep it held while closing and recreating the memory runtime; other experts remain independent.
 
+Ordinary memory runtime shutdown stops accepting background work immediately and returns without waiting. The runtime retains its shared database claim until all accepted workers finish, including workers from middleware replaced during configuration changes. With no pending work, resources are released immediately. `MemoryMiddleware.shutdown(on_idle=callback)` lets resource owners receive the same completion signal; the callback runs once outside the worker lock, immediately when idle or on the last worker's thread. Shutdown does not keep the process alive; hosts that need to await workers should drain them before exiting.
+
 #### Tools & skills
 - Built-in tools: browser (octop-browser), web search, files, ``ask_user_question`` for
   respond-only human decisions, optional provider-neutral image/video generation, sub-agents,
