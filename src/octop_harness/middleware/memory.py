@@ -20,6 +20,7 @@ Fail-soft: any IO / RPC error during write or recall is logged at
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -514,9 +515,11 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 )
                 rendered = getattr(result, "rendered", None) or ""
                 logger.debug(
-                    "memory.trigger recall_inject thread=%s session=%s limit=%d hit=%s",
+                    "memory.trigger recall_inject thread=%s session=%s query_chars=%d query_sha256=%s limit=%d hit=%s",
                     thread_id,
                     session_id,
+                    len(query),
+                    hashlib.sha256(query.encode("utf-8")).hexdigest()[:16],
                     self._recall_limit,
                     bool(rendered),
                 )

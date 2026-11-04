@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- 召回追加在用户原文和附件之后，以带来源和角色标记的历史引用隔离旧问题和指令；冻结每轮快照，保留已有 checkpoint 的精确重放和请求公共前缀（TencentCloud/Octop#2043）。
+- 召回 DEBUG 日志附完整查询长度和 SHA-256 指纹，长查询可检索、对账，无需输出查询原文（TencentCloud/Octop#811）。
 - 记忆运行时关闭后，等待已提交的后台采集、提炼和维护任务完成再释放数据库，避免数据库已关闭错误和对话记忆丢失；同时覆盖配置变更前的旧中间件及图构建前的会话提炼（TencentCloud/Octop#484）。
 
 ## [1.0.7] - 2026-11-04
