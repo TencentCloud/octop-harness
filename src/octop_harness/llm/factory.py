@@ -516,6 +516,32 @@ def _source_messages_for_payload(input_: Any, kwargs: dict[str, Any], convert_in
     return messages
 
 
+# OpenAI-compatible provider base_url hosts known to accept (or even require)
+# the non-standard ``reasoning_content`` field on assistant messages when
+# calling thinking/reasoning-capable models. Providers NOT in this list
+# (groq.com, openai.com, …) either reject the field outright or do not
+# emit it in the first place. We therefore skip re-attaching it for them —
+# which fixes Octop issue #2498 (groq 400 on stale reasoning_content).
+_REASONING_CONTENT_HOSTS: tuple[str, ...] = (
+    "deepseek.com",
+    "openrouter.ai",
+    "dashscope.aliyuncs.com",
+    "maas.aliyuncs.com",
+    "tencentmaas.com",
+    "lkeap.cloud.tencent.com",
+    "bigmodel.cn",
+    "z.ai",
+    "moonshot.cn",
+)
+
+
+def _base_url_supports_reasoning_content(base_url: str | None) -> bool:
+    if not base_url:
+        return False
+    url_lower = base_url.lower()
+    return any(host in url_lower for host in _REASONING_CONTENT_HOSTS)
+
+
 def _attach_reasoning_to_payload(payload: dict[str, Any], source_messages: list[Any]) -> dict[str, Any]:
     from langchain_core.messages import AIMessage
 
@@ -674,6 +700,11 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
                 _strip_unsupported_content_types(messages_out)
             source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
             if not source_messages:
+                return payload
+            # Only round-trip reasoning_content for providers that explicitly
+            # support it. Everything else (groq.com, openai.com, …) rejects
+            # the field on assistant messages — see Octop issue #2498.
+            if not _base_url_supports_reasoning_content(getattr(self, "base_url", None)):
                 return payload
             return _attach_reasoning_to_payload(payload, source_messages)
 
