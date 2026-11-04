@@ -94,7 +94,11 @@ def load_dotenv_path(path: str | Path | None) -> dict[str, str]:
         return {}
     try:
         return parse_env_text(file.read_text(encoding="utf-8"))
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError — a non-UTF-8
+        # .env (GBK from zh-CN Windows editors is the common case) would escape
+        # the narrow OSError guard otherwise. Treat undecodable files the same
+        # as missing ones: skip and move on (workspace .env is best-effort).
         return {}
 
 
