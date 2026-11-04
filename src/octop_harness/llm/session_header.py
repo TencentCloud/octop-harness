@@ -53,7 +53,13 @@ def session_header_scope(thread_id: str | None) -> Iterator[str]:
     try:
         yield incoming
     finally:
-        _CURRENT_SESSION_ID.reset(token)
+        try:
+            _CURRENT_SESSION_ID.reset(token)
+        except ValueError:
+            # Async generator finalized in a different contextvars.Context
+            # (e.g. early stream close via aclose()). The orphaned token is
+            # harmless — ContextVar GC will clean it up. See issue #89.
+            pass
 
 
 def _stamp_session_header(request: httpx.Request, name: str, needle: str) -> None:
