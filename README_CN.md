@@ -100,7 +100,7 @@
 - 工作区上下文的统一读取、session 快照、提示词格式和缓存断点复用 deepagents 原生 `MemoryMiddleware`。模板更新不覆盖已有用户文档。
 - 普通记忆写入和自动晋升后，通过 `BackendWorkspace` 读取当前手动文档做核对，不刷新聊天快照。明确冲突以手动文档为准：旧 Atom 软停用，替代事实转 candidate，原证据保留；`memory_save` 会提示冲突或检查未完成。重复 Atom 保留，仅对已包含相同信息的会话快照抑制召回。语义不确定/模型不可用时不强制停用，宿主应展示待核对状态。文件工具防护不替代宿主的 shell/OS 权限策略。
 - 用户说「记住」时，Agent 使用 `memory_save(content, topic)` 直接保存到 octop-memory；`memory_search` / `memory_get` 用于补充历史召回。
-- 自动召回在每轮首次调用模型前冻结，以带 source/role 标记的历史引用放在当前用户消息之前；系统规则禁止把引用里的旧问题当成新请求。系统提示在各轮保持稳定；checkpoint 精确重放旧快照（包括 v1 后缀快照），聊天历史和记忆采集仍保留用户原文。
+- 自动召回在每轮首次调用模型前冻结，以带 source/role 标记的历史引用追加在当前用户原文和附件之后，让公共请求前缀尽可能延伸到完整用户输入。系统规则禁止把引用里的旧问题当成新请求；系统提示在各轮保持稳定，工具续跑和后续轮次复用历史快照，不刷新先前的召回。checkpoint 精确重放已有 v1 快照，聊天历史和记忆采集仍保留用户原文。
 - 排查召回时，将 `octop_harness.middleware.memory` 日志级别设为 DEBUG。`recall_inject` 会记录 `query_chars` 和 `query_sha256`：对实际传入 recall 的完整查询去除首尾空白后，以 UTF-8 计算 SHA-256，取前 16 位十六进制字符。按同样方法计算疑似查询的指纹即可检索、对账；长查询不会在计算前被截断，日志不输出查询原文。
 - `HarnessAgentConfig(memory_recall_inject_enabled=False)` 可关闭新的自动召回，保留记忆工具和旧回合快照的精确重放。
 

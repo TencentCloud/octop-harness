@@ -103,11 +103,13 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
 - Eligible conversation content is captured as **L0 raw events**, then distilled asynchronously into **L2 atoms** (`AtomCard`s) and **L3 entity pages**. Runtime failures are excluded; normal troubleshooting knowledge and explicit remember requests remain eligible.
 - Model failures raise after retries; retry eligibility follows LangChain's defaults, with the existing retry budget and backoff settings. Callers must handle exceptions from `call()` / streaming. Checkpoints retain failed tasks without adding a synthetic assistant reply. Hosts display errors separately; automatic team failure notifications use `configurable.octop_memory_capture_exclude=true` to keep diagnostics out of memory.
 - Powered by the octop-memory middleware; memory travels with the workspace.
-- Recall is frozen once per user turn as a quoted historical reference **before**
-  the current user message, with explicit source/role markers. The system policy
-  forbids treating recalled questions as new requests. The system prompt remains
-  stable across turns; checkpoints preserve exact replay (including older v1
-  suffix snapshots), while chat history and capture retain the original user text.
+- Recall is frozen once per user turn as a quoted historical reference appended
+  **after** the original user text and attachments, with explicit source/role
+  markers. This keeps the shared request prefix intact through the current user
+  input. The system policy forbids treating recalled questions as new requests.
+  The system prompt stays stable across turns and old v1 snapshots replay exactly;
+  history and capture retain the original user text. Tool continuations and later
+  turns reuse each historical snapshot instead of refreshing earlier recall.
 - For recall diagnostics, enable DEBUG on `octop_harness.middleware.memory`.
   `recall_inject` logs `query_chars` and `query_sha256` (the first 16 hex digits of
   SHA-256 over the complete UTF-8 query passed to recall, after stripping outer

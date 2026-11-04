@@ -126,15 +126,15 @@ def test_multimodal_replay_and_message_rewrite_do_not_restore_removed_content() 
     # Same message_to_dict / messages_from_dict path used by Octop archive/fork.
     restored = messages_from_dict([message_to_dict(m) for m in history])
     sent = send(mw, restored).messages[0]
-    assert sent.content[1:] == blocks
+    assert sent.content[:2] == blocks
     assert len(sent.content) == 3
     assert restored[0].content == blocks
-    assert "image_url" not in restored[0].additional_kwargs[RECALL_SNAPSHOT_KEY]["prefix"]
+    assert "image_url" not in restored[0].additional_kwargs[RECALL_SNAPSHOT_KEY]["suffix"]
     # A provider adapter mutating a nested block must not alter persisted input
     # or invalidate the original-content fingerprint on the next tool step.
-    sent.content[2]["image_url"]["url"] = "https://example.com/normalized.png"
+    sent.content[1]["image_url"]["url"] = "https://example.com/normalized.png"
     assert restored[0].content == blocks
-    assert send(mw, restored).messages[0].content[1:] == blocks
+    assert send(mw, restored).messages[0].content[:2] == blocks
     rewritten = restored[0].model_copy(update={"content": "attachment removed"})
     assert send(mw, [rewritten]).messages[0].content == "attachment removed"
     assert RECALL_SNAPSHOT_KEY not in send(mw, [rewritten]).messages[0].additional_kwargs
