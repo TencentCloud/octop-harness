@@ -499,6 +499,27 @@ def _copy_reasoning_from_chunk(gen_chunk: Any, chunk: dict[str, Any]) -> Any:
     return gen_chunk
 
 
+def _strip_streaming_usage_metadata(chunk: Any) -> Any:
+    """Clear ``usage_metadata`` on streamed chunks so providers that echo
+    cumulative usage on *every* frame (e.g. SiliconFlow, issue #2007) do
+    not cause ``AIMessageChunk.__add__`` to sum the same token counts
+    dozens of times. The final non-empty ``usage_metadata`` from the
+    last chunk is what survives to the AIMessage; intermediate ones are
+    pure noise.
+    """
+    usage = getattr(chunk, "usage_metadata", None)
+    if usage is None:
+        return chunk
+    if not usage:
+        return chunk
+    # Clear without mutating the chunk object itself — ``model_copy``
+    # creates a shallow copy that we can safely drop the field from.
+    try:
+        return chunk.model_copy(update={"usage_metadata": None})
+    except (AttributeError, TypeError):
+        return chunk
+
+
 def _source_messages_for_payload(input_: Any, kwargs: dict[str, Any], convert_input: Any) -> list[Any]:
     from langchain_core.messages import BaseMessage
 
@@ -623,28 +644,28 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
         def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
             yielded = False
             try:
-                for chunk in super()._stream(*args, **kwargs):
+                for raw_chunk in super()._stream(*args, **kwargs):
                     yielded = True
-                    yield chunk
+                    yield _strip_streaming_usage_metadata(raw_chunk)
             except Exception as exc:
                 fallback = None if yielded else _fallback_model_for(self, exc, kwargs)
                 if fallback is None:
                     raise
-                for chunk in fallback._stream(*args, **kwargs):
-                    yield _mark_api_fallback_chunk(chunk)
+                for raw_chunk in fallback._stream(*args, **kwargs):
+                    yield _mark_api_fallback_chunk(_strip_streaming_usage_metadata(raw_chunk))
 
         async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
             yielded = False
             try:
-                async for chunk in super()._astream(*args, **kwargs):
+                async for raw_chunk in super()._astream(*args, **kwargs):
                     yielded = True
-                    yield chunk
+                    yield _strip_streaming_usage_metadata(raw_chunk)
             except Exception as exc:
                 fallback = None if yielded else _fallback_model_for(self, exc, kwargs)
                 if fallback is None:
                     raise
-                async for chunk in fallback._astream(*args, **kwargs):
-                    yield _mark_api_fallback_chunk(chunk)
+                async for raw_chunk in fallback._astream(*args, **kwargs):
+                    yield _mark_api_fallback_chunk(_strip_streaming_usage_metadata(raw_chunk))
 
         def _create_chat_result(self, response: Any, generation_info: dict[str, Any] | None = None) -> Any:
             return _copy_reasoning_from_response(super()._create_chat_result(response, generation_info), response)
