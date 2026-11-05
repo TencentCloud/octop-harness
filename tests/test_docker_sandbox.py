@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import tarfile
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -195,6 +196,44 @@ class TestResolveAndLifecycle:
         )
         downloads = backend.download_files(["/SOUL.md"])
         assert downloads[0].content == b"content"
+        backend.close()
+
+    def test_upload_sets_container_owner_and_mtime(self, tmp_path: Path, mock_docker: Any) -> None:
+        """put_archive runs as root; the tar header must carry the container user."""
+        _docker_mod, _client, container = mock_docker
+
+        def exec_run(cmd: Any, **_kwargs: Any) -> tuple[int, bytes]:
+            command = cmd[2] if isinstance(cmd, list) and len(cmd) > 2 else str(cmd)
+            if "id -u" in command:
+                return (0, b"1003\n1004\n")
+            return (0, b"")
+
+        container.exec_run.side_effect = exec_run
+        backend = resolve_backend({"type": "docker"}, workspace_dir=tmp_path)
+        before = int(time.time())
+
+        uploads = backend.upload_files([("/AGENTS.md", b"content")])
+        assert uploads[0].error is None
+
+        archive = container.put_archive.call_args.args[1]
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+            info = tar.getmembers()[0]
+        assert (info.uid, info.gid) == (1003, 1004)
+        assert before <= info.mtime <= int(time.time())
+        backend.close()
+
+    def test_upload_owner_falls_back_to_root_when_ids_unavailable(self, tmp_path: Path, mock_docker: Any) -> None:
+        _docker_mod, _client, container = mock_docker
+        container.exec_run.return_value = (0, b"ok\n")
+        backend = resolve_backend({"type": "docker"}, workspace_dir=tmp_path)
+
+        backend.upload_files([("/AGENTS.md", b"content")])
+
+        archive = container.put_archive.call_args.args[1]
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+            info = tar.getmembers()[0]
+        assert (info.uid, info.gid) == (0, 0)
+        assert info.mtime > 0
         backend.close()
 
     def test_close_via_octop_harness(self, tmp_path: Path, mock_docker: Any) -> None:
