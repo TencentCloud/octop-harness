@@ -1819,3 +1819,39 @@ def test_summarization_factory_patch_is_exclusive() -> None:
     second.join(timeout=2)
     assert second_in.is_set()
     assert graph.create_summarization_middleware is original
+
+
+def test_graph_build_wraps_seed_summarization_with_turn_aware_model(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], Any],
+) -> None:
+    """The seed-backed summarization middleware must resolve the turn model."""
+    from types import SimpleNamespace
+
+    from octop_harness.middleware.turn_aware_summary import TurnAwareSummaryModel
+
+    created: dict[str, Any] = {}
+
+    def fake_factory(model: Any, _backend: Any, **_kwargs: Any) -> Any:
+        helper = SimpleNamespace(
+            _summary_model=model.with_retry(),
+            trim_tokens_to_summarize=None,
+        )
+        mw = SimpleNamespace(_lc_helper=helper)
+        created["mw"] = mw
+        return mw
+
+    def fake_create(**kwargs: Any) -> Any:
+        from deepagents import graph
+
+        graph.create_summarization_middleware(kwargs["model"], object())
+        return MagicMock()
+
+    with (
+        mock_model_factory(),
+        patch("deepagents.graph.create_summarization_middleware", side_effect=fake_factory),
+        patch("deepagents.create_deep_agent", side_effect=fake_create),
+    ):
+        HarnessAgent(cfg)
+
+    assert isinstance(created["mw"]._lc_helper._summary_model, TurnAwareSummaryModel)
