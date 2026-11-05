@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 SUMMARY_INPUT_TOKEN_LIMIT = 8000
 SUMMARY_INPUT_RETRY_TOKEN_LIMIT = 4000
+SUMMARY_FALLBACK_KEEP = 20
 SUMMARY_FALLBACK_TEXT = (
     "The earlier conversation was too large to summarize. "
     "Older messages were saved to the history file. "
@@ -28,8 +30,28 @@ SUMMARY_FALLBACK_TEXT = (
 )
 
 
+def summary_fallback_keep() -> int:
+    """How many recent messages to keep when a stored cutoff is past the list.
+
+    ``OCTOP_SUMMARY_FALLBACK_KEEP`` overrides the default of 20. Invalid or
+    non-positive values fall back to that default.
+    """
+    raw = os.environ.get("OCTOP_SUMMARY_FALLBACK_KEEP", "").strip()
+    if not raw:
+        return SUMMARY_FALLBACK_KEEP
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("ignoring invalid OCTOP_SUMMARY_FALLBACK_KEEP=%r", raw)
+        return SUMMARY_FALLBACK_KEEP
+    if value <= 0:
+        return SUMMARY_FALLBACK_KEEP
+    return value
+
+
 def harden_summarization_middleware(mw: Any) -> Any:
     """Cap summary input and degrade only when the summary still overflows."""
+    _install_cutoff_fallback(mw)
     helper = getattr(mw, "_lc_helper", None)
     if helper is not None and getattr(helper, "trim_tokens_to_summarize", None) is None:
         helper.trim_tokens_to_summarize = SUMMARY_INPUT_TOKEN_LIMIT
@@ -57,6 +79,64 @@ def harden_summarization_middleware(mw: Any) -> Any:
     mw._create_summary = _create_summary
     mw._acreate_summary = _acreate_summary
     return mw
+
+
+def _install_cutoff_fallback(mw: Any) -> None:
+    """Keep the summary plus the recent tail when ``cutoff_index`` is past the list.
+
+    deepagents returns only the summary in that case. The stored index drifts
+    after compaction rewrites the message list, and every later turn then sees
+    the same summary. ``cutoff_index == len(messages)`` still means the whole
+    list was summarized and is left unchanged.
+    """
+    original = getattr(mw, "_apply_event_to_messages", None)
+    if not callable(original) or getattr(mw, "_octop_cutoff_fallback", False):
+        return
+    mw._octop_cutoff_fallback = True
+
+    def _apply_event_to_messages(messages: Any, event: Any) -> list[Any]:
+        return _apply_with_cutoff_fallback(original, messages, event)
+
+    mw._apply_event_to_messages = _apply_event_to_messages
+
+
+def _apply_with_cutoff_fallback(original: Callable[..., list[Any]], messages: Any, event: Any) -> list[Any]:
+    if not isinstance(event, dict):
+        return original(messages, event)
+    try:
+        summary_msg = event["summary_message"]
+        cutoff_idx = event["cutoff_index"]
+    except (KeyError, TypeError):
+        return original(messages, event)
+    message_list = list(messages)
+    if isinstance(cutoff_idx, int) and not isinstance(cutoff_idx, bool) and cutoff_idx > len(message_list):
+        kept = _recent_messages(message_list, summary_fallback_keep())
+        logger.warning(
+            "Summarization cutoff_index %d exceeds message count %d; keeping summary plus %d recent messages",
+            cutoff_idx,
+            len(message_list),
+            len(kept),
+        )
+        if not kept:
+            return [summary_msg]
+        return [summary_msg, *kept]
+    return original(messages, event)
+
+
+def _recent_messages(messages: list[Any], keep: int) -> list[Any]:
+    """Return the last ``keep`` messages, extended backward to a non-tool turn."""
+    if keep <= 0 or not messages:
+        return []
+    start = max(0, len(messages) - keep)
+    while start > 0 and _is_tool_message(messages[start]):
+        start -= 1
+    return messages[start:]
+
+
+def _is_tool_message(message: Any) -> bool:
+    if getattr(message, "type", None) == "tool":
+        return True
+    return type(message).__name__ == "ToolMessage"
 
 
 def _summary_or_fallback(helper: Any, call: Callable[[Any], str], messages: Any) -> str:

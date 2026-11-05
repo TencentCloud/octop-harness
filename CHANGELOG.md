@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 存储的摘要截止点超出当前消息列表时，回退为「摘要 + 最新消息」，模型不再只看到旧摘要；切片不会从裸工具结果开始。
+- 空闲维护时清理旧的 LangGraph checkpoint，删除前先备份 SQLite 文件。
+
 ## [1.0.8] - 2026-11-05
 
 ### 新增
