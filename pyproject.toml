@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "octop-harness"
 # Single source of truth for the package version (runtime reads via importlib.metadata).
-version = "1.0.5"
+version = "1.0.7"
 description = "Production-grade Harness Agent built on top of LangChain Deep Agents."
 readme = "README.md"
 license = { text = "MIT" }
@@ -42,9 +42,9 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "httpx>=0.27",
     "markdownify>=0.13",
-    # 1.0.2 reconciles owner-maintained USER.md/MEMORY.md and isolates
-    # structured runtime errors. This branch calls those APIs.
-    "octop-memory>=1.0.2",
+    # 1.0.3 exposes the background manual-document review API used by the
+    # memory scheduler and fixes extraction batching and persisted cursors.
+    "octop-memory>=1.0.3",
     "octop-browser>=0.9.9",
     "langchain-mcp-adapters>=0.3.0",
     # mcp 2.x breaks langchain-mcp-adapters (RequestContext import); pin until adapters support it.
@@ -65,7 +65,7 @@ opensandbox = ["opensandbox>=0.1.16,<1.2"]
 observability = ["langfuse>=4.9.0"]
 acp = ["agent-client-protocol>=0.9.0", "psutil>=5.9"]
 # Aggregate extras (category installs; fine-grained extras remain preferred)
-desktop = ["mss>=9.0", "pynput>=1.7", "pillow>=10.0"]
+desktop = ["mss>=9.0", "pynput>=1.7", "pillow>=13.0.0"]
 web-search-all = [
     "langchain-tavily>=0.1",
     "langchain-community>=0.3",
@@ -83,7 +83,7 @@ all = [  # library feature extras only; exclude cli — use [cli,all] when neede
     "esdk-obs-python>=3.24",
     "mss>=9.0",
     "pynput>=1.7",
-    "pillow>=10.0",
+    "pillow>=13.0.0",
     "langchain-tavily>=0.1",
     "langchain-community>=0.3",
     "google-api-python-client>=2.0",

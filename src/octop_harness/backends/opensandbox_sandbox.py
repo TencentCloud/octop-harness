@@ -15,6 +15,7 @@ import contextlib
 import logging
 import shlex
 from datetime import timedelta
+from pathlib import PurePosixPath
 from typing import Any
 
 from deepagents.backends.protocol import (
@@ -167,6 +168,30 @@ class OpenSandbox(BaseSandbox):
             exit_code=int(getattr(execution, "exit_code", 0) or 0),
             truncated=False,
         )
+
+    def mkdir_path(self, path: str) -> None:
+        """Create a directory inside the sandbox.
+
+        The SDK has no directory API. ``execute`` is always available, and the
+        sandbox itself is the workspace, so the virtual path is quoted and
+        passed to ``mkdir -p`` without a host-path mapping.
+        """
+        result = self.execute(f"mkdir -p {shlex.quote(path)}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"mkdir failed for {path!r}")
+
+    def delete_path(self, path: str) -> None:
+        """Delete a file or directory tree inside the sandbox."""
+        result = self.execute(f"rm -rf {shlex.quote(path)}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"delete failed for {path!r}")
+
+    def move_path(self, src: str, dest: str) -> None:
+        """Move or rename a file or directory tree inside the sandbox."""
+        parent = str(PurePosixPath(dest).parent)
+        result = self.execute(f"mkdir -p {shlex.quote(parent)} && mv {shlex.quote(src)} {shlex.quote(dest)}")
+        if result.exit_code not in (0, None):
+            raise OSError(result.output or f"move failed for {src!r} -> {dest!r}")
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         from opensandbox.models.filesystem import WriteEntry
