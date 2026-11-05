@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-11-05
+
 ### 新增
 
 - 文件工具接受工作区相对路径。`base_dir` 从文档所在目录解析路径，`execute` 的 `cwd` 只作用于这一条命令。
+- 新增腾讯云 TokenHub 供应商预设，并在 TokenHub、Token Plan、企业版 Token Plan 和混元 Token Plan 中加入 HY4 模型。
 
 ### 修复
 
