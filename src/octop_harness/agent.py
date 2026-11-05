@@ -56,6 +56,7 @@ from octop_harness.middleware.skill_filter import SkillFilterMiddleware, render_
 from octop_harness.middleware.tool_order import TaskToolLastMiddleware
 from octop_harness.middleware.tool_search import ToolSearchMiddleware
 from octop_harness.middleware.tools_filter import ToolsFilterMiddleware
+from octop_harness.middleware.turn_aware_summary import install_turn_aware_summary_model
 from octop_harness.protocols import resolve_protocol
 from octop_harness.request import ChatRequest
 
@@ -1766,8 +1767,9 @@ class HarnessAgent:
         checkpointer = self._resolve_checkpointer()
         self._checkpointer_instance: Any = checkpointer
 
+        seed_model = self._build_seed_model()
         kwargs: dict[str, Any] = {
-            "model": self._build_seed_model(),
+            "model": seed_model,
             "tools": tools,
             "middleware": middleware,
             "backend": self._backend,
@@ -1866,6 +1868,17 @@ class HarnessAgent:
             # whole evicted history. Cap it before the summary model sees it.
             kwargs.setdefault("trim_tokens_to_summarize", SUMMARY_INPUT_TOKEN_LIMIT)
             mw = harden_summarization_middleware(orig_factory(*args, **kwargs))
+            factory_model = args[0] if args else kwargs.get("model")
+            # Only the seed-backed middlewares (main agent + inherited subagents)
+            # need per-turn resolution; an explicit subagent model stays pinned.
+            if factory_model is seed_model:
+                install_turn_aware_summary_model(
+                    mw,
+                    seed=seed_model,
+                    factory=self._model_factory,
+                    pick_default_ref=self._config.pick_default_model_ref,
+                    user_selector=self._config.model_selector,
+                )
             captured.append(mw)
             return mw
 
@@ -1881,8 +1894,9 @@ class HarnessAgent:
         Installs a turn-aware ``profile`` so deepagents
         ``SummarizationMiddleware`` fraction thresholds follow the same turn
         model-ref rules as ``ModelRouterMiddleware`` (explicit override /
-        default). Invoke/summary LLM still use the seed; the router swaps the
-        chat model separately.
+        default). The summary call itself is swapped per turn by
+        :func:`install_turn_aware_summary_model`; the router swaps the chat
+        model separately.
         """
         from octop_harness.middleware.turn_aware_profile import install_turn_aware_profile
 
