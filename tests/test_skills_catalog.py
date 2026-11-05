@@ -77,6 +77,29 @@ class TestSkillCatalog:
         assert row["name"] == "display-name"
         assert row["enabled"] is False
 
+    async def test_crlf_skill_md_still_lists_skill(self, fs_backend: Any, tmp_path: Path) -> None:
+        """Windows-authored SKILL.md (CRLF) keeps its name/description/removed flag."""
+        ws = BackendWorkspace(fs_backend, tmp_path)
+        await ws.aupload_many(
+            [
+                (
+                    "skills/win-skill/SKILL.md",
+                    b"---\r\nname: Win Skill\r\ndescription: written on Windows\r\n---\r\n# Body\r\n",
+                ),
+                (
+                    "skills/gone-win/SKILL.md",
+                    b"---\r\nremoved: true\r\n---\r\n",
+                ),
+            ]
+        )
+
+        rows = await list_skill_summaries(ws)
+        by_slug = {row["slug"]: row for row in rows}
+        assert set(by_slug) == {"win-skill"}
+        assert by_slug["win-skill"]["name"] == "Win Skill"
+        assert by_slug["win-skill"]["description"] == "written on Windows"
+        assert by_slug["win-skill"]["enabled"] is True
+
     async def test_removed_skills_are_omitted(self, fs_backend: Any, tmp_path: Path) -> None:
         ws = BackendWorkspace(fs_backend, tmp_path)
         await ws.awrite_text(
