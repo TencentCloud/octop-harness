@@ -132,7 +132,77 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
             return f"memory_save failed: {exc.__class__.__name__}"
         return "Memory saved to octop-memory."
 
-    return [memory_search, memory_get, memory_save]  # type: ignore[list-item]
+    @tool
+    def memory_deprecate(atom_id: str, reason: str | None = None) -> str:
+        """Mark a memory atom as deprecated / superseded / incorrect.
+
+        Use when the user corrects an existing memory, tells you to forget
+        a wrong fact, or says a previous decision is no longer valid. The
+        atom is hidden from future recall but kept for audit trail.
+        Pass the atom_id from a previous ``memory_search`` hit.
+
+        Args:
+            atom_id: The memory atom id (e.g. "atom/abc123.md").
+            reason: Optional explanation of why this atom is being deprecated.
+        """
+        if not atom_id.strip():
+            return "memory_deprecate failed: atom_id is empty"
+        try:
+            if hasattr(service, "deprecate_atom"):
+                result = service.deprecate_atom(atom_id.strip(), reason=reason, actor="agent")
+            elif hasattr(service, "deprecate"):
+                result = service.deprecate(atom_id.strip(), reason=reason, actor="agent")
+            else:
+                return (
+                    "memory_deprecate is not available on this MemoryService "
+                    "(octop-memory version may predate it). Use the dashboard "
+                    "memory page to deprecate entries manually."
+                )
+        except Exception as exc:  # pragma: no cover - fail softly; pylint: disable=broad-except
+            logger.warning("memory_deprecate failed: %s", exc, exc_info=True)
+            return f"memory_deprecate failed: {exc.__class__.__name__}: {exc}"
+        return f"Memory atom {atom_id} deprecated." + (f" Reason: {reason}" if reason else "")
+
+    @tool
+    def memory_replace(atom_id: str, new_content: str, reason: str | None = None) -> str:
+        """Overwrite an existing memory atom with corrected content.
+
+        Use when the user says a remembered fact is wrong and provides the
+        corrected version. Pass the atom_id from a previous ``memory_search``
+        hit and the replacement assertion text.
+
+        Args:
+            atom_id: The memory atom id to replace.
+            new_content: The corrected assertion that replaces the old one.
+            reason: Optional explanation of why the replacement was needed.
+        """
+        if not atom_id.strip():
+            return "memory_replace failed: atom_id is empty"
+        if not new_content.strip():
+            return "memory_replace failed: new_content is empty"
+        try:
+            if hasattr(service, "replace_atom"):
+                result = service.replace_atom(atom_id.strip(), new_content.strip(), reason=reason)
+            elif hasattr(service, "replace"):
+                result = service.replace(atom_id.strip(), new_content.strip(), reason=reason)
+            else:
+                return (
+                    "memory_replace is not available on this MemoryService "
+                    "(octop-memory version may predate it). Use the dashboard "
+                    "memory page to edit entries manually."
+                )
+        except Exception as exc:  # pragma: no cover - fail softly; pylint: disable=broad-except
+            logger.warning("memory_replace failed: %s", exc, exc_info=True)
+            return f"memory_replace failed: {exc.__class__.__name__}: {exc}"
+        return f"Memory atom {atom_id} replaced with corrected content."
+
+    return [
+        memory_search,
+        memory_get,
+        memory_save,
+        memory_deprecate,
+        memory_replace,
+    ]  # type: ignore[list-item]
 
 
 __all__ = ["build_memory_tools"]
