@@ -6,12 +6,16 @@ import io
 import os
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import ToolMessage
+from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from octop_harness.backends import resolve_backend, spec_supports_execution
+from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
 
 
 def _tar_bytes(arcname: str, data: bytes) -> bytes:
@@ -320,6 +324,8 @@ class TestPathMapping:
         assert sandbox._map_path(".") == root
         assert sandbox._map_path("/") == root
         assert sandbox._map_path("/tmp/x") == f"{root}/tmp/x"
+        assert sandbox.shell_path("/.octop/skills/daily-hot-news") == f"{root}/.octop/skills/daily-hot-news"
+        assert sandbox.shell_path(f"{root}/.octop/skills/daily-hot-news") == f"{root}/.octop/skills/daily-hot-news"
         sandbox.close()
 
     def test_explicit_workspace_path_overrides_dir(
@@ -337,7 +343,78 @@ class TestPathMapping:
         )
         assert sandbox._workspace_root == "/workspace"
         assert client.containers.run.call_args.kwargs["working_dir"] == "/workspace"
+        assert sandbox.shell_path("/.octop/skills/daily-hot-news") == "/workspace/.octop/skills/daily-hot-news"
+        assert sandbox.shell_path("/docs/guide.md") == "/workspace/docs/guide.md"
         sandbox.close()
+
+
+def _guard_call(guard: FilesystemGuardMiddleware, name: str, args: dict[str, object]) -> dict[str, object]:
+    request = ToolCallRequest(
+        tool_call={"name": name, "args": args, "id": "call-1"},
+        tool=None,
+        state={},
+        runtime=None,  # type: ignore[arg-type]
+    )
+    seen: dict[str, object] = {}
+
+    def handler(item: ToolCallRequest) -> ToolMessage:
+        seen.update(item.tool_call["args"])
+        return ToolMessage(content="ok", tool_call_id="call-1")
+
+    guard.wrap_tool_call(request, handler)
+    return seen
+
+
+class TestGuardUsesDockerShellPath:
+    """FilesystemGuard and DockerSandbox share one path, not a stand-in mapper."""
+
+    def test_default_mirror_and_custom_workspace_path(self, tmp_path: Path, mock_docker: Any) -> None:
+        from octop_harness.backends.docker_sandbox import DockerSandbox
+
+        _docker_mod, _client, _container = mock_docker
+        host = str(tmp_path.resolve())
+        mirrored = DockerSandbox(workspace_dir=tmp_path, image="python:3.12-slim")
+        custom = DockerSandbox(workspace_dir=tmp_path, workspace_path="/workspace", image="python:3.12-slim")
+        try:
+            for sandbox, container_root in ((mirrored, host), (custom, "/workspace")):
+                guard = FilesystemGuardMiddleware(
+                    workspace_dir=host,
+                    workspace=SimpleNamespace(backend=sandbox),  # type: ignore[arg-type]
+                )
+                assert _guard_call(guard, "read_file", {"file_path": "docs/guide.md"}) == {
+                    "file_path": "/docs/guide.md",
+                }
+                assert _guard_call(
+                    guard,
+                    "read_file",
+                    {"file_path": "references/sources.md", "base_dir": "/.octop/skills/daily-hot-news"},
+                ) == {"file_path": "/.octop/skills/daily-hot-news/references/sources.md"}
+                assert _guard_call(
+                    guard,
+                    "read_file",
+                    {"file_path": f"{host}/skills/daily-hot-news/SKILL.md"},
+                ) == {"file_path": f"{host}/skills/daily-hot-news/SKILL.md"}
+                assert _guard_call(guard, "glob", {"pattern": "**/fetch_dailyhot.mjs"}) == {
+                    "pattern": "**/fetch_dailyhot.mjs",
+                    "path": "/",
+                }
+                assert _guard_call(
+                    guard,
+                    "execute",
+                    {"command": "node scripts/fetch_dailyhot.mjs weibo", "cwd": "/.octop/skills/daily-hot-news"},
+                ) == {
+                    "command": (
+                        f"cd -- {container_root}/.octop/skills/daily-hot-news && node scripts/fetch_dailyhot.mjs weibo"
+                    ),
+                }
+                assert _guard_call(
+                    guard,
+                    "execute",
+                    {"command": "node scripts/fetch_dailyhot.mjs weibo", "cwd": "scripts"},
+                ) == {"command": f"cd -- {container_root}/scripts && node scripts/fetch_dailyhot.mjs weibo"}
+        finally:
+            mirrored.close()
+            custom.close()
 
     def test_optional_user_volumes_passed_through(
         self,

@@ -46,6 +46,32 @@
     "variant": "coding_plan"
   },
   {
+    "id": "tencent-tokenhub",
+    "name": "Tencent Cloud TokenHub",
+    "base_url": "https://tokenhub.tencentmaas.com/v1",
+    "protocol": "openai",
+    "api_key_env": "TENCENT_TOKENHUB_API_KEY",
+    "api_key_prefix": "",
+    "logo": "tencent-token-plan.png",
+    "models": [
+      {
+        "id": "hy4",
+        "name": "Hy4",
+        "max_input_tokens": 960000,
+        "context_window": 1024000,
+        "max_output_tokens": 64000,
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ]
+      }
+    ],
+    "vendor": "tencent",
+    "vendor_name": "Tencent Cloud",
+    "variant": "tokenhub"
+  },
+  {
     "id": "tencent-token-plan",
     "name": "Tencent Cloud Token Plan",
     "base_url": "https://api.lkeap.cloud.tencent.com/plan/v3",
@@ -58,6 +84,17 @@
         "id": "tc-code-latest",
         "name": "Auto",
         "max_input_tokens": 196608,
+        "input": [
+          "text"
+        ]
+      },
+      {
+        "id": "hy4",
+        "name": "Hy4",
+        "max_input_tokens": 960000,
+        "context_window": 1024000,
+        "max_output_tokens": 64000,
+        "reasoning": true,
         "input": [
           "text"
         ]
@@ -138,6 +175,17 @@
         "id": "auto",
         "name": "Auto",
         "max_input_tokens": 196608,
+        "input": [
+          "text"
+        ]
+      },
+      {
+        "id": "hy4",
+        "name": "Hy4",
+        "max_input_tokens": 960000,
+        "context_window": 1024000,
+        "max_output_tokens": 64000,
+        "reasoning": true,
         "input": [
           "text"
         ]
@@ -283,6 +331,17 @@
     "api_key_prefix": "sk-tp-",
     "logo": "tencent-token-plan.png",
     "models": [
+      {
+        "id": "hy4",
+        "name": "Hy4",
+        "max_input_tokens": 960000,
+        "context_window": 1024000,
+        "max_output_tokens": 64000,
+        "reasoning": true,
+        "input": [
+          "text"
+        ]
+      },
       {
         "id": "hy3",
         "name": "Hy3",

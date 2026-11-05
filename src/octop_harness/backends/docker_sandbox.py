@@ -686,6 +686,14 @@ class DockerSandbox(BaseSandbox):
 
         return self._clamp_to_workspace(f"{root}{raw}")
 
+    def shell_path(self, path: str) -> str:
+        """Map an agent-facing path to the directory ``execute`` can ``cd`` into.
+
+        File tools already pass virtual paths through :meth:`_map_path`. The
+        shell does not, so ``cwd`` must be the in-container workspace path.
+        """
+        return self._map_path(path)
+
     def _to_virtual_path(self, container_or_any: str) -> str:
         """Container ``{workspace}/foo`` → virtual ``/foo`` for BackendWorkspace.
 

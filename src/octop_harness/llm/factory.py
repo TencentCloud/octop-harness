@@ -662,6 +662,11 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 
         def _get_request_payload(self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
             input_ = _sanitize_input_messages(input_)
+            # Drop office/PDF ``file`` blocks before LangChain turns them into
+            # ``file_data`` data URIs. ModelConfig.input has no file modality,
+            # and OpenAI-compatible backends (MiniMax and others) reject the
+            # part. Images stay. Copies only messages that change.
+            input_ = _omit_inline_file_blocks(input_)
             payload: dict[str, Any] = super()._get_request_payload(input_, stop=stop, **kwargs)
             if getattr(self, "_harness_codex", False):
                 source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
@@ -669,6 +674,7 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             messages_out = payload.get("messages")
             if not isinstance(messages_out, list):
                 return payload
+            _drop_openai_file_parts(messages_out)
             supported: set[str] = getattr(self, "_harness_supported_input", set()) or {"text", "image"}
             if "image" not in supported:
                 _strip_unsupported_content_types(messages_out)
@@ -684,6 +690,66 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 # ---------------------------------------------------------------------------
 # Legacy image block sanitization
 # ---------------------------------------------------------------------------
+
+_FILE_BLOCK_TYPES = frozenset({"file", "input_file"})
+_FILE_OMITTED_NOTE = "[file omitted: binary file content was not sent to the model]"
+
+
+def _is_file_block(block: Any) -> bool:
+    return isinstance(block, dict) and block.get("type") in _FILE_BLOCK_TYPES
+
+
+def _content_without_file_blocks(content: list[Any]) -> str | list[Any] | None:
+    """Return replacement content when *content* embeds a binary file block.
+
+    ``None`` means the list has no file block and should be left unchanged.
+    Text-only leftovers collapse to a string so providers that reject list
+    content still accept the message.
+    """
+    if not any(_is_file_block(block) for block in content):
+        return None
+    kept = [block for block in content if not _is_file_block(block)]
+    if not kept:
+        return _FILE_OMITTED_NOTE
+    if all(isinstance(block, dict) and block.get("type") == "text" for block in kept):
+        text = "\n".join(str(block.get("text") or "") for block in kept if isinstance(block, dict))
+        return f"{text}\n{_FILE_OMITTED_NOTE}".strip() if text else _FILE_OMITTED_NOTE
+    return [*kept, {"type": "text", "text": _FILE_OMITTED_NOTE}]
+
+
+def _omit_inline_file_blocks(input_: Any) -> Any:
+    """Copy messages that carry ``type: file`` blocks, leaving originals intact."""
+    if not isinstance(input_, list):
+        return input_
+    from langchain_core.messages import BaseMessage
+
+    rewritten: list[Any] | None = None
+    for index, msg in enumerate(input_):
+        if not isinstance(msg, BaseMessage):
+            continue
+        content = msg.content
+        if not isinstance(content, list):
+            continue
+        replacement = _content_without_file_blocks(content)
+        if replacement is None:
+            continue
+        if rewritten is None:
+            rewritten = list(input_)
+        rewritten[index] = msg.model_copy(update={"content": replacement})
+    return rewritten if rewritten is not None else input_
+
+
+def _drop_openai_file_parts(messages: list[Any]) -> None:
+    """Remove already-serialized OpenAI file parts from a request payload."""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        replacement = _content_without_file_blocks(content)
+        if replacement is not None:
+            msg["content"] = replacement
 
 
 def _sanitize_input_messages(input_: Any) -> Any:
