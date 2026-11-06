@@ -17,6 +17,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Iterator
+from inspect import signature
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -714,11 +715,17 @@ class TestMemoryMiddlewareWithService:
 
 class TestMemoryTools:
     @pytest.mark.parametrize("kind", ["Fact", "Preference", "Decision", "Task"])
-    def test_classified_save_reaches_real_memory_without_model_calls(
+    def test_classified_save_contract_with_installed_memory(
         self, service: MemoryService, memory: Memory, kind: str
     ) -> None:
         save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
-        assert "saved" in save.invoke({"content": "User prefers Chinese replies", "kind": kind}).lower()
+        result = save.invoke({"content": "User prefers Chinese replies", "kind": kind})
+        if kind != "Fact" and "kind" not in signature(service.save).parameters:
+            assert "upgrade octop-memory" in result
+            assert memory.list_candidates() == []
+            assert memory.list_atoms() == []
+            return
+        assert "saved" in result.lower()
         candidates = memory.list_candidates()
         assert len(candidates) == 1
         assert candidates[0].candidate_type == kind

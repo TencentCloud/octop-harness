@@ -106,6 +106,8 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
   dependency declarations remain on the existing release until a supporting release exists.
   Historical facts are unchanged and saving a Task does not schedule a reminder.
   `memory_search` / `memory_get` retrieve additional history.
+  CI checks released-library compatibility separately from the classified-save
+  source contract pinned to the companion memory PR revision.
 - Eligible conversation content is captured as **L0 raw events**, then distilled asynchronously into **L2 atoms** (`AtomCard`s) and **L3 entity pages**. Runtime failures are excluded; normal troubleshooting knowledge and explicit remember requests remain eligible.
 - Model failures raise after retries; retry eligibility follows LangChain's defaults, with the existing retry budget and backoff settings. Callers must handle exceptions from `call()` / streaming. Checkpoints retain failed tasks without adding a synthetic assistant reply. Hosts display errors separately; automatic team failure notifications use `configurable.octop_memory_capture_exclude=true` to keep diagnostics out of memory.
 - Powered by the octop-memory middleware; memory travels with the workspace.
