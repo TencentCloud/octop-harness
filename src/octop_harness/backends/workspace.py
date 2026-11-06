@@ -383,6 +383,26 @@ class BackendWorkspace:
         """Workspace-relative prefix for system files, or ``\"\"`` for workspace root."""
         return self._system_files_path
 
+    def _assert_host_path_under_workspace(self, host_path: str | Path) -> None:
+        """Raise PermissionError when *host_path* resolves outside this workspace.
+
+        This is the single choke-point for cross-agent sandbox isolation. Both
+        deepagents ``FilesystemBackend._resolve_path`` and our own
+        :meth:`resolve_path` / :meth:`_backend_storage_key` funnel host paths
+        through here for virtual-mode backends so ``/other-agent/...`` absolute
+        paths cannot escape the agent's ``workspace_dir`` jail.
+        """
+        try:
+            resolved = Path(host_path).resolve()
+        except OSError:
+            resolved = Path(str(host_path))
+        workspace = self._workspace_dir.resolve()
+        try:
+            resolved.relative_to(workspace)
+        except (ValueError, OSError) as exc:
+            msg = f"path {host_path!r} escapes workspace {self._workspace_dir}"
+            raise PermissionError(msg) from exc
+
     def system_rel(self, logical: str) -> str:
         """Return the stored workspace-relative fragment for a logical system path."""
         return apply_system_files_prefix(str(logical).replace("\\", "/"), self._system_files_path)
@@ -483,13 +503,19 @@ class BackendWorkspace:
                 resolve_fn = getattr(self._backend, "_resolve_path", None)
                 if callable(resolve_fn):
                     try:
-                        return str(resolve_fn(mapped))
-                    except (OSError, PermissionError, ValueError):
+                        host = str(resolve_fn(mapped))
+                        self._assert_host_path_under_workspace(host)
+                        return host
+                    except PermissionError:
+                        raise
+                    except (OSError, ValueError):
                         logger.debug(
                             "BackendWorkspace.resolve_path virtual map failed for %s",
                             mapped,
                             exc_info=True,
                         )
+            # Non-virtual host root: the absolute path IS a host path — verify jail.
+            self._assert_host_path_under_workspace(mapped)
             return mapped
         fragment = self._stored_relative(s)
         if getattr(self._backend, "sandbox_fs", False):
@@ -530,7 +556,26 @@ class BackendWorkspace:
             return self._remap_cloud_absolute(expanded) if is_cloud_storage_backend(self._backend) else expanded
         if s.startswith("/"):
             mapped = apply_system_files_prefix(s.replace("\\", "/"), self._system_files_path)
-            return self._remap_cloud_absolute(mapped) if is_cloud_storage_backend(self._backend) else mapped
+            if is_cloud_storage_backend(self._backend):
+                return self._remap_cloud_absolute(mapped)
+            # Host-mounted backends: verify sandbox jail before returning the key.
+            # deepagents may call write/read/ls directly with an absolute key,
+            # bypassing resolve_path — so we guard here too.
+            if getattr(self._backend, "sandbox_fs", False):
+                return mapped
+            if _backend_virtual_mode(self._backend):
+                resolve_fn = getattr(self._backend, "_resolve_path", None)
+                if callable(resolve_fn):
+                    try:
+                        host = str(resolve_fn(mapped))
+                        self._assert_host_path_under_workspace(host)
+                        return mapped
+                    except PermissionError:
+                        raise
+                    except (OSError, ValueError):
+                        pass
+            self._assert_host_path_under_workspace(mapped)
+            return mapped
 
         fragment = self._stored_relative(s) if map_system_paths else _strip_relative_prefix(s.replace("\\", "/"))
         workspace = self._workspace_dir.resolve()
@@ -1316,3 +1361,4 @@ __all__ = [
     "normalize_system_files_path",
     "remote_workspace_virtual_root",
 ]
+
