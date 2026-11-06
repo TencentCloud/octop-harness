@@ -12,11 +12,12 @@ Long-tail tools are called through ``call_deferred_tool``, whose schema does not
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
@@ -784,10 +785,15 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         if not isinstance(payload, dict):
             payload = {}
         call_id = str(request.tool_call.get("id") or "")
-        tool = self._deferred_catalog(request).get(target)
+        catalog = self._deferred_catalog(request)
+        tool = catalog.get(target)
         if tool is None or not target:
             _DISPATCH.unknown()
-            text = _missing_deferred_tool(target, chinese=self._chinese)
+            text = _missing_deferred_tool(
+                target,
+                chinese=self._chinese,
+                candidates=tuple(catalog),
+            )
             return ToolMessage(content=text, name=_DEFERRED_TOOL_NAME, tool_call_id=call_id, status="error")
         forwarded = cast(ToolCall, {**request.tool_call, "name": target, "args": payload})
         return request.override(tool_call=forwarded, tool=cast(BaseTool, tool))
@@ -1505,13 +1511,34 @@ def _deferred_tool_note(tools: list[Any], *, chinese: bool) -> str:
     return header + "\n" + "\n".join(lines)
 
 
-def _missing_deferred_tool(target: str, *, chinese: bool) -> str:
+def _near_miss_hint(missing: str, candidates: Sequence[str], *, chinese: bool) -> str:
+    """Return up to five catalog names closest to a dispatcher miss.
+
+    Family match first (same server and resource prefix, e.g. ``nifty-pm_work_``),
+    fuzzy match second. Names only, never schemas, so a miss stays cheap.
+    """
+    if not missing or not candidates:
+        return ""
+    stem = missing.rsplit("_", 1)[0] + "_" if "_" in missing else ""
+    near: list[str] = [c for c in candidates if stem and c.startswith(stem)][:5]
+    if not near:
+        near = difflib.get_close_matches(missing, list(candidates), n=5, cutoff=0.6)
+    if not near:
+        return ""
+    label = "本轮相近的工具: " if chinese else "Closest tools this turn: "
+    return label + ", ".join(near)
+
+def _missing_deferred_tool(
+    target: str,
+    *,
+    chinese: bool,
+    candidates: Sequence[str] = (),
+) -> str:
     """Name a dispatcher miss without claiming a tool the model cannot see."""
     missing = target or "(empty)"
-    if chinese:
-        return f"没有名为 {missing} 的本轮工具。"
-    return f"No turn tool named {missing}."
-
+    hint = _near_miss_hint(missing, candidates, chinese=chinese)
+    base = f"没有名为 {missing} 的本轮工具。" if chinese else f"No turn tool named {missing}."
+    return f"{base} {hint}" if hint else base
 
 def _retarget_tool_result(
     result: ToolMessage | Command[Any],
