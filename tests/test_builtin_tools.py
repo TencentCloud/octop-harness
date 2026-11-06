@@ -134,7 +134,10 @@ class TestWebFetch:
                 """Return canned HTML."""
                 return FakeResponse()
 
-        with patch("octop_harness.builtin.tools.web_fetch.httpx.Client", FakeClient):
+        with (
+            patch("octop_harness.builtin.tools.web_fetch.validate_agent_fetch_url", side_effect=lambda url: url),
+            patch("octop_harness.builtin.tools.web_fetch.httpx.Client", FakeClient),
+        ):
             md = web_fetch.invoke({"url": "https://example.com"})
         # Basic markdown markers we expect from markdownify.
         assert "Title" in md
@@ -170,7 +173,10 @@ class TestWebFetch:
             def get(self, url: str) -> FakeResponse:
                 return FakeResponse()
 
-        with patch("octop_harness.builtin.tools.web_fetch.httpx.Client", FakeClient):
+        with (
+            patch("octop_harness.builtin.tools.web_fetch.validate_agent_fetch_url", side_effect=lambda url: url),
+            patch("octop_harness.builtin.tools.web_fetch.httpx.Client", FakeClient),
+        ):
             result = web_fetch.invoke({"url": "https://example.com/missing"})
 
         assert isinstance(result, str)
@@ -194,7 +200,10 @@ class TestWebFetch:
             def get(self, url: str) -> object:
                 raise httpx.ConnectError("Name or service not known")
 
-        with patch("octop_harness.builtin.tools.web_fetch.httpx.Client", FakeClient):
+        with (
+            patch("octop_harness.builtin.tools.web_fetch.validate_agent_fetch_url", side_effect=lambda url: url),
+            patch("octop_harness.builtin.tools.web_fetch.httpx.Client", FakeClient),
+        ):
             result = web_fetch.invoke({"url": "https://no-such-host.invalid/"})
 
         assert isinstance(result, str)

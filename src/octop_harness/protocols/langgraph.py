@@ -15,17 +15,22 @@ from octop_harness.protocols.think_splitter import ThinkSplitter
 from octop_harness.usage import normalize_usage_metadata
 
 _INTERNAL_LC_SOURCES = frozenset({"summarization"})
+_HISTORY_REPLAY_NODES = frozenset({"PatchToolCallsMiddleware.before_agent"})
 
 
 def _is_internal_model_stream(metadata: Any) -> bool:
-    """Return whether a LangGraph message stream belongs to an internal LLM call.
+    """Return whether a message stream is internal model output or replayed history.
 
     LangChain tags conversation-compaction calls with
     ``metadata["lc_source"] == "summarization"``.  LangGraph's ``messages``
     stream includes those nested model tokens alongside the user-facing model
     response, so they must be removed before protocol consumers see them.
+    Repairing dangling tool calls also re-emits historical AI messages; only
+    its values/updates are state changes, not fresh user-facing model output.
     """
-    return isinstance(metadata, dict) and metadata.get("lc_source") in _INTERNAL_LC_SOURCES
+    return isinstance(metadata, dict) and (
+        metadata.get("lc_source") in _INTERNAL_LC_SOURCES or metadata.get("langgraph_node") in _HISTORY_REPLAY_NODES
+    )
 
 
 def _content_block_delta(block: Any) -> tuple[str, str]:

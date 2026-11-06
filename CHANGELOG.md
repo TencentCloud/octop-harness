@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 修复工具调用历史时，不再把旧回答、思考及用量重放为当前轮输出；保留 checkpoint 修复与状态更新，避免宿主重复展示和保存旧回答（TencentCloud/Octop#850）。
+
 ## [1.0.8] - 2026-11-05
 
 ### 新增
