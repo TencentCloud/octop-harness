@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 出站 ACP 回合发生工具调用时，工具结果仍会包含委派代理的最终回复。
+
 ## [1.0.8] - 2026-11-05
 
 ### 新增
