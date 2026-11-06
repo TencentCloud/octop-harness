@@ -713,6 +713,17 @@ class TestMemoryMiddlewareWithService:
 
 
 class TestMemoryTools:
+    @pytest.mark.parametrize("kind", ["Fact", "Preference", "Decision", "Task"])
+    def test_classified_save_reaches_real_memory_without_model_calls(
+        self, service: MemoryService, memory: Memory, kind: str
+    ) -> None:
+        save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
+        assert "saved" in save.invoke({"content": "User prefers Chinese replies", "kind": kind}).lower()
+        candidates = memory.list_candidates()
+        assert len(candidates) == 1
+        assert candidates[0].candidate_type == kind
+        assert memory.list_atoms()[0].candidate_id == candidates[0].id
+
     def test_returns_recall_tools(self, service: MemoryService) -> None:
         tools = build_memory_tools(service)
         assert {t.name for t in tools} == {"memory_search", "memory_get", "memory_save"}

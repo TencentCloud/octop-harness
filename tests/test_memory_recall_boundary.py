@@ -20,6 +20,15 @@ from octop_harness.middleware.memory import MemoryMiddleware
 from octop_harness.middleware.memory_recall import RECALL_SNAPSHOT_KEY, replay_recall_snapshots, stamp_recall_snapshot
 
 
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize("policy", ["auto", "user", "agent"])
+def test_structured_memory_prompt_asks_for_kind_without_another_model(language: str, policy: str) -> None:
+    prompt = render_memory_policy_prompt(language=language, memory_enabled=True, policy=policy)
+    for kind in ("Fact", "Preference", "Decision", "Task"):
+        assert kind in prompt
+    assert "kind" in prompt
+
+
 def test_current_request_is_an_unchanged_prefix_before_quoted_historical_questions() -> None:
     current = "What is the weather today?"
     historical = "User previously asked: Is DSHA supported on all models?"
