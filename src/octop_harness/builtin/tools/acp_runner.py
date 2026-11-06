@@ -304,8 +304,14 @@ async def _run_streaming_action(
         permission_text = format_permission_required(suspended) if suspended is not None else ""
         return "\n\n".join(part for part in (body, permission_text) if part) or "Permission required."
 
-    return body or format_final_response(
-        runner_name=runner_name,
-        execution_cwd=execution_cwd,
-        final_event=result.get("event") if isinstance(result.get("event"), dict) else final_event,
-    )
+    result_event = result.get("event")
+    closing_event = result_event if isinstance(result_event, dict) else final_event
+    if not body:
+        return format_final_response(
+            runner_name=runner_name,
+            execution_cwd=execution_cwd,
+            final_event=closing_event,
+        )
+
+    closing_text = render_event_text(closing_event) if closing_event is not None else None
+    return f"{body}\n\n{closing_text}" if closing_text and closing_text not in chunks else body
