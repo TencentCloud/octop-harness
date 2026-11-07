@@ -126,6 +126,7 @@ _TOOLS_ALWAYS_KEPT = frozenset(
         "yuanbao_search",
         "searchfree_search",
         "you_search",
+        "keenable_search",
         "send_file_to_user",
         "browser_use",
         "desktop_screenshot",
