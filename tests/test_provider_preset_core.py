@@ -269,6 +269,7 @@ class TestCoreProviderPresets:
         assert token_plan.api_key_prefix == "sk-tp-"
         assert set(models) == {
             "tc-code-latest",
+            "hy4",
             "minimax-m2.7",
             "glm-5",
             "glm-5.1",
@@ -292,6 +293,7 @@ class TestCoreProviderPresets:
         enterprise_models = {model.id: model for model in enterprise.models}
         assert set(enterprise_models) == {
             "auto",
+            "hy4",
             "deepseek-v4-flash",
             "deepseek-v4-flash-0731",
             "deepseek-v4-flash-202605",
@@ -319,8 +321,12 @@ class TestCoreProviderPresets:
         hy_plan = presets["tencent-hy-token-plan"]
         assert hy_plan.base_url == "https://api.lkeap.cloud.tencent.com/plan/v3"
         assert hy_plan.variant == "hy_token_plan"
-        assert {model.id for model in hy_plan.models} == {"hy3", "hy3-preview"}
-        assert {model.max_input_tokens for model in hy_plan.models} == {256_000}
+        assert {model.id for model in hy_plan.models} == {"hy3", "hy3-preview", "hy4"}
+        assert {model.id: model.max_input_tokens for model in hy_plan.models} == {
+            "hy3": 256_000,
+            "hy3-preview": 256_000,
+            "hy4": 960_000,
+        }
         assert {model.max_output_tokens for model in hy_plan.models} == {64_000}
 
     def test_zhipu_glm_context_windows_match_provider_catalog(self) -> None:

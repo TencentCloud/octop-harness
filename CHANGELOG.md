@@ -11,11 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 可选网页搜索 `keenable`（`keenable_search`）。显式配置 `["keenable"]` 无需 API key（每 IP 每小时 1000 次）；设置 `KEENABLE_API_KEY` 走带 key 的端点并提高限额。仅在设置 `KEENABLE_API_KEY` 后才加入 `auto`，默认工具集不变。
 
+## [1.0.8] - 2026-11-05
+
+### 新增
+
+- 文件工具接受工作区相对路径。`base_dir` 从文档所在目录解析路径，`execute` 的 `cwd` 只作用于这一条命令。
+- 新增腾讯云 TokenHub 供应商预设，并在 TokenHub、Token Plan、企业版 Token Plan 和混元 Token Plan 中加入 HY4 模型。
+
 ### 修复
 
+- 每轮模式提示、队友名单和决策短名单放在用户消息之后，系统提示和核心工具列表保持可缓存。以 `[turn note]` 或 `[本轮说明]` 开头的用户消息仍视为用户原文。
+- OpenAI 兼容请求去掉内联的 office 和 PDF 文件块，图片保留。
 - 召回追加在用户原文和附件之后，以带来源和角色标记的历史引用隔离旧问题和指令；冻结每轮快照，保留已有 checkpoint 的精确重放和请求公共前缀（TencentCloud/Octop#2043）。
 - 召回 DEBUG 日志附完整查询长度和 SHA-256 指纹，长查询可检索、对账，无需输出查询原文（TencentCloud/Octop#811）。
 - 记忆运行时关闭后，等待已提交的后台采集、提炼和维护任务完成再释放数据库，避免数据库已关闭错误和对话记忆丢失；同时覆盖配置变更前的旧中间件及图构建前的会话提炼（TencentCloud/Octop#484）。
+
+### 变更
+
+- 技能位置提示里 `.octop/skills` 排在最前。同名冲突仍由最后加载的来源覆盖。
+- 未打分的决策轮次保持同一份可缓存系统提示和核心工具列表。打分服务不可达时，完整目录留在本轮说明里。
 
 ## [1.0.7] - 2026-11-04
 
