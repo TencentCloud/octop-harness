@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 新增可选的 `cloro` 网页搜索供应商（`cloro_search`），返回实时 Google 自然搜索结果，可指定国家。需要 `CLORO_API_KEY`；设置后加入 `auto`。Add the optional `cloro` web-search provider (`cloro_search`): live Google organic results for a query and country. Needs `CLORO_API_KEY`; joins `auto` once it is set.
+
 ## [1.0.8] - 2026-11-05
 
 ### 新增
