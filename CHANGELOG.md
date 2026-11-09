@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 变更
+
+- `ProviderConfig.api_key` 允许为空：无需鉴权的端点、或每用户自带 Key（经 `api_key_override` 传入）的供应商都可注册，不再要求填占位 Key；构建模型时无 Key 发送占位 token，绝不回落环境变量凭据（如 `OPENAI_API_KEY`）。
+
 ### 修复
 
 - `memory_save(content, topic, kind)` 支持 Fact、Preference、Decision、Task；中英文运行时规则引导当前对话模型直接选择类别，不额外调用分类模型。旧调用默认 Fact；连接不支持 kind 的旧 memory 库时，非 Fact 保存明确提示升级，不静默降级。需先合入并安装 memory 对应 API；保存 Task 不创建提醒，历史事实不变。
+- `configurable["api_key_override"]`（按调用传入的供应商 Key）不再进入 RunnableConfig：langgraph 会把 configurable 值写进 checkpoint 元数据落盘到 `checkpoints.sqlite`，现在密钥改为任务作用域传递，明文不再落盘。
 
 ## [1.0.8] - 2026-11-05
 

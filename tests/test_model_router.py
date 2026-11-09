@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import HumanMessage
 
+from octop_harness.api_key_scope import api_key_override_scope
 from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
 from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.middleware.model_router import ModelRouterMiddleware
@@ -268,3 +269,75 @@ class TestPriorityChain:
 
         await mw.awrap_model_call(req, async_handler)  # type: ignore[arg-type]
         assert req.model is sentinels["p/fast"]
+
+
+class TestApiKeyOverride:
+    """``configurable["api_key_override"]`` rides along to the factory."""
+
+    def test_override_forwarded_to_factory(
+        self,
+        cfg: HarnessAgentConfig,
+        factory_with_sentinels: tuple[ChatModelFactory, dict[str, object]],
+    ) -> None:
+        factory, sentinels = factory_with_sentinels
+        mw = ModelRouterMiddleware(cfg, factory)
+        req = FakeModelRequest(
+            messages=[HumanMessage(content="hi")],
+            runtime=FakeRuntime(config={"configurable": {"model": "p/text", "api_key_override": "sk-user"}}),
+        )
+        with patch.object(factory, "get_chat_model", return_value=sentinels["p/text"]) as mock_get:
+            mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
+        mock_get.assert_called_once_with("p/text", api_key_override="sk-user")
+        assert req.model is sentinels["p/text"]
+
+    def test_no_override_forwards_none(
+        self,
+        cfg: HarnessAgentConfig,
+        factory_with_sentinels: tuple[ChatModelFactory, dict[str, object]],
+    ) -> None:
+        factory, sentinels = factory_with_sentinels
+        mw = ModelRouterMiddleware(cfg, factory)
+        req = FakeModelRequest(
+            messages=[HumanMessage(content="hi")],
+            runtime=FakeRuntime(config={"configurable": {"model": "p/text"}}),
+        )
+        with patch.object(factory, "get_chat_model", return_value=sentinels["p/text"]) as mock_get:
+            mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
+        mock_get.assert_called_once_with("p/text", api_key_override=None)
+
+    def test_scope_binding_forwarded_to_factory(
+        self,
+        cfg: HarnessAgentConfig,
+        factory_with_sentinels: tuple[ChatModelFactory, dict[str, object]],
+    ) -> None:
+        """The ContextVar binding feeds the factory when config is key-free."""
+        factory, sentinels = factory_with_sentinels
+        mw = ModelRouterMiddleware(cfg, factory)
+        req = FakeModelRequest(
+            messages=[HumanMessage(content="hi")],
+            runtime=FakeRuntime(config={"configurable": {"model": "p/text"}}),
+        )
+        with (
+            api_key_override_scope("sk-scoped"),
+            patch.object(factory, "get_chat_model", return_value=sentinels["p/text"]) as mock_get,
+        ):
+            mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
+        mock_get.assert_called_once_with("p/text", api_key_override="sk-scoped")
+
+    def test_configurable_override_wins_over_scope(
+        self,
+        cfg: HarnessAgentConfig,
+        factory_with_sentinels: tuple[ChatModelFactory, dict[str, object]],
+    ) -> None:
+        factory, sentinels = factory_with_sentinels
+        mw = ModelRouterMiddleware(cfg, factory)
+        req = FakeModelRequest(
+            messages=[HumanMessage(content="hi")],
+            runtime=FakeRuntime(config={"configurable": {"model": "p/text", "api_key_override": "sk-explicit"}}),
+        )
+        with (
+            api_key_override_scope("sk-scoped"),
+            patch.object(factory, "get_chat_model", return_value=sentinels["p/text"]) as mock_get,
+        ):
+            mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
+        mock_get.assert_called_once_with("p/text", api_key_override="sk-explicit")
