@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+from pydantic import ValidationError
+
 from octop_harness.builtin.tools.memory_tools import build_memory_tools
 
 
@@ -33,6 +36,31 @@ class _FakeService:
 
 
 class TestBuildMemoryTools:
+    @pytest.mark.parametrize("kind", ["Preference", "Decision", "Task", "Fact"])
+    def test_classified_save_passes_kind_to_service(self, kind: str) -> None:
+        service = _FakeService()
+        with patch.object(service, "save") as save_call:
+            save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
+            assert "saved" in save.invoke({"content": "Remember this", "kind": kind}).lower()
+            if kind == "Fact":
+                save_call.assert_called_once_with("Remember this", topic=None)
+            else:
+                save_call.assert_called_once_with("Remember this", topic=None, kind=kind)
+
+    def test_invalid_classification_never_saves(self) -> None:
+        service = _FakeService()
+        save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
+        with pytest.raises(ValidationError):
+            save.invoke({"content": "Remember this", "kind": "ConflictCandidate"})
+        assert service.save_calls == []
+
+    def test_old_memory_version_rejects_typed_save_without_silent_fact_fallback(self) -> None:
+        service = _FakeService()
+        save = next(t for t in build_memory_tools(service) if t.name == "memory_save")
+        result = save.invoke({"content": "User prefers Chinese", "kind": "Preference"})
+        assert "upgrade octop-memory" in result
+        assert service.save_calls == []
+
     def test_memory_save_does_not_report_document_review_to_the_model(self) -> None:
         service = _FakeService()
         service.save_result.metadata = {
