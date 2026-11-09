@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 存储的摘要截止点超出当前消息列表时，回退为「摘要 + 最新消息」，模型不再只看到旧摘要；切片不会从裸工具结果开始。
 - 空闲维护时清理旧的 LangGraph checkpoint，删除前先备份 SQLite 文件。
+- 助手回复不再携带 `name` 字段：agent 构建原先把 `HarnessAgentConfig.name`（记忆命名空间）兼作 langgraph 图名，`chat_agent_executor` 会把它盖到每条助手回复上；旧版 NInfer 等部分拒绝 name 字段的大模型服务会拒绝带 name 的消息，多轮对话从第二轮起报 400（回放历史里的带名回复触发拒绝）。图现在保持未命名，出站助手消息不再有 `name`；记忆命名空间职责不变（`memory_namespace` 仍回落到 `name`）。工具消息的工具名保留（携带工具身份）。
 - `memory_save(content, topic, kind)` 支持 Fact、Preference、Decision、Task；中英文运行时规则引导当前对话模型直接选择类别，不额外调用分类模型。旧调用默认 Fact；连接不支持 kind 的旧 memory 库时，非 Fact 保存明确提示升级，不静默降级。需先合入并安装 memory 对应 API；保存 Task 不创建提醒，历史事实不变。
 
 ## [1.0.8] - 2026-11-05
