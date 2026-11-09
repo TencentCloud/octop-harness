@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- MiniMax（国内站 / 国际站）供应商预设加入 MiniMax-M3 和 MiniMax-M3.1-Flash，上下文 1M，原生多模态。
+
 ### 修复
 
 - 存储的摘要截止点超出当前消息列表时，回退为「摘要 + 最新消息」，模型不再只看到旧摘要；切片不会从裸工具结果开始。
