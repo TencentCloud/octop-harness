@@ -1782,6 +1782,53 @@ async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
     assert agent._hitl_resume_configs == {}
 
 
+@pytest.mark.asyncio
+async def test_api_key_override_binds_scope_and_rides_hitl_resume(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], Any],
+    stub_create_deep_agent: Any,
+) -> None:
+    """The per-call key binds the task scope and survives a HITL pause/resume."""
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from octop_harness.api_key_scope import current_api_key_override
+
+    seen_keys: list[str | None] = []
+    seen_configs: list[dict[str, Any]] = []
+
+    async def stream(messages: Any, config: dict[str, Any], **kwargs: Any) -> Any:
+        seen_keys.append(current_api_key_override())
+        seen_configs.append(deepcopy(config["configurable"]))
+        yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+
+    async def resume(thread_id: str, decisions: Any, config: dict[str, Any]) -> Any:
+        seen_keys.append(current_api_key_override())
+        yield {"type": "token", "content": "done"}
+
+    with mock_model_factory(), stub_create_deep_agent:
+        agent = HarnessAgent(cfg)
+    agent._protocols["langgraph"] = SimpleNamespace(stream=stream, resume_stream=resume)  # type: ignore[assignment]
+    request = ChatRequest(
+        messages="hi",
+        thread_id="key-thread",
+        configurable={"api_key_override": "sk-user"},
+    )
+    try:
+        _ = [c async for c in agent.stream(request)]
+        # Bound for the run, stripped from the graph config.
+        assert seen_keys == ["sk-user"]
+        assert all("api_key_override" not in cfg_ for cfg_ in seen_configs)
+        # A different stream must not leak its (absent) key into the resume.
+        other = ChatRequest(messages="other", thread_id="other-thread")
+        _ = [c async for c in agent.stream(other)]
+        _ = [c async for c in agent.resume_hitl("key-thread", [{"type": "approve"}])]
+        assert seen_keys == ["sk-user", None, "sk-user"]
+    finally:
+        await agent.aclose()
+    assert agent._hitl_resume_api_keys == {}
+
+
 def test_summarization_factory_patch_is_exclusive() -> None:
     import threading
 

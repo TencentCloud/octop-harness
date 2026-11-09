@@ -19,6 +19,11 @@ import deepagents
 from deepagents.middleware.memory import MemoryMiddleware as DeepAgentsMemoryMiddleware
 from langchain.agents.middleware import PIIMiddleware
 
+from octop_harness.api_key_scope import (
+    api_key_override_from,
+    api_key_override_scope,
+    bind_api_key_override,
+)
 from octop_harness.backends import resolve_backend, spec_supports_execution
 from octop_harness.backends.utils import DEFENSIVE_OP_ERRORS
 from octop_harness.backends.workspace import DEFAULT_MEMORY_FILES, BackendWorkspace
@@ -211,6 +216,9 @@ class HarnessAgent:
         self._langfuse_callbacks: list[Any] | None = None
         self._protocols: dict[str, ChatProtocol] = {}
         self._hitl_resume_configs: dict[str, dict[str, Any]] = {}
+        # Per-call API key for paused threads; rides alongside
+        # ``_hitl_resume_configs`` (which carries the key-free run config).
+        self._hitl_resume_api_keys: dict[str, str | None] = {}
         # Optional hook called once immediately after bootstrap completes.
         # Set by the caller (e.g. Orca) to trigger a full config reload.
         self.on_bootstrap_complete: Callable[[], None] | None = None
@@ -530,6 +538,7 @@ class HarnessAgent:
             if thread_id:
                 self._cancel_events[thread_id] = cancel_event
                 self._hitl_resume_configs.pop(thread_id, None)
+                self._hitl_resume_api_keys.pop(thread_id, None)
             try:
                 with session_header_scope(prepared.thread_id):
                     async with contextlib.aclosing(
@@ -544,6 +553,7 @@ class HarnessAgent:
                                     **config,
                                     "configurable": deepcopy(config["configurable"]),
                                 }
+                                self._hitl_resume_api_keys[thread_id] = api_key_override_from(prepared.configurable)
                             yield chunk
             finally:
                 if thread_id:
@@ -589,7 +599,7 @@ class HarnessAgent:
         config["configurable"] = deepcopy(config["configurable"])
         paused = False
         async with self._invocation():
-            with session_header_scope(thread_id):
+            with session_header_scope(thread_id), api_key_override_scope(self._hitl_resume_api_keys.get(thread_id)):
                 async with contextlib.aclosing(resume_stream(thread_id, decisions, config)) as chunks:
                     async for chunk in chunks:
                         if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
@@ -597,6 +607,7 @@ class HarnessAgent:
                         yield chunk
         if not paused:
             self._hitl_resume_configs.pop(thread_id, None)
+            self._hitl_resume_api_keys.pop(thread_id, None)
 
     async def stream_events(
         self,
@@ -1048,6 +1059,7 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        self._hitl_resume_api_keys.clear()
         if self._owns_model_factory:
             self._model_factory.close()
         self._memory_runtime.close()
@@ -1066,6 +1078,7 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        self._hitl_resume_api_keys.clear()
         if self._owns_model_factory:
             await self._model_factory.aclose()
         self._memory_runtime.close()
@@ -1990,9 +2003,13 @@ class HarnessAgent:
     ) -> tuple[Any, Any, ChatProtocol]:
         """Normalize a request into ``(messages, config, protocol)``.
 
-        Shared by ``call`` / ``stream`` / ``stream_events``.
+        Shared by ``call`` / ``stream`` / ``stream_events``. Also binds the
+        request's per-call API key to the task scope (see
+        :mod:`octop_harness.api_key_scope`) so it never has to ride in the
+        graph config.
         """
         req = ChatRequest.coerce(request)
+        bind_api_key_override(api_key_override_from(req.configurable))
         return req.normalize_messages(), req.to_runnable_config(), self._get_protocol(protocol)
 
     def _get_protocol(self, name: str | None) -> ChatProtocol:

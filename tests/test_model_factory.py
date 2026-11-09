@@ -848,3 +848,88 @@ class TestResponsesApiFallback:
             list(instance._stream([HumanMessage(content="ping")]))
 
         assert fallback_calls == 0
+
+
+class TestChatModelFactoryApiKeyOverride:
+    """``api_key_override`` rebuilds with the given key and caches it per key."""
+
+    def _providers(self) -> list[ProviderConfig]:
+        return [
+            ProviderConfig(
+                id="p",
+                base_url="https://x",
+                api_key="k",
+                models=[ModelConfig(id="m")],
+            )
+        ]
+
+    def test_override_key_used_and_cached_per_key(self) -> None:
+        factory = ChatModelFactory(self._providers())
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            first = factory.get_chat_model("p/m", api_key_override="sk-user")
+            again = factory.get_chat_model("p/m", api_key_override="sk-user")
+            other = factory.get_chat_model("p/m", api_key_override="sk-other")
+            plain = factory.get_chat_model("p/m")
+        assert first is again
+        assert other is not first
+        assert plain is not first
+        assert mock_init.call_count == 3
+        assert mock_init.call_args_list[0].kwargs["api_key"] == "sk-user"
+        assert mock_init.call_args_list[1].kwargs["api_key"] == "sk-other"
+        assert mock_init.call_args_list[2].kwargs["api_key"] == "k"
+
+    def test_override_key_never_lands_in_cache_keys(self) -> None:
+        factory = ChatModelFactory(self._providers())
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None):
+            factory.get_chat_model("p/m", api_key_override="sk-user")
+            factory.get_chat_model("p/m", max_retries=0, api_key_override="sk-user")
+        assert factory._cache
+        assert all("sk-user" not in repr(key) for key in factory._cache)
+
+    def test_override_combines_with_max_retries(self) -> None:
+        factory = ChatModelFactory(self._providers())
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            plain_retries = factory.get_chat_model("p/m", max_retries=0)
+            override_retries = factory.get_chat_model("p/m", max_retries=0, api_key_override="sk-user")
+        assert plain_retries is not override_retries
+        assert mock_init.call_args_list[1].kwargs["api_key"] == "sk-user"
+
+    def _keyless_providers(self) -> list[ProviderConfig]:
+        return [
+            ProviderConfig(
+                id="p",
+                base_url="https://x",
+                api_key="",
+                models=[ModelConfig(id="m")],
+            )
+        ]
+
+    def test_keyless_provider_builds_with_override(self) -> None:
+        factory = ChatModelFactory(self._keyless_providers())
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            instance = factory.get_chat_model("p/m", api_key_override="sk-user")
+        assert instance is not None
+        assert mock_init.call_args.kwargs["api_key"] == "sk-user"
+
+    def test_keyless_provider_without_override_uses_placeholder(self) -> None:
+        factory = ChatModelFactory(self._keyless_providers())
+        from langchain_openai import ChatOpenAI
+
+        cls = _get_reasoning_aware_chat_openai(ChatOpenAI)
+        with patch.object(cls, "__init__", return_value=None) as mock_init:
+            instance = factory.get_chat_model("p/m")
+        assert instance is not None
+        # Non-empty placeholder — never "" (SDK env fallback) and never a real key.
+        assert mock_init.call_args.kwargs["api_key"] == "no-api-key"
