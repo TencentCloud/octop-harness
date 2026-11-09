@@ -1771,7 +1771,12 @@ class HarnessAgent:
             "tools": tools,
             "middleware": middleware,
             "backend": self._backend,
-            "name": cfg.name,
+            # The graph stays unnamed on purpose: chat_agent_executor stamps
+            # the graph name onto every assistant reply (``response.name``),
+            # and older NInfer and some other model services reject messages
+            # that carry a name field. ``cfg.name`` keeps its memory-namespace
+            # role (``memory_namespace`` falls back to it) and must not double
+            # as the graph name.
             "debug": cfg.debug,
         }
         base_prompt = cfg.system_prompt.rstrip() if cfg.system_prompt else ""

@@ -159,6 +159,31 @@ class TestConstruction:
         assert agent.workspace is not None
         assert agent.workspace.backend is agent.backend
 
+    def test_graph_is_unnamed_so_replies_carry_no_message_name(
+        self,
+        cfg: HarnessAgentConfig,
+        mock_model_factory: Callable[[], Any],
+    ) -> None:
+        """The graph must not be named after ``cfg.name``.
+
+        ``chat_agent_executor`` stamps the graph name onto every assistant
+        reply (``response.name``) and older NInfer and some other model
+        services reject messages that carry a name field, failing multi-turn
+        chats from the second turn on. ``cfg.name`` keeps its memory-namespace
+        role (``memory_namespace`` falls back to it) and must not reach the
+        graph.
+        """
+        captured: dict[str, Any] = {}
+
+        def fake_create(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return MagicMock(name="fake-graph")
+
+        with mock_model_factory(), patch("deepagents.create_deep_agent", side_effect=fake_create):
+            HarnessAgent(cfg)
+
+        assert not captured.get("name")
+
     def test_middleware_includes_router_and_memory(
         self,
         cfg: HarnessAgentConfig,
