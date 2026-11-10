@@ -44,7 +44,7 @@ dependencies = [
     "markdownify>=0.13",
     # 1.0.3 exposes the background manual-document review API used by the
     # memory scheduler and fixes extraction batching and persisted cursors.
-    "octop-memory>=1.0.3",
+    "octop-memory>=1.0.4",
     "octop-browser>=0.9.9",
     "langchain-mcp-adapters>=0.3.0",
     # mcp 2.x breaks langchain-mcp-adapters (RequestContext import); pin until adapters support it.

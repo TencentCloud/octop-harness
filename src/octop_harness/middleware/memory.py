@@ -213,14 +213,14 @@ def _reclaimable_checkpoint_bytes(path: Path) -> int:
 
 
 def _prune_checkpoints_if_configured(memory: Any) -> None:
-    """Delete old checkpoints. Default keeps the newest 20 per stream."""
+    """Retain completed SQLite threads' newest 20 checkpoints and their dependencies by default."""
     keep_last, keep_days = _checkpoint_retention_from_env()
     if keep_last is None and keep_days is None:
         return
     try:
         from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
 
-        preview = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, dry_run=True)
+        preview = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, skip_pending=True, dry_run=True)
         if int(getattr(preview, "checkpoints_deleted", 0) or 0) <= 0:
             logger.debug(
                 "memory.maintenance prune_checkpoints keep_last=%s keep_days=%s deleted=0",
@@ -233,7 +233,7 @@ def _prune_checkpoints_if_configured(memory: Any) -> None:
         if policy["backup_before_prune"] and path is not None:
             backup = _backup_checkpoint_file(path)
             logger.info("memory.maintenance checkpoint backup %s", backup)
-        stats = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days)
+        stats = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, skip_pending=True)
     except Exception:  # maintenance runs off the user path; pylint: disable=broad-except
         logger.warning("memory.maintenance prune_checkpoints failed", exc_info=True)
         return
@@ -1031,7 +1031,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             self._arm_maintenance(delay=self._maintenance_interval_seconds)
 
     def _submit_maintenance(self) -> None:
-        """Run one GC + nudge tick off-thread. Overlapping ticks skip."""
+        """Run one maintenance tick off-thread. Overlapping ticks skip."""
         if self._maintenance_interval_seconds <= 0 or self._service is None:
             return
         service = self._service
@@ -1095,7 +1095,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self,
         service: Any,
     ) -> None:
-        """Run one cheap GC + incremental-vacuum tick.
+        """Run checkpoint retention, GC and incremental vacuum.
 
         Full compact/VACUUM is intentionally never scheduled by the agent;
         operators may still invoke octop-memory's explicit compact command.

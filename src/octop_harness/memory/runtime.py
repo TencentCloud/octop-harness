@@ -163,8 +163,7 @@ class MemoryRuntime:
             "jsonl_max_bytes": cfg.session_log_max_bytes,
             "on_chat_model": on_chat_model,
             "maintenance_interval_seconds": maintenance_interval,
-            # Start the first cheap GC + incremental-vacuum pass shortly after
-            # binding. Full compact/VACUUM remains an explicit operator action.
+            # Start the first maintenance pass shortly after binding.
             "maintenance_initial_delay_seconds": 1.0,
         }
         # The middleware owns live timers (maintenance, interval/idle extract)
