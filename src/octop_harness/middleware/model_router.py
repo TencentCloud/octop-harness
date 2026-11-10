@@ -22,6 +22,7 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 
+from octop_harness.api_key_scope import current_api_key_override
 from octop_harness.config import HarnessAgentConfig, ModelSelector
 from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.middleware.runtime import runtime_config
@@ -66,9 +67,27 @@ class ModelRouterMiddleware(AgentMiddleware[Any, Any]):
 
     def _select_model(self, request: ModelRequest) -> Any:
         ref = self._select_ref(request)
+        api_key_override = self._api_key_override(request)
         if self._get_protocol is not None:
-            return self._factory.get(ref, get_protocol=self._get_protocol).chat_model
-        return self._factory.get_chat_model(ref)
+            return self._factory.get(ref, get_protocol=self._get_protocol, api_key_override=api_key_override).chat_model
+        return self._factory.get_chat_model(ref, api_key_override=api_key_override)
+
+    @staticmethod
+    def _api_key_override(request: ModelRequest) -> str | None:
+        """Per-call credential override (e.g. a per-user gateway key).
+
+        A literal ``configurable["api_key_override"]`` wins when present
+        (callers that build the graph config directly). Otherwise the key is
+        read from the :mod:`octop_harness.api_key_scope` binding — the
+        ``ChatRequest`` path keeps keys out of ``configurable`` because
+        langgraph copies those values into checkpoint metadata.
+        """
+        configurable = runtime_config(request).get("configurable")
+        if isinstance(configurable, dict):
+            value = configurable.get("api_key_override")
+            if isinstance(value, str) and value:
+                return value
+        return current_api_key_override()
 
     def _select_ref(self, request: ModelRequest) -> str:
         runtime_config_value = runtime_config(request)

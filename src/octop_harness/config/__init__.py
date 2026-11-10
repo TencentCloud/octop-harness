@@ -474,6 +474,8 @@ class ProviderConfig:
 
     id: str  # provider identifier
     base_url: str
+    # Static credential. May be empty: the endpoint needs no auth, or every
+    # call supplies ``api_key_override`` (see :mod:`octop_harness.api_key_scope`).
     api_key: str
     name: str = ""
     protocol: ProtocolName = "openai"
@@ -494,8 +496,6 @@ class ProviderConfig:
             raise ValueError("ProviderConfig.id must be a non-empty string")
         if not self.base_url:
             raise ValueError("ProviderConfig.base_url is required")
-        if not self.api_key:
-            raise ValueError("ProviderConfig.api_key is required")
         if self.protocol not in ("openai", "anthropic", "bedrock"):
             raise ValueError(f"Unsupported provider protocol: {self.protocol!r}")
         if self.protocol == "bedrock" and any(model.native_tool_search for model in self.models):

@@ -28,6 +28,7 @@ emit the field, so it's always-on for ``protocol="openai"``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
@@ -79,7 +80,7 @@ class ChatModelFactory:
     ) -> None:
         # Build id→ProviderConfig index for O(1) lookups in get().
         self._providers: dict[str, ProviderConfig] = {p.id: p for p in providers}
-        self._cache: dict[str | tuple[str, int], BaseChatModel] = {}
+        self._cache: dict[str | tuple[str, int | None, str | None], BaseChatModel] = {}
         self._agent_config = agent_config
         self._get_protocol = get_protocol
 
@@ -163,6 +164,7 @@ class ChatModelFactory:
         model_ref: str,
         *,
         get_protocol: Callable[[str | None], ChatProtocol] | None = None,
+        api_key_override: str | None = None,
     ) -> ModelAccess:
         """Return a :class:`ModelAccess` handle for ``provider/model``."""
         from octop_harness.llm.access import ModelAccess
@@ -174,7 +176,7 @@ class ChatModelFactory:
             )
         return ModelAccess(
             model_ref=model_ref,
-            chat_model=self.get_chat_model(model_ref),
+            chat_model=self.get_chat_model(model_ref, api_key_override=api_key_override),
             get_protocol=proto,
         )
 
@@ -185,22 +187,34 @@ class ChatModelFactory:
         messages: Sequence[Any] | None = None,
         configurable: Mapping[str, Any] | None = None,
         get_protocol: Callable[[str | None], ChatProtocol] | None = None,
+        api_key_override: str | None = None,
         **kwargs: Any,
     ) -> ModelAccess:
         ref = self.resolve_ref(spec, messages=messages, configurable=configurable)
-        return self.get(ref, get_protocol=get_protocol)
+        return self.get(ref, get_protocol=get_protocol, api_key_override=api_key_override)
 
-    def get_chat_model(self, model_ref: str, *, max_retries: int | None = None) -> BaseChatModel:
+    def get_chat_model(
+        self,
+        model_ref: str,
+        *,
+        max_retries: int | None = None,
+        api_key_override: str | None = None,
+    ) -> BaseChatModel:
         """Return a cached model, optionally with an isolated SDK retry policy.
 
         Memory uses ``max_retries=0`` and owns retries itself. These instances
         never replace or mutate the model used by the main conversation.
+
+        ``api_key_override`` rebuilds the model against a different credential
+        (e.g. a per-user gateway key) instead of the provider's own key, and is
+        cached separately per key. The raw key never becomes a cache key — only
+        a short fingerprint of it does.
         """
         if max_retries is not None and (
             isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0
         ):
             raise ValueError("max_retries must be a non-negative integer or None")
-        cache_key = model_ref if max_retries is None else (model_ref, max_retries)
+        cache_key = self._cache_key(model_ref, max_retries, api_key_override)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
@@ -211,9 +225,20 @@ class ChatModelFactory:
         model = provider.get_model(model_id)
         if model is None or not model.enabled:
             raise ValueError(f"Model {model_ref!r} not found or disabled")
-        instance = self._build(provider, model, max_retries=max_retries)
+        instance = self._build(provider, model, max_retries=max_retries, api_key=api_key_override)
         self._cache[cache_key] = instance
         return instance
+
+    @staticmethod
+    def _cache_key(
+        model_ref: str, max_retries: int | None, api_key_override: str | None
+    ) -> str | tuple[str, int | None, str | None]:
+        if max_retries is None and api_key_override is None:
+            return model_ref
+        fingerprint = None
+        if api_key_override is not None:
+            fingerprint = hashlib.sha256(api_key_override.encode("utf-8")).hexdigest()[:12]
+        return (model_ref, max_retries, fingerprint)
 
     def pop_cached(self, model_ref: str) -> None:
         """Drop a cached model and close any dedicated session-header clients."""
@@ -244,13 +269,20 @@ class ChatModelFactory:
     # Construction by protocol
     # ------------------------------------------------------------------
 
-    def _build(self, provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
+    def _build(
+        self,
+        provider: ProviderConfig,
+        model: ModelConfig,
+        *,
+        max_retries: int | None = None,
+        api_key: str | None = None,
+    ) -> BaseChatModel:
         if provider.protocol == "openai":
-            return _build_openai(provider, model, max_retries=max_retries)
+            return _build_openai(provider, model, max_retries=max_retries, api_key=api_key)
         if provider.protocol == "anthropic":
-            return _build_anthropic(provider, model, max_retries=max_retries)
+            return _build_anthropic(provider, model, max_retries=max_retries, api_key=api_key)
         if provider.protocol == "bedrock":
-            return _build_bedrock(provider, model, max_retries=max_retries)
+            return _build_bedrock(provider, model, max_retries=max_retries, api_key=api_key)
         raise ValueError(f"Unsupported provider protocol: {provider.protocol!r}")
 
 
@@ -280,7 +312,29 @@ def _is_codex_base_url(base_url: str | None) -> bool:
     )
 
 
-def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
+# Non-empty placeholder for keyless endpoints so SDKs never fall back to
+# environment credentials (OPENAI_API_KEY / ANTHROPIC_API_KEY) for them.
+_NO_API_KEY_PLACEHOLDER = "no-api-key"
+
+
+def _effective_api_key(provider: ProviderConfig, api_key: str | None) -> str:
+    """The per-call ``api_key`` override, falling back to the static provider key.
+
+    An empty key means the endpoint needs no auth (or every call supplies
+    ``api_key_override``); a non-empty placeholder is sent so SDKs never fall
+    back to environment credentials for this provider.
+    """
+    key = api_key if api_key is not None else provider.api_key
+    return key or _NO_API_KEY_PLACEHOLDER
+
+
+def _build_openai(
+    provider: ProviderConfig,
+    model: ModelConfig,
+    *,
+    max_retries: int | None = None,
+    api_key: str | None = None,
+) -> BaseChatModel:
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as exc:  # pragma: no cover - covered by install path
@@ -293,7 +347,7 @@ def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: 
     kwargs: dict[str, Any] = {
         "model": model.id,
         "base_url": provider.base_url,
-        "api_key": provider.api_key,
+        "api_key": _effective_api_key(provider, api_key),
         # langchain-openai only defaults stream_usage on for the official
         # OpenAI endpoint; with a custom base_url (always our case) it stays
         # off and streamed AIMessages carry no usage_metadata.
@@ -932,7 +986,13 @@ def _stamp_native_tool_search_capability(
         object.__setattr__(instance, "_harness_tool_search_provider", provider)
 
 
-def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
+def _build_anthropic(
+    provider: ProviderConfig,
+    model: ModelConfig,
+    *,
+    max_retries: int | None = None,
+    api_key: str | None = None,
+) -> BaseChatModel:
     try:
         from langchain_anthropic import ChatAnthropic
     except ImportError as exc:  # pragma: no cover
@@ -942,7 +1002,7 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retrie
 
     kwargs: dict[str, Any] = {
         "model": model.id,
-        "api_key": provider.api_key,
+        "api_key": _effective_api_key(provider, api_key),
     }
     if max_retries is not None:
         kwargs["max_retries"] = max_retries
@@ -964,7 +1024,13 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retrie
     return instance_a
 
 
-def _build_bedrock(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
+def _build_bedrock(
+    provider: ProviderConfig,
+    model: ModelConfig,
+    *,
+    max_retries: int | None = None,
+    api_key: str | None = None,
+) -> BaseChatModel:
     try:
         from langchain_aws import ChatBedrockConverse
     except ImportError as exc:
@@ -974,6 +1040,7 @@ def _build_bedrock(provider: ProviderConfig, model: ModelConfig, *, max_retries:
 
     # Bedrock auth is typically AWS-credential-driven; api_key/base_url here
     # are accepted for symmetry but not all combinations are meaningful.
+    del api_key
     from botocore.config import Config
 
     kwargs: dict[str, Any] = {"model": model.id}

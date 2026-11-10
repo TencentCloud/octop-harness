@@ -23,6 +23,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from octop_harness.api_key_scope import take_api_key_override
+
 
 @dataclass
 class ChatRequest:
@@ -135,6 +137,10 @@ class ChatRequest:
             configurable["conversation_mode"] = parse_conversation_mode(self.conversation_mode)
         if self.configurable:
             configurable.update(self.configurable)
+        # Credentials never ride into RunnableConfig: langgraph copies
+        # configurable values into checkpoint metadata. The key stays on
+        # ``self.configurable`` for scope binding (see ``api_key_scope``).
+        take_api_key_override(configurable)
         _restrict_ask_plan_config(configurable)
 
         config: dict[str, Any] = {"configurable": configurable}
