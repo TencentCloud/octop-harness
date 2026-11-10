@@ -40,6 +40,7 @@ class TestRegistry:
             "yuanbao",
             "searchfree",
             "you",
+            "autom",
         }
 
     def test_provider_available_all_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,6 +72,7 @@ class TestLoadWebSearchTools:
             "MOONSHOT_API_KEY",
             "TENCENTCLOUD_WSA_APIKEY",
             "YDC_API_KEY",
+            "AUTOM_API_KEY",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -111,12 +113,22 @@ class TestLoadWebSearchTools:
             "yuanbao_search",
             "searchfree_search",
             "you_search",
+            "autom_search",
         }
 
     def test_auto_includes_you_only_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         assert "you_search" not in {t.name for t in load_web_search_tools("auto")}
         monkeypatch.setenv("YDC_API_KEY", "ydc")
         assert "you_search" in {t.name for t in load_web_search_tools("auto")}
+
+    def test_auto_includes_autom_only_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert "autom_search" not in {t.name for t in load_web_search_tools("auto")}
+        monkeypatch.setenv("AUTOM_API_KEY", "au")
+        assert "autom_search" in {t.name for t in load_web_search_tools("auto")}
+
+    def test_explicit_autom_requires_key(self) -> None:
+        with pytest.raises(RuntimeError, match="AUTOM_API_KEY"):
+            load_web_search_tools(["autom"])
 
     def test_explicit_you_works_without_key(self) -> None:
         assert [t.name for t in load_web_search_tools(["you"])] == ["you_search"]
@@ -909,4 +921,78 @@ class TestYouSearch:
 
         with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body={"results": {"web": []}}), [])):
             result = await mod.you_search.ainvoke({"query": "hi"})
+        assert result == "No results found."
+
+
+# ---------------------------------------------------------------------------
+# autom_search (AUTOM_API_KEY required)
+# ---------------------------------------------------------------------------
+
+_AUTOM_BODY = {
+    "organic_results": [
+        {"position": 1, "title": "Example", "link": "https://example.com", "snippet": "desc", "domain": "example.com"},
+        {"position": 2, "title": "No link", "link": "", "snippet": "skipped"},
+        {"position": 3, "title": "Other", "link": "https://other.com/page"},
+    ]
+}
+
+
+class TestAutomSearch:
+    @pytest.fixture(autouse=True)
+    def _set_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AUTOM_API_KEY", "au-test")
+
+    @pytest.mark.asyncio
+    async def test_missing_key_returns_plain_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import autom as mod
+
+        monkeypatch.delenv("AUTOM_API_KEY")
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_AUTOM_BODY), calls)):
+            result = await mod.autom_search.ainvoke({"query": "hello"})
+        assert result == "Error: AUTOM_API_KEY environment variable is not set."
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_sends_query_country_language_and_maps_results(self) -> None:
+        from octop_harness.builtin.tools.web_search import autom as mod
+
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_AUTOM_BODY), calls)):
+            result = await mod.autom_search.ainvoke({"query": "hello", "country": "DE", "language": "de"})
+        assert calls[0]["method"] == "GET"
+        assert calls[0]["url"] == mod.ENDPOINT
+        assert calls[0]["params"] == {"query": "hello", "gl": "de", "hl": "de"}
+        assert calls[0]["headers"]["x-api-key"] == "au-test"
+        assert calls[0]["headers"]["User-Agent"] == "autom-integration/tencentcloud-octop-harness"
+        assert json.loads(result) == [
+            {"position": 1, "title": "Example", "url": "https://example.com", "snippet": "desc"},
+            {"position": 2, "title": "Other", "url": "https://other.com/page", "snippet": ""},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_max_results_is_capped_and_defaults_to_us(self) -> None:
+        from octop_harness.builtin.tools.web_search import autom as mod
+
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_AUTOM_BODY), calls)):
+            result = await mod.autom_search.ainvoke({"query": "hello", "max_results": 1})
+        assert calls[0]["params"] == {"query": "hello", "gl": "us"}
+        assert len(json.loads(result)) == 1
+
+    @pytest.mark.asyncio
+    async def test_error_body_is_returned(self) -> None:
+        from octop_harness.builtin.tools.web_search import autom as mod
+
+        resp = _YouResp(status_code=401, body={"error": "Invalid API Key"})
+        with patch.object(mod.httpx, "AsyncClient", _you_client(resp, [])):
+            result = await mod.autom_search.ainvoke({"query": "hi"})
+        assert result == "Error: Autom returned HTTP 401 (Invalid API Key)."
+
+    @pytest.mark.asyncio
+    async def test_empty_results(self) -> None:
+        from octop_harness.builtin.tools.web_search import autom as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body={"organic_results": []}), [])):
+            result = await mod.autom_search.ainvoke({"query": "hi"})
         assert result == "No results found."
