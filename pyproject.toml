@@ -30,9 +30,10 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    # 0.7.16+ rejects sibling same-path file mutations in one model reply
-    # (langchain-ai/deepagents#6446). Older 0.7.x can silently lose edits.
-    "deepagents>=0.7.16,<0.8",
+    # 0.7.35 runs SkillsMiddleware inside harness middleware, so SkillFilter
+    # shapes the skills prompt, and adds the ModelRefusalMiddleware slot that
+    # RefusalPassthroughMiddleware replaces (needs langchain 1.4.9+).
+    "deepagents>=0.7.35,<0.8",
     "langchain>=1.4.2,<2.0",
     "langchain-core>=1.6.3,<2.0",
     # 1.3.3 preserves stateless Responses history without stored item references.
