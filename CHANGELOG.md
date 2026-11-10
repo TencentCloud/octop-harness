@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 空闲维护时清理旧的 LangGraph checkpoint，默认保留每个线程最近 20 个及恢复依赖，跳过有待处理工作的线程。保留窗口、裁剪前备份及 VACUUM 仍可配置。
 - `memory_save(content, topic, kind)` 支持 Fact、Preference、Decision、Task；中英文运行时规则引导当前对话模型直接选择类别，不额外调用分类模型。旧调用默认 Fact；连接不支持 kind 的旧 memory 库时，非 Fact 保存明确提示升级，不静默降级。需先合入并安装 memory 对应 API；保存 Task 不创建提醒，历史事实不变。
 
+### 变更
+
+- SQLite checkpoint 裁剪默认只在首次清理前尝试备份，备份保留 7 天。空间不足或备份失败时继续裁剪，标记会阻止重复尝试。`always` 要求每次备份成功后才裁剪，`off` 关闭备份。
+
 ## [1.0.8] - 2026-11-05
 
 ### 新增
