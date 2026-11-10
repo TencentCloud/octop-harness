@@ -6,7 +6,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import (
     AIMessage,
@@ -16,6 +16,9 @@ from langchain_core.messages import (
 )
 
 from octop_harness.protocols.langgraph import LangGraphProtocol
+
+if TYPE_CHECKING:
+    from langgraph.types import Durability
 
 
 class OpenAIStreamWrapper:
@@ -74,9 +77,11 @@ class OpenAIProtocol(LangGraphProtocol):
         """Human-readable protocol name."""
         return "openai"
 
-    async def call(self, messages: list[BaseMessage], config: dict[str, Any]) -> dict[str, Any]:
+    async def call(
+        self, messages: list[BaseMessage], config: dict[str, Any], *, durability: Durability | None = None
+    ) -> dict[str, Any]:
         """Execute a call and convert result to ChatCompletion format."""
-        raw = await self._graph.ainvoke({"messages": messages}, config=config)
+        raw = await super().call(messages, config, durability=durability)
         return self._to_chat_completion(raw)
 
     async def stream(
@@ -113,7 +118,7 @@ class OpenAIProtocol(LangGraphProtocol):
 
     async def stream_events(self, messages: list[Any], config: dict[str, Any], **kwargs: Any) -> Any:
         """Return an OpenAI-wrapped v3 stream object."""
-        inner = await self._graph.astream_events({"messages": messages}, config=config, version="v3", **kwargs)
+        inner = await super().stream_events(messages, config, **kwargs)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         return OpenAIStreamWrapper(inner, completion_id, created)
