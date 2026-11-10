@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- `/compact` 写入的摘要事件带上 `cutoff_message_id` 和 `created_at_index`，与 deepagents 自动摘要一致：压缩后保留的消息不再带着已被摘要掉的对话所绑定的 Claude 推理块；截止点优先按消息 id 定位，仅在 id 找不到时才回退为「摘要 + 最新消息」。
 - 已禁用的 skill 不再出现在系统提示词中；请求级 `skills` 过滤（包括 Ask/Plan 模式的 `skills=[]`）也作用于提示词。此前只拦截文件工具访问，模型仍能看到这些 skill。
 - 存储的摘要截止点超出当前消息列表时，回退为「摘要 + 最新消息」，模型不再只看到旧摘要；切片不会从裸工具结果开始。
 - 空闲维护时清理旧的 LangGraph checkpoint，默认保留每个线程最近 20 个及恢复依赖，跳过有待处理工作的线程。保留窗口、裁剪前备份及 VACUUM 仍可配置。

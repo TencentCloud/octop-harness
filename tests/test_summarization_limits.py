@@ -195,3 +195,42 @@ async def test_async_rate_limit_after_overflow_preserves_the_thread() -> None:
     with pytest.raises(RuntimeError, match="HTTP 429"):
         await mw._acreate_summary(["history"])
     assert mw._lc_helper.trim_tokens_to_summarize == SUMMARY_INPUT_TOKEN_LIMIT
+
+
+def test_stale_index_with_resolvable_message_id_defers_to_upstream() -> None:
+    """A cutoff id still in the list wins over the index-based approximation."""
+    seen: list[dict[str, object]] = []
+
+    def _id_aware_apply(messages: list[object], event: dict[str, object] | None) -> list[object]:
+        assert event is not None
+        seen.append(event)
+        start = next(i for i, m in enumerate(messages) if getattr(m, "id", None) == event["cutoff_message_id"])
+        return [event["summary_message"], *messages[start:]]
+
+    mw = _cutoff_middleware()
+    mw._apply_event_to_messages = _id_aware_apply
+    harden_summarization_middleware(mw)
+    messages = [SimpleNamespace(id=f"m{index}", type="human", content=str(index)) for index in range(30)]
+    event = {
+        "summary_message": SimpleNamespace(type="system", content="sum"),
+        "cutoff_index": 296,  # stale: past the end of the list
+        "cutoff_message_id": "m25",
+    }
+    result = mw._apply_event_to_messages(messages, event)
+    assert seen == [event]
+    assert result == [event["summary_message"], *messages[25:]]
+
+
+def test_stale_index_with_missing_message_id_still_keeps_recent_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OCTOP_SUMMARY_FALLBACK_KEEP", "20")
+    mw = _cutoff_middleware()
+    harden_summarization_middleware(mw)
+    messages = [SimpleNamespace(id=f"m{index}", type="human", content=str(index)) for index in range(30)]
+    event = {
+        "summary_message": SimpleNamespace(type="system", content="sum"),
+        "cutoff_index": 296,
+        "cutoff_message_id": "gone",
+    }
+    result = mw._apply_event_to_messages(messages, event)
+    assert len(result) == 21
+    assert result[-1] is messages[-1]
