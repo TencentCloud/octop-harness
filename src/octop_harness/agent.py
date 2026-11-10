@@ -75,6 +75,7 @@ except ImportError:  # pragma: no cover - dependency is listed; defensive
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
     from langchain_core.messages import BaseMessage
+    from langgraph.types import Durability
 
     from octop_harness.context_usage import ContextUsage
     from octop_harness.protocols.base import ChatProtocol
@@ -486,8 +487,9 @@ class HarnessAgent:
         request: ChatRequest | str | dict[str, Any],
         *,
         protocol: str | None = None,
+        durability: Durability | None = None,
     ) -> dict[str, Any]:
-        """Non-streaming invocation. Output format determined by protocol."""
+        """Non-streaming invocation with an optional checkpoint durability override."""
         from octop_harness.slash.runtime import build_runtime_ctx, call_with_runtime_slash
 
         req = ChatRequest.coerce(request)
@@ -496,6 +498,8 @@ class HarnessAgent:
         async def _call(prepared: ChatRequest) -> dict[str, Any]:
             messages, config, proto = self._prepare_call(prepared, protocol)
             with session_header_scope(prepared.thread_id):
+                if durability is not None:
+                    return await proto.call(messages, config, durability=durability)
                 return await proto.call(messages, config)
 
         from octop_harness.observability.logging import logging_scope
@@ -573,12 +577,14 @@ class HarnessAgent:
         decisions: list[dict[str, Any]],
         *,
         protocol: str | None = None,
+        durability: Durability | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Resume a paused interrupt, retaining its process-local request scope.
 
         The host must authorize the caller before resuming. User identity, tool
         selections and other config belong to the paused request, not a different
         thread's most recent invocation. A new stream replaces that thread's scope.
+        Pass ``durability`` to override the default for this resume.
         """
         proto = self._get_protocol(protocol)
         resume_stream = getattr(proto, "resume_stream", None)
@@ -588,9 +594,10 @@ class HarnessAgent:
         config = dict(self._hitl_resume_configs.get(thread_id, {"configurable": {"thread_id": thread_id}}))
         config["configurable"] = deepcopy(config["configurable"])
         paused = False
+        options = {"durability": durability} if durability is not None else {}
         async with self._invocation():
             with session_header_scope(thread_id):
-                async with contextlib.aclosing(resume_stream(thread_id, decisions, config)) as chunks:
+                async with contextlib.aclosing(resume_stream(thread_id, decisions, config, **options)) as chunks:
                     async for chunk in chunks:
                         if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
                             paused = True
