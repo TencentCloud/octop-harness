@@ -37,6 +37,11 @@ from typing import TYPE_CHECKING, Any
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from octop_harness.middleware.checkpoint_backup import (
+    checkpoint_backup_policy_from_env,
+    expire_checkpoint_backups,
+    prepare_checkpoint_backup,
+)
 from octop_harness.middleware.memory_recall import (
     has_recall_snapshot,
     replay_recall_snapshots,
@@ -115,6 +120,154 @@ def _claim_reclaim_slot(memory: Any, *, window: float) -> bool:
     except TypeError:  # pragma: no cover - exotic Memory without weakref/hash
         return True
     return True
+
+
+_DEFAULT_CHECKPOINT_KEEP_LAST = 20
+_VACUUM_RECOMMEND_BYTES = 32 * 1024 * 1024
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _optional_positive_int(name: str) -> int | None:
+    """Return a positive int, or ``None`` when the variable is unset, 0, or invalid."""
+    if name not in os.environ:
+        return None
+    raw = os.environ.get(name, "").strip()
+    if not raw or raw == "0":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("ignoring invalid %s=%r", name, raw)
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _checkpoint_retention_from_env() -> tuple[int | None, int | None]:
+    """Return ``(keep_last, keep_days)``.
+
+    The idle tick keeps the newest 20 checkpoints unless
+    ``OCTOP_CHECKPOINT_RETENTION=0``. ``OCTOP_CHECKPOINT_KEEP_LAST`` and
+    ``OCTOP_CHECKPOINT_KEEP_DAYS`` override that window. A checkpoint survives
+    when it matches either limit.
+    """
+    if not _env_flag("OCTOP_CHECKPOINT_RETENTION", default=True):
+        return None, None
+    keep_last = _optional_positive_int("OCTOP_CHECKPOINT_KEEP_LAST")
+    keep_days = _optional_positive_int("OCTOP_CHECKPOINT_KEEP_DAYS")
+    if "OCTOP_CHECKPOINT_KEEP_LAST" not in os.environ:
+        keep_last = _DEFAULT_CHECKPOINT_KEEP_LAST
+    return keep_last, keep_days
+
+
+def checkpoint_retention_policy() -> dict[str, Any]:
+    """Public view of the retention window used by idle maintenance."""
+    keep_last, keep_days = _checkpoint_retention_from_env()
+    backup_mode, backup_keep_days = checkpoint_backup_policy_from_env()
+    return {
+        "enabled": keep_last is not None or keep_days is not None,
+        "keep_last": keep_last,
+        "keep_days": keep_days,
+        "backup_before_prune": backup_mode,
+        "backup_keep_days": backup_keep_days,
+        "vacuum": _env_flag("OCTOP_CHECKPOINT_VACUUM", default=False),
+    }
+
+
+def _checkpoint_sqlite_path(memory: Any) -> Path | None:
+    backend = getattr(memory, "backend", None) or getattr(memory, "_backend", None)
+    raw = getattr(backend, "_db_path", None)
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path.resolve() if path.is_file() else None
+
+
+def _reclaimable_checkpoint_bytes(path: Path) -> int:
+    import sqlite3
+
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        page = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        free = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+    finally:
+        conn.close()
+    return page * free
+
+
+def _prune_checkpoints_if_configured(memory: Any) -> None:
+    """Retain completed SQLite threads' newest 20 checkpoints and their dependencies by default."""
+    keep_last, keep_days = _checkpoint_retention_from_env()
+    try:
+        path = _checkpoint_sqlite_path(memory)
+        backup_mode, backup_keep_days = checkpoint_backup_policy_from_env()
+        if path is not None:
+            expire_checkpoint_backups(path, backup_keep_days)
+        if keep_last is None and keep_days is None:
+            return
+
+        from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
+
+        preview = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, skip_pending=True, dry_run=True)
+        if int(getattr(preview, "checkpoints_deleted", 0) or 0) <= 0:
+            logger.debug(
+                "memory.maintenance prune_checkpoints keep_last=%s keep_days=%s deleted=0",
+                keep_last,
+                keep_days,
+            )
+            return
+        if path is not None and not prepare_checkpoint_backup(path, backup_mode, backup_keep_days):
+            return
+        stats = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, skip_pending=True)
+    except Exception:  # maintenance runs off the user path; pylint: disable=broad-except
+        logger.warning("memory.maintenance prune_checkpoints failed", exc_info=True)
+        return
+    deleted = int(getattr(stats, "checkpoints_deleted", 0) or 0)
+    logger.info(
+        "memory.maintenance prune_checkpoints keep_last=%s keep_days=%s deleted=%s writes=%s",
+        keep_last,
+        keep_days,
+        deleted,
+        getattr(stats, "writes_deleted", None),
+    )
+    if deleted > 0 and path is not None:
+        _vacuum_checkpoint_if_needed(path)
+
+
+def _vacuum_checkpoint_if_needed(path: Path) -> None:
+    """Suggest VACUUM after a prune, and run it only when the switch is on."""
+    try:
+        reclaimable = _reclaimable_checkpoint_bytes(path)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("memory.maintenance checkpoint freelist check failed", exc_info=True)
+        return
+    if reclaimable < _VACUUM_RECOMMEND_BYTES:
+        return
+    logger.warning(
+        "checkpoint VACUUM recommended for %s (%d reclaimable bytes). "
+        "Deleting rows does not shrink the file until VACUUM.",
+        path,
+        reclaimable,
+    )
+    if not _env_flag("OCTOP_CHECKPOINT_VACUUM", default=False):
+        return
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        logger.warning("checkpoint VACUUM failed for %s", path, exc_info=True)
 
 
 class _BackgroundExecutor:
@@ -837,7 +990,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             return self._status["phase"] in _IO_BLOCKING_PHASES
 
     # ------------------------------------------------------------------
-    # Idle DB maintenance (GC + nudge; no checkpoint prune, no compact)
+    # Idle DB maintenance (GC + nudge; checkpoint prune only when configured)
     # ------------------------------------------------------------------
 
     def _arm_maintenance(self, *, delay: float) -> None:
@@ -869,7 +1022,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             self._arm_maintenance(delay=self._maintenance_interval_seconds)
 
     def _submit_maintenance(self) -> None:
-        """Run one GC + nudge tick off-thread. Overlapping ticks skip."""
+        """Run one maintenance tick off-thread. Overlapping ticks skip."""
         if self._maintenance_interval_seconds <= 0 or self._service is None:
             return
         service = self._service
@@ -933,7 +1086,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self,
         service: Any,
     ) -> None:
-        """Run one cheap GC + incremental-vacuum tick.
+        """Run checkpoint retention, GC and incremental vacuum.
 
         Full compact/VACUUM is intentionally never scheduled by the agent;
         operators may still invoke octop-memory's explicit compact command.
@@ -943,11 +1096,10 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             return
         try:
             self._kick_manual_review(background=False)
-            # Deliberately NOT ``run_idle_maintenance``: its first step is
-            # ``prune_checkpoints`` and it has no switch to skip that, so the
-            # two reclaim steps are called directly. LangGraph checkpoint rows
-            # are never deleted from here — sealing a delta-omitted parent
-            # before dropping its ancestors could truncate a transcript.
+            # Deliberately NOT ``run_idle_maintenance``: that helper has no
+            # switch for the backup-before-delete step. This tick keeps the
+            # newest 20 checkpoints (override with OCTOP_CHECKPOINT_KEEP_*),
+            # applies the configured SQLite backup policy, then reclaims memory rows.
             from octop_memory.pipeline.lifecycle import nudge_vacuum, run_gc
 
             memory = getattr(service, "memory", None)
@@ -961,6 +1113,8 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             if not _claim_reclaim_slot(memory, window=self._maintenance_interval_seconds / 2):
                 logger.debug("memory.maintenance skip: another agent just reclaimed this store")
                 return
+
+            _prune_checkpoints_if_configured(memory)
 
             def _nudge(store: Any) -> Any:
                 return nudge_vacuum(store, pages=_MAINTENANCE_VACUUM_PAGES)

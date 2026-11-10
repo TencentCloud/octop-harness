@@ -1051,6 +1051,22 @@
     "logo": "minimax.png",
     "models": [
       {
+        "id": "MiniMax-M3.1-Flash",
+        "name": "MiniMax M3.1 Flash",
+        "max_input_tokens": 1000000,
+        "context_window": 1000000,
+        "reasoning": true,
+        "input": ["text", "image"]
+      },
+      {
+        "id": "MiniMax-M3",
+        "name": "MiniMax M3",
+        "max_input_tokens": 1000000,
+        "context_window": 1000000,
+        "reasoning": true,
+        "input": ["text", "image"]
+      },
+      {
         "id": "MiniMax-M2.5",
         "name": "MiniMax M2.5",
         "max_input_tokens": 204800
@@ -1084,6 +1100,22 @@
     "api_key_prefix": "",
     "logo": "minimax.png",
     "models": [
+      {
+        "id": "MiniMax-M3.1-Flash",
+        "name": "MiniMax M3.1 Flash",
+        "max_input_tokens": 1000000,
+        "context_window": 1000000,
+        "reasoning": true,
+        "input": ["text", "image"]
+      },
+      {
+        "id": "MiniMax-M3",
+        "name": "MiniMax M3",
+        "max_input_tokens": 1000000,
+        "context_window": 1000000,
+        "reasoning": true,
+        "input": ["text", "image"]
+      },
       {
         "id": "MiniMax-M2.5",
         "name": "MiniMax M2.5",

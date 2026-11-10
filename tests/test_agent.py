@@ -313,8 +313,9 @@ class TestConstruction:
         custom_index = middleware.index(custom_mw)
         search_index = names.index("ToolSearchMiddleware")
         task_index = names.index("TaskToolLastMiddleware")
+        refusal_index = names.index("RefusalPassthroughMiddleware")
         context_index = names.index("ContextUsageMiddleware")
-        assert custom_index < search_index < task_index < context_index
+        assert custom_index < search_index < task_index < refusal_index < context_index
 
     def test_skills_paths_include_builtin_and_user(
         self,

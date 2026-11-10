@@ -2,19 +2,33 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from enum import StrEnum
+from functools import lru_cache
 from typing import Any
 
 from langchain_core.messages import BaseMessage
-from langgraph.types import Command, Overwrite
+from langgraph.types import Command, Durability, Overwrite
 
 from octop_harness.protocols.base import ChatProtocol
 from octop_harness.protocols.think_splitter import ThinkSplitter
 from octop_harness.usage import normalize_usage_metadata
 
 _INTERNAL_LC_SOURCES = frozenset({"summarization"})
+_DURABILITY_ENV = "OCTOP_CHECKPOINT_DURABILITY"
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=16)
+def _parse_durability(value: str) -> Durability:
+    match value:
+        case "exit" | "async" | "sync":
+            return value
+    logger.warning("invalid %s=%r; using exit", _DURABILITY_ENV, value)
+    return "exit"
 
 
 def _is_internal_model_stream(metadata: Any) -> bool:
@@ -150,8 +164,20 @@ class LangGraphProtocol(ChatProtocol):
     def name(self) -> str:
         return "langgraph"
 
-    async def call(self, messages: list[BaseMessage], config: dict[str, Any]) -> dict[str, Any]:
-        result: dict[str, Any] = await self._graph.ainvoke({"messages": messages}, config=config)
+    def _durability_options(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        # LangGraph warns when given durability for a stateless graph. Also
+        # leave its legacy checkpoint_during keyword usable on stream calls.
+        if "durability" not in kwargs and "checkpoint_during" not in kwargs:
+            checkpointer = getattr(self._graph, "checkpointer", None)
+            if checkpointer is not None and checkpointer is not False:
+                kwargs["durability"] = _parse_durability(os.environ.get(_DURABILITY_ENV, "exit").strip().lower())
+        return kwargs
+
+    async def call(
+        self, messages: list[BaseMessage], config: dict[str, Any], *, durability: Durability | None = None
+    ) -> dict[str, Any]:
+        options = self._durability_options({"durability": durability} if durability is not None else {})
+        result: dict[str, Any] = await self._graph.ainvoke({"messages": messages}, config=config, **options)
         return result
 
     async def stream(
@@ -167,7 +193,7 @@ class LangGraphProtocol(ChatProtocol):
                 config=config,
                 stream_mode=["values", "updates", "messages", "custom"],
                 version="v2",
-                **kwargs,
+                **self._durability_options(kwargs),
             )
         ) as graph_chunks:
             async for chunk in graph_chunks:
@@ -195,7 +221,7 @@ class LangGraphProtocol(ChatProtocol):
                 config=merged_config,
                 stream_mode=["values", "updates", "messages", "custom"],
                 version="v2",
-                **kwargs,
+                **self._durability_options(kwargs),
             )
         ) as graph_chunks:
             async for chunk in graph_chunks:
@@ -300,4 +326,6 @@ class LangGraphProtocol(ChatProtocol):
         config: dict[str, Any],
         **kwargs: Any,
     ) -> Any:
-        return await self._graph.astream_events({"messages": messages}, config=config, version="v3", **kwargs)
+        return await self._graph.astream_events(
+            {"messages": messages}, config=config, version="v3", **self._durability_options(kwargs)
+        )
