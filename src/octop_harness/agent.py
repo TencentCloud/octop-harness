@@ -47,6 +47,7 @@ from octop_harness.middleware.context_usage import ContextUsageMiddleware
 from octop_harness.middleware.mcp_tool_error import McpToolErrorMiddleware
 from octop_harness.middleware.mcp_tools import MCPToolMiddleware
 from octop_harness.middleware.media_offload import MediaOffloadMiddleware
+from octop_harness.middleware.model_refusal import RefusalPassthroughMiddleware
 from octop_harness.middleware.model_retry import ModelRetryMiddleware
 from octop_harness.middleware.model_router import ModelRouterMiddleware
 from octop_harness.middleware.model_settings import ModelSettingsMiddleware
@@ -1506,7 +1507,11 @@ class HarnessAgent:
         soft-fail; deny rules when permissions + execution backend) → mcp_tools →
         retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
         conversation_mode → tools_filter → decision (only when enabled) → tool search →
-        task tool ordering → context_usage.
+        task tool ordering → refusal passthrough → context_usage.
+
+        ``RefusalPassthroughMiddleware`` replaces deepagents' tail
+        ``ModelRefusalMiddleware`` by name, so it runs innermost regardless of
+        its position here.
 
         ``MediaOffloadMiddleware`` runs **after** PII (so PII still sees plain
         text) and **before** ``MemoryMiddleware`` so session logs store the
@@ -1650,6 +1655,8 @@ class HarnessAgent:
         # the model sees ``task`` after the final shared tool set.
         if cfg.task_tool_last:
             chain.append(TaskToolLastMiddleware())
+
+        chain.append(RefusalPassthroughMiddleware())
 
         # After tool-order normalization so the snapshot matches the final request.
         self._context_usage_mw = ContextUsageMiddleware(
