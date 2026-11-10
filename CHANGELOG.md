@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-11-10
+
 ### 新增
 
 - MiniMax（国内站 / 国际站）供应商预设加入 MiniMax-M3 和 MiniMax-M3.1-Flash，上下文 1M，原生多模态。
