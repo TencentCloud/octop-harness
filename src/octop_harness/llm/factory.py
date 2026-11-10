@@ -674,6 +674,7 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             messages_out = payload.get("messages")
             if not isinstance(messages_out, list):
                 return payload
+            _adapt_gemini_tool_schemas(payload)
             _drop_openai_file_parts(messages_out)
             supported: set[str] = getattr(self, "_harness_supported_input", set()) or {"text", "image"}
             if "image" not in supported:
@@ -685,6 +686,55 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 
     _REASONING_AWARE_CHAT_OPENAI[id(base_cls)] = _ReasoningAwareChatOpenAI
     return _ReasoningAwareChatOpenAI
+
+
+def _gemini_tool_parameters(schema: dict[str, Any]) -> dict[str, Any]:
+    """Translate a nullable JSON Schema union into Gemini's typed Schema."""
+    adapted = schema.copy()
+    variants = schema.get("anyOf")
+    null_schema = {"type": "null"}
+    if isinstance(variants, list) and len(variants) == 2 and null_schema in variants:
+        typed = variants[1] if variants[0] == null_schema else variants[0]
+        if (
+            isinstance(typed, dict)
+            and isinstance(typed.get("type"), str)
+            and typed["type"] != "null"
+            and not (typed.keys() & schema.keys())
+            and "nullable" not in schema
+        ):
+            adapted.pop("anyOf")
+            adapted.update(typed, nullable=True)
+    for key in ("properties", "$defs"):
+        if isinstance(children := adapted.get(key), dict):
+            adapted[key] = {
+                name: _gemini_tool_parameters(child) if isinstance(child, dict) else child
+                for name, child in children.items()
+            }
+    for key in ("items", "additionalProperties"):
+        if isinstance(child := adapted.get(key), dict):
+            adapted[key] = _gemini_tool_parameters(child)
+    return adapted
+
+
+def _adapt_gemini_tool_schemas(payload: dict[str, Any]) -> None:
+    model = payload.get("model")
+    tools = payload.get("tools")
+    if not isinstance(model, str) or not model.lower().startswith("gemini-") or not isinstance(tools, list):
+        return
+
+    # Gemini function declarations can require a direct type even when the
+    # parameter may be null. Keep the bound tools reusable by other models.
+    adapted_tools = []
+    for tool in tools:
+        if (
+            isinstance(tool, dict)
+            and isinstance(function := tool.get("function"), dict)
+            and isinstance(parameters := function.get("parameters"), dict)
+        ):
+            adapted_tools.append({**tool, "function": {**function, "parameters": _gemini_tool_parameters(parameters)}})
+        else:
+            adapted_tools.append(tool)
+    payload["tools"] = adapted_tools
 
 
 # ---------------------------------------------------------------------------
