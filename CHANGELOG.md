@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 新增可选的 `autom` 网页搜索供应商（`autom_search`），返回实时 Google 自然搜索结果，可指定国家和语言。需要 `AUTOM_API_KEY`；设置后加入 `auto`。Add the optional `autom` web-search provider (`autom_search`): live Google organic results for a query, country and language. Needs `AUTOM_API_KEY`; joins `auto` once it is set.
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增
