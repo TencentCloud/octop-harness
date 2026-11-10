@@ -335,8 +335,13 @@ async def test_v3_stream_flushes_checkpoint_before_output_returns(tmp_path, monk
 
 @pytest.mark.parametrize("mode", ["async", "exit"])
 async def test_pruning_preserves_state_and_pending_approval(tmp_path, monkeypatch, mode):
+    import inspect
+
     from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
 
+    # Dependency-aware pruning with skip_pending ships in octop-memory 1.0.4.
+    if "skip_pending" not in inspect.signature(prune_checkpoints).parameters:
+        pytest.skip("requires octop-memory>=1.0.4")
     monkeypatch.setenv("OCTOP_CHECKPOINT_DURABILITY", mode)
     async with open_probe(tmp_path / "memory.sqlite", tmp_path / "workspace", approval="parent") as (
         agent,
