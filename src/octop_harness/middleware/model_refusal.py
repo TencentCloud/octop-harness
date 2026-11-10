@@ -6,6 +6,9 @@ from collections.abc import Awaitable, Callable
 
 from langchain.agents.middleware import ModelRefusalMiddleware, ModelRequest, ModelResponse
 
+from octop_harness.middleware.context_usage import record_outbound_request
+from octop_harness.middleware.decision import finalize_decision_skill_prompt
+
 
 class RefusalPassthroughMiddleware(ModelRefusalMiddleware):
     """Take deepagents' ``ModelRefusalMiddleware`` slot without raising.
@@ -15,6 +18,9 @@ class RefusalPassthroughMiddleware(ModelRefusalMiddleware):
     turn. ``create_deep_agent`` replaces middleware by ``name``, so this
     pass-through keeps refusals as the model's reply, as before 0.7.35.
     Subagents still report refusals through the ``task`` tool.
+
+    This slot also sees the fully assembled request, after deepagents has
+    rendered skills and applied its provider-specific middleware.
     """
 
     @property
@@ -26,6 +32,8 @@ class RefusalPassthroughMiddleware(ModelRefusalMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
+        request = finalize_decision_skill_prompt(request)
+        record_outbound_request(request)
         return handler(request)
 
     async def awrap_model_call(
@@ -33,4 +41,6 @@ class RefusalPassthroughMiddleware(ModelRefusalMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
+        request = finalize_decision_skill_prompt(request)
+        record_outbound_request(request)
         return await handler(request)

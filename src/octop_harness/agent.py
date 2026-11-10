@@ -1641,6 +1641,7 @@ class HarnessAgent:
                     config=decision,
                     team=self._team_manager,
                     language=cfg.language,
+                    skills_rendered_late=True,
                 )
             )
 
@@ -1658,7 +1659,7 @@ class HarnessAgent:
 
         chain.append(RefusalPassthroughMiddleware())
 
-        # After tool-order normalization so the snapshot matches the final request.
+        # The refusal slot forwards the fully assembled outbound request for capture.
         self._context_usage_mw = ContextUsageMiddleware(
             mcp_tool_names=self._mcp_tool_name_set,
             max_tokens=self._default_max_input_tokens(),
