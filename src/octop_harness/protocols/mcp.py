@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from octop_harness.protocols.langgraph import LangGraphProtocol
+
+if TYPE_CHECKING:
+    from langgraph.types import Durability
 
 
 class MCPStreamWrapper:
@@ -55,9 +58,11 @@ class MCPProtocol(LangGraphProtocol):
         """Human-readable protocol name."""
         return "mcp"
 
-    async def call(self, messages: list[BaseMessage], config: dict[str, Any]) -> dict[str, Any]:
+    async def call(
+        self, messages: list[BaseMessage], config: dict[str, Any], *, durability: Durability | None = None
+    ) -> dict[str, Any]:
         """Execute a call and convert result to MCP CreateMessageResult format."""
-        raw = await self._graph.ainvoke({"messages": messages}, config=config)
+        raw = await super().call(messages, config, durability=durability)
         return self._to_create_message_result(raw)
 
     async def stream(
@@ -84,7 +89,7 @@ class MCPProtocol(LangGraphProtocol):
 
     async def stream_events(self, messages: list[Any], config: dict[str, Any], **kwargs: Any) -> Any:
         """Return an MCP-wrapped v3 stream object."""
-        inner = await self._graph.astream_events({"messages": messages}, config=config, version="v3", **kwargs)
+        inner = await super().stream_events(messages, config, **kwargs)
         return MCPStreamWrapper(inner)
 
     # ------------------------------------------------------------------
