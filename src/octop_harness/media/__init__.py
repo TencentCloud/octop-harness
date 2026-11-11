@@ -17,7 +17,10 @@ from octop_harness.media.models import (
     VideoGenerationRequest,
 )
 from octop_harness.media.providers.dashscope import DashScopeMediaProvider
+from octop_harness.media.providers.gemini import GeminiMediaProvider
 from octop_harness.media.providers.minimax import MiniMaxMediaProvider
+from octop_harness.media.providers.openai import OpenAIMediaProvider
+from octop_harness.media.providers.tencent import TencentMediaProvider
 from octop_harness.media.providers.volcengine import VolcengineMediaProvider
 from octop_harness.media.registry import BUILTIN_MEDIA_PROVIDERS, create_media_manager, create_media_provider
 
@@ -25,6 +28,7 @@ __all__ = [
     "BUILTIN_MEDIA_PROVIDERS",
     "BaseMediaProvider",
     "DashScopeMediaProvider",
+    "GeminiMediaProvider",
     "GeneratedMedia",
     "ImageGenerationRequest",
     "InMemoryMediaJobStore",
@@ -39,9 +43,11 @@ __all__ = [
     "MediaRouteInfo",
     "MediaSubmission",
     "MiniMaxMediaProvider",
+    "OpenAIMediaProvider",
     "ProviderTask",
     "RemoteArtifact",
     "StoredMedia",
+    "TencentMediaProvider",
     "VideoGenerationRequest",
     "VolcengineMediaProvider",
     "create_media_manager",

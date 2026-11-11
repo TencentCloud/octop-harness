@@ -38,7 +38,10 @@ from octop_harness.media.models import (
     VideoGenerationRequest,
 )
 from octop_harness.media.providers.dashscope import DashScopeMediaProvider
+from octop_harness.media.providers.gemini import GEMINI_API_REVISION, GeminiMediaProvider
 from octop_harness.media.providers.minimax import MiniMaxMediaProvider
+from octop_harness.media.providers.openai import OpenAIMediaProvider
+from octop_harness.media.providers.tencent import TencentMediaProvider
 from octop_harness.media.providers.volcengine import VolcengineMediaProvider
 from octop_harness.media.registry import create_media_manager, create_media_provider
 
@@ -487,6 +490,9 @@ async def test_volcengine_video_timeout_cancels_remote_task() -> None:
             "wan3.0-video-prime",
         ),
         ("minimax", MiniMaxMediaProvider, "MINIMAX_API_KEY", "image-01", "MiniMax-H3"),
+        ("openai", OpenAIMediaProvider, "OPENAI_API_KEY", "gpt-image-2.6-flare", ""),
+        ("gemini", GeminiMediaProvider, "GEMINI_API_KEY", "gemini-nano-banana-2.1", ""),
+        ("tencent", TencentMediaProvider, "TENCENT_TOKENHUB_API_KEY", "hy-image-v3.5-preview", ""),
     ],
 )
 def test_media_provider_registry_applies_provider_defaults(
@@ -1055,3 +1061,340 @@ def test_agent_registers_only_enabled_media_tools(
     assert media_names == expected
     search = next(item for item in captured["middleware"] if type(item).__name__ == "ToolSearchMiddleware")
     assert search._deferred_tools & {"generate_image", "generate_video"} == expected
+
+
+def _openai_config() -> MediaGenerationConfig:
+    return MediaGenerationConfig(provider="openai", api_key="oa-test-key")
+
+
+@pytest.mark.asyncio
+async def test_openai_image_request_uses_images_api_and_decodes_base64() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(_PNG).decode()}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAIMediaProvider(_openai_config(), client=client)
+        result = await provider.generate_image(
+            ImageGenerationRequest(prompt="a red panda", size="1536X1024", count=2, seed=7, watermark=True)
+        )
+
+    assert seen["path"] == "/v1/images/generations"
+    assert seen["auth"] == "Bearer oa-test-key"
+    assert seen["body"] == {"model": "gpt-image-2.6-flare", "prompt": "a red panda", "n": 2, "size": "1536x1024"}
+    assert result == [GeneratedMedia(data=_PNG, media_type="image/png", extension="png")]
+
+
+@pytest.mark.asyncio
+async def test_openai_reference_images_use_edits_with_json_image_urls() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["content_type"] = request.headers.get("Content-Type")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(_PNG).decode()}]})
+
+    references = ("https://example.com/ref.png", "data:image/png;base64,AAAA")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAIMediaProvider(_openai_config(), client=client)
+        await provider.generate_image(ImageGenerationRequest(prompt="make it blue", reference_images=references))
+
+    assert seen["path"] == "/v1/images/edits"
+    assert seen["content_type"] == "application/json"
+    assert seen["body"]["images"] == [{"image_url": url} for url in references]
+    assert seen["body"]["model"] == "gpt-image-2.6-flare"
+
+
+@pytest.mark.asyncio
+async def test_openai_rejects_aspect_ratio_size_before_calling_the_api() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the API must not be called")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAIMediaProvider(_openai_config(), client=client)
+        with pytest.raises(MediaGenerationError) as excinfo:
+            await provider.generate_image(ImageGenerationRequest(prompt="x", size="16:9"))
+
+    assert excinfo.value.code == "unsupported_input"
+
+
+@pytest.mark.asyncio
+async def test_openai_http_auth_error_is_actionable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "Incorrect API key", "type": "invalid_request_error"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAIMediaProvider(_openai_config(), client=client)
+        with pytest.raises(MediaGenerationError) as excinfo:
+            await provider.generate_image(ImageGenerationRequest(prompt="x"))
+
+    assert excinfo.value.code == "credential_invalid"
+
+
+def test_openai_provider_is_image_only_and_never_claims_a_video_route(tmp_path: Path) -> None:
+    named = MediaProviderConfig(id="oa", provider="openai", api_key="k")
+    legacy = MediaGenerationConfig(provider="openai", api_key="k")
+
+    assert named.video_enabled is False
+    assert legacy.video_enabled is False
+    assert legacy.has_image_provider() is True
+    assert legacy.has_video_provider() is False
+    assert OpenAIMediaProvider.capabilities.video_generation is False
+
+    config = MediaGenerationConfig(providers=[named])
+    manager = create_media_manager(config, _workspace(tmp_path))
+    assert config.has_video_provider() is False
+    assert manager.has_route("image") is True
+    assert manager.has_route("video") is False
+    assert manager.route_info("image").provider_type == "openai"
+
+
+def _gemini_config() -> MediaGenerationConfig:
+    return MediaGenerationConfig(provider="gemini", api_key="gm-test-key")
+
+
+def _gemini_image_payload(data: bytes = _PNG, mime_type: str = "image/png") -> dict[str, Any]:
+    return {
+        "object": "interaction",
+        "status": "completed",
+        "steps": [
+            {
+                "type": "model_output",
+                "content": [
+                    {"type": "text", "text": "Here is your image."},
+                    {"type": "image", "data": base64.b64encode(data).decode(), "mime_type": mime_type},
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_gemini_image_request_uses_interactions_api_and_decodes_image_blocks() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["key"] = request.headers.get("x-goog-api-key")
+        seen["auth"] = request.headers.get("Authorization")
+        seen["revision"] = request.headers.get("Api-Revision")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_gemini_image_payload())
+
+    references = ("https://example.com/cat.jpg", "data:image/png;base64,QUJD")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = GeminiMediaProvider(_gemini_config(), client=client)
+        result = await provider.generate_image(
+            ImageGenerationRequest(prompt="a red panda", reference_images=references, size="16:9", seed=7)
+        )
+
+    assert seen["path"] == "/v1beta/interactions"
+    assert seen["key"] == "gm-test-key"
+    assert seen["auth"] is None
+    assert seen["revision"] == GEMINI_API_REVISION
+    assert seen["body"] == {
+        "model": "gemini-nano-banana-2.1",
+        "input": [
+            {"type": "text", "text": "a red panda"},
+            {"type": "image", "uri": "https://example.com/cat.jpg", "mime_type": "image/jpeg"},
+            {"type": "image", "data": "QUJD", "mime_type": "image/png"},
+        ],
+        "response_format": {"type": "image", "aspect_ratio": "16:9"},
+    }
+    assert result == [GeneratedMedia(data=_PNG, media_type="image/png", extension="png")]
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        ("2k", {"type": "image", "image_size": "2K"}),
+        ("4K", {"type": "image", "image_size": "4K"}),
+        ("1920x1080", {"type": "image", "aspect_ratio": "16:9"}),
+        (None, {"type": "image"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_gemini_maps_size_to_response_format(size: str | None, expected: dict[str, str]) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_gemini_image_payload())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = GeminiMediaProvider(_gemini_config(), client=client)
+        await provider.generate_image(ImageGenerationRequest(prompt="x", size=size))
+
+    assert seen["body"]["response_format"] == expected
+
+
+@pytest.mark.asyncio
+async def test_gemini_count_issues_one_request_per_image() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=_gemini_image_payload())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = GeminiMediaProvider(_gemini_config(), client=client)
+        result = await provider.generate_image(ImageGenerationRequest(prompt="x", count=3))
+
+    assert calls == 3
+    assert len(result) == 3
+
+
+@pytest.mark.asyncio
+async def test_gemini_text_only_answer_surfaces_the_model_reason() -> None:
+    payload = {
+        "status": "completed",
+        "steps": [{"type": "model_output", "content": [{"type": "text", "text": "I can't create that image."}]}],
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))) as client:
+        provider = GeminiMediaProvider(_gemini_config(), client=client)
+        with pytest.raises(MediaGenerationError, match=r"no image: I can't create that image"):
+            await provider.generate_image(ImageGenerationRequest(prompt="x"))
+
+
+@pytest.mark.asyncio
+async def test_gemini_rejects_unknown_size_before_calling_the_api() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the API must not be called")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = GeminiMediaProvider(_gemini_config(), client=client)
+        with pytest.raises(MediaGenerationError) as excinfo:
+            await provider.generate_image(ImageGenerationRequest(prompt="x", size="huge"))
+
+    assert excinfo.value.code == "unsupported_input"
+
+
+def test_gemini_provider_is_image_only() -> None:
+    assert MediaProviderConfig(id="gm", provider="gemini", api_key="k").video_enabled is False
+    assert MediaGenerationConfig(provider="gemini", api_key="k").has_video_provider() is False
+    assert GeminiMediaProvider.capabilities.video_generation is False
+
+
+_HY_RESULT = "https://aigc-output-image-file.cos.ap-guangzhou.myqcloud.com/main.png?sign=abc"
+
+
+def _tencent_config(**overrides: Any) -> MediaGenerationConfig:
+    return MediaGenerationConfig(provider="tencent", api_key="th-test-key", **overrides)
+
+
+@pytest.mark.asyncio
+async def test_tencent_hy35_uses_messages_and_downloads_without_auth() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host.endswith("myqcloud.com"):
+            seen["download_auth"] = request.headers.get("Authorization")
+            return httpx.Response(200, content=_PNG)
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "object": "image.chat.completion.chunk",
+                "choices": [
+                    {"index": 0, "delta": {"type": "image", "image": {"url": _HY_RESULT}}, "finish_reason": None}
+                ],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = TencentMediaProvider(_tencent_config(), client=client)
+        result = await provider.generate_image(
+            ImageGenerationRequest(
+                prompt="一只猫", reference_images=("https://example.com/dog.png",), size="4096x4096", seed=0
+            )
+        )
+
+    assert seen["path"] == "/v1/wand/hunyuan-image/v35-generation"
+    assert seen["auth"] == "Bearer th-test-key"
+    assert seen["body"] == {
+        "model": "hy-image-v3.5-preview",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "一只猫"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/dog.png"}},
+                ],
+            }
+        ],
+        "size": "4096x4096",
+        "seed": 0,
+    }
+    assert seen["download_auth"] is None
+    assert result == [GeneratedMedia(data=_PNG, media_type="image/png", extension="png")]
+
+
+@pytest.mark.asyncio
+async def test_tencent_hy3_uses_prompt_body_and_data_urls() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host.endswith("myqcloud.com"):
+            return httpx.Response(200, content=_PNG)
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [{"url": _HY_RESULT}], "request_id": "r1"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = TencentMediaProvider(_tencent_config(image_model="hy-image-v3"), client=client)
+        await provider.generate_image(ImageGenerationRequest(prompt="cat", size="1024x768", seed=42))
+
+    assert seen["path"] == "/v1/wand/hunyuan-image/v3-generation"
+    assert seen["body"] == {"model": "hy-image-v3", "prompt": "cat", "size": "1024x768", "seed": 42}
+
+
+@pytest.mark.parametrize(
+    ("model", "request_kwargs"),
+    [
+        ("hy-image-v3", {"size": "2048x2048"}),
+        ("hy-image-v3", {"reference_images": ("a", "b", "c", "d")}),
+        ("hy-image-v3.5-preview", {"size": "8192x8192"}),
+        ("hy-image-v3.5-preview", {"size": "16:9"}),
+        ("hy-image-v3.5-preview", {"seed": -1}),
+        ("wand-vega-image-pro", {}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_tencent_rejects_inputs_outside_the_documented_limits(model: str, request_kwargs: dict[str, Any]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the API must not be called")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = TencentMediaProvider(_tencent_config(image_model=model), client=client)
+        with pytest.raises(MediaGenerationError) as excinfo:
+            await provider.generate_image(ImageGenerationRequest(prompt="x", **request_kwargs))
+
+    assert excinfo.value.code == "unsupported_input"
+
+
+@pytest.mark.asyncio
+async def test_tencent_moderation_error_frame_is_classified_as_content_rejected() -> None:
+    payload = {
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+        "error": {"type": "invalid_request_error", "code": "content_filter", "message": "input moderation rejected"},
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))) as client:
+        provider = TencentMediaProvider(_tencent_config(), client=client)
+        with pytest.raises(MediaGenerationError) as excinfo:
+            await provider.generate_image(ImageGenerationRequest(prompt="x"))
+
+    assert excinfo.value.code == "content_rejected"
+
+
+def test_tencent_provider_is_image_only() -> None:
+    assert MediaProviderConfig(id="th", provider="tencent", api_key="k").video_enabled is False
+    assert MediaGenerationConfig(provider="tencent", api_key="k").has_video_provider() is False
+    assert TencentMediaProvider.capabilities.video_generation is False
