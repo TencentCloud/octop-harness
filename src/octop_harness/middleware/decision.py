@@ -341,11 +341,13 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         team: Any | None = None,
         language: str = "zh",
         scorer: Any | None = None,
+        skills_rendered_late: bool = False,
     ) -> None:
         super().__init__()
         self._config = config
         self._team = team
         self._chinese = language != "en"
+        self._skills_rendered_late = skills_rendered_late
         self._scorer = scorer or HttpDecisionClient(
             endpoint=config.endpoint,
             api_key=config.api_key,
@@ -680,12 +682,7 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         rewrite = turn.rewrite_skills
         skills = turn.skills
         tools = turn.tools
-        if (
-            self._config.skills
-            and not rewrite
-            and _request_has_skill_region(request)
-            and _metadata_skill_count(request) >= 2
-        ):
+        if not rewrite and self._has_skill_catalog(request):
             # Stub the prompt, but do not paste the unscored catalog into the note.
             rewrite = True
             skills = set()
@@ -713,6 +710,10 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         sections: list[str] = []
         if turn.rewrite_skills:
             request, skill_text = _relocate_skills(request, turn.skills, chinese=self._chinese)
+            if self._skills_rendered_late:
+                stub = _STABLE_SKILLS_ZH if self._chinese else _STABLE_SKILLS_EN
+                state = cast(AgentState[Any], {**request.state, _SKILL_CATALOG_STUB: stub})
+                request = request.override(state=state)
             if skill_text:
                 sections.append(skill_text)
         if turn.tools is not None:
@@ -899,9 +900,16 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
     def _model_label(self) -> str:
         return self._config.model or self._config.provider
 
+    def _has_skill_catalog(self, request: ModelRequest) -> bool:
+        return (
+            self._config.skills
+            and _metadata_skill_count(request) >= 2
+            and (self._skills_rendered_late or _request_has_skill_region(request))
+        )
+
     def _kept_catalog(self, request: ModelRequest) -> _TurnFilter:
         """Full catalog in the note when the decision service cannot be reached."""
-        rewrite = self._config.skills and _request_has_skill_region(request) and _metadata_skill_count(request) >= 2
+        rewrite = self._has_skill_catalog(request)
         tools: set[str] | None = None
         if self._config.tools:
             incoming = list(request.tools or [])
@@ -1280,6 +1288,7 @@ _STABLE_SKILLS_ZH = "**Available Skills:**\n\n这一轮要使用的技能列在�
 _STABLE_SKILLS_EN = (
     "**Available Skills:**\n\nSkills for this turn are listed in the turn note at the end of the conversation.\n\n"
 )
+_SKILL_CATALOG_STUB = "_octop_skill_catalog_stub"
 
 
 def _metadata_skill_count(request: ModelRequest) -> int:
@@ -1446,14 +1455,8 @@ def _relocate_skills(
     chinese: bool,
 ) -> tuple[ModelRequest, str]:
     """Replace the skill catalog with a stable stub and return the selected bullets."""
-    system = request.system_message
     stub = _STABLE_SKILLS_ZH if chinese else _STABLE_SKILLS_EN
-    note = ""
-    extracted = ""
-    if system is not None:
-        updated, extracted = _rewrite_skill_content(system.content, kept, stub)
-        if updated != system.content:
-            request = request.override(system_message=system.model_copy(update={"content": updated}))
+    request, extracted = _replace_skill_catalog(request, kept, stub)
     # The loader already resolved this agent's skill file. Prefer that path
     # over a catalog bullet the model would otherwise guess.
     located = _metadata_skill_lines(request, kept, chinese=chinese)
@@ -1464,6 +1467,24 @@ def _relocate_skills(
         return request, ""
     title = "技能:" if chinese else "Skills:"
     return request, f"{title}\n{note.strip()}"
+
+
+def _replace_skill_catalog(request: ModelRequest, kept: set[str] | None, stub: str) -> tuple[ModelRequest, str]:
+    system = request.system_message
+    if system is None:
+        return request, ""
+    updated, extracted = _rewrite_skill_content(system.content, kept, stub)
+    if updated != system.content:
+        request = request.override(system_message=system.model_copy(update={"content": updated}))
+    return request, extracted
+
+
+def finalize_decision_skill_prompt(request: ModelRequest) -> ModelRequest:
+    """Keep the stable stub after deepagents renders the skill catalog."""
+    stub = request.state.get(_SKILL_CATALOG_STUB)
+    if isinstance(stub, str):
+        request, _ = _replace_skill_catalog(request, set(), stub)
+    return request
 
 
 def _tool_args_schema(tool: Any) -> str:

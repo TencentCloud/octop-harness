@@ -353,7 +353,14 @@ class TestCoreProviderPresets:
             assert models["kimi-k2-0711-preview"].max_input_tokens == 131_072
 
         for provider_id in ("minimax-cn", "minimax-intl"):
-            assert {m.max_input_tokens for m in presets[provider_id].models} == {204_800}
+            minimax = {model.id: model for model in presets[provider_id].models}
+            assert minimax["MiniMax-M3"].max_input_tokens == 1_000_000
+            assert minimax["MiniMax-M3"].reasoning is True
+            assert minimax["MiniMax-M3"].input == ("text", "image")
+            assert minimax["MiniMax-M3.1-Flash"].max_input_tokens == 1_000_000
+            assert minimax["MiniMax-M3.1-Flash"].reasoning is True
+            assert minimax["MiniMax-M3.1-Flash"].input == ("text", "image")
+            assert {m.max_input_tokens for m in presets[provider_id].models} == {204_800, 1_000_000}
 
         mimo = {model.id: model for model in presets["mimo"].models}
         assert mimo["mimo-v2.5"].max_input_tokens == 1_048_576

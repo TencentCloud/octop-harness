@@ -224,7 +224,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 ## How to Use
 
-Current release: **1.0.8**. See the [release notes](CHANGELOG.md).
+Current release: **1.0.9**. See the [release notes](CHANGELOG.md).
 
 ### Prerequisites
 - **Python 3.12+**
@@ -340,6 +340,23 @@ HITL `resume_hitl(thread_id, decisions)` retains the paused stream's user, tool
 selections and other request configuration across nested approvals. The host must
 authorize the resume caller. This context is process-local, isolated by thread,
 and released when the resumed stream finishes or the agent closes.
+
+### Scheduled SQLite checkpoint backups
+
+With checkpoint retention enabled, `OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE`
+defaults to `first`. The first cleanup with eligible checkpoints attempts to
+write `memory.sqlite.pre-prune.bak`. If the database plus WAL and 10% headroom
+do not fit, or if the copy fails, maintenance warns and continues pruning.
+`memory.sqlite.pre-prune.done` records the attempt and its outcome so later
+cleanups do not retry. Remove the marker to allow one more attempt the next
+time there are eligible checkpoints.
+
+Set the mode to `always` to replace the backup before every cleanup and defer
+checkpoint pruning if the backup cannot be written. Legacy values `1`,
+`true`, `on`, and `yes` also select `always`. Set `off` (or `0`, `false`,
+or `no`) to disable backups. Maintenance expires the backup after 7 days
+by default. Set `OCTOP_CHECKPOINT_BACKUP_KEEP_DAYS=0` to keep it indefinitely.
+Expiration leaves the marker in place.
 
 ## Documentation
 

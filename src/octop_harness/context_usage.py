@@ -317,17 +317,17 @@ def partition_system_prompt_segments(system_text: str) -> dict[str, int]:
     skills_text = ""
     rules_text = ""
 
-    skills_idx = rest.find(_SKILLS_MARKER)
-    if skills_idx >= 0:
-        skills_text = rest[skills_idx:]
-        rest = rest[:skills_idx]
-
     mem_start = rest.find(_AGENT_MEMORY_OPEN)
     mem_end = rest.find(_AGENT_MEMORY_CLOSE)
     if mem_start >= 0 and mem_end > mem_start:
         close_at = mem_end + len(_AGENT_MEMORY_CLOSE)
         rules_text = rest[mem_start:close_at]
         rest = rest[:mem_start] + rest[close_at:]
+
+    skills_idx = rest.find(_SKILLS_MARKER)
+    if skills_idx >= 0:
+        skills_text = rest[skills_idx:]
+        rest = rest[:skills_idx]
 
     return {
         "system_prompt": estimate_tokens(rest.strip()),

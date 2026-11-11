@@ -37,6 +37,11 @@ from typing import TYPE_CHECKING, Any
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from octop_harness.middleware.checkpoint_backup import (
+    checkpoint_backup_policy_from_env,
+    expire_checkpoint_backups,
+    prepare_checkpoint_backup,
+)
 from octop_harness.middleware.memory_recall import (
     has_recall_snapshot,
     replay_recall_snapshots,
@@ -165,11 +170,13 @@ def _checkpoint_retention_from_env() -> tuple[int | None, int | None]:
 def checkpoint_retention_policy() -> dict[str, Any]:
     """Public view of the retention window used by idle maintenance."""
     keep_last, keep_days = _checkpoint_retention_from_env()
+    backup_mode, backup_keep_days = checkpoint_backup_policy_from_env()
     return {
         "enabled": keep_last is not None or keep_days is not None,
         "keep_last": keep_last,
         "keep_days": keep_days,
-        "backup_before_prune": _env_flag("OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE", default=True),
+        "backup_before_prune": backup_mode,
+        "backup_keep_days": backup_keep_days,
         "vacuum": _env_flag("OCTOP_CHECKPOINT_VACUUM", default=False),
     }
 
@@ -180,24 +187,7 @@ def _checkpoint_sqlite_path(memory: Any) -> Path | None:
     if not raw:
         return None
     path = Path(raw).expanduser()
-    return path if path.is_file() else None
-
-
-def _backup_checkpoint_file(path: Path) -> Path:
-    """Write one rolling SQLite backup beside the live checkpoint file."""
-    import sqlite3
-
-    dest = path.with_name(path.name + ".pre-prune.bak")
-    source = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-    try:
-        target = sqlite3.connect(dest)
-        try:
-            source.backup(target)
-        finally:
-            target.close()
-    finally:
-        source.close()
-    return dest
+    return path.resolve() if path.is_file() else None
 
 
 def _reclaimable_checkpoint_bytes(path: Path) -> int:
@@ -213,14 +203,19 @@ def _reclaimable_checkpoint_bytes(path: Path) -> int:
 
 
 def _prune_checkpoints_if_configured(memory: Any) -> None:
-    """Delete old checkpoints. Default keeps the newest 20 per stream."""
+    """Retain completed SQLite threads' newest 20 checkpoints and their dependencies by default."""
     keep_last, keep_days = _checkpoint_retention_from_env()
-    if keep_last is None and keep_days is None:
-        return
     try:
+        path = _checkpoint_sqlite_path(memory)
+        backup_mode, backup_keep_days = checkpoint_backup_policy_from_env()
+        if path is not None:
+            expire_checkpoint_backups(path, backup_keep_days)
+        if keep_last is None and keep_days is None:
+            return
+
         from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
 
-        preview = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, dry_run=True)
+        preview = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, skip_pending=True, dry_run=True)
         if int(getattr(preview, "checkpoints_deleted", 0) or 0) <= 0:
             logger.debug(
                 "memory.maintenance prune_checkpoints keep_last=%s keep_days=%s deleted=0",
@@ -228,12 +223,9 @@ def _prune_checkpoints_if_configured(memory: Any) -> None:
                 keep_days,
             )
             return
-        policy = checkpoint_retention_policy()
-        path = _checkpoint_sqlite_path(memory)
-        if policy["backup_before_prune"] and path is not None:
-            backup = _backup_checkpoint_file(path)
-            logger.info("memory.maintenance checkpoint backup %s", backup)
-        stats = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days)
+        if path is not None and not prepare_checkpoint_backup(path, backup_mode, backup_keep_days):
+            return
+        stats = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, skip_pending=True)
     except Exception:  # maintenance runs off the user path; pylint: disable=broad-except
         logger.warning("memory.maintenance prune_checkpoints failed", exc_info=True)
         return
@@ -245,7 +237,6 @@ def _prune_checkpoints_if_configured(memory: Any) -> None:
         deleted,
         getattr(stats, "writes_deleted", None),
     )
-    path = _checkpoint_sqlite_path(memory)
     if deleted > 0 and path is not None:
         _vacuum_checkpoint_if_needed(path)
 
@@ -265,7 +256,7 @@ def _vacuum_checkpoint_if_needed(path: Path) -> None:
         path,
         reclaimable,
     )
-    if not checkpoint_retention_policy()["vacuum"]:
+    if not _env_flag("OCTOP_CHECKPOINT_VACUUM", default=False):
         return
     import sqlite3
 
@@ -1031,7 +1022,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             self._arm_maintenance(delay=self._maintenance_interval_seconds)
 
     def _submit_maintenance(self) -> None:
-        """Run one GC + nudge tick off-thread. Overlapping ticks skip."""
+        """Run one maintenance tick off-thread. Overlapping ticks skip."""
         if self._maintenance_interval_seconds <= 0 or self._service is None:
             return
         service = self._service
@@ -1095,7 +1086,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self,
         service: Any,
     ) -> None:
-        """Run one cheap GC + incremental-vacuum tick.
+        """Run checkpoint retention, GC and incremental vacuum.
 
         Full compact/VACUUM is intentionally never scheduled by the agent;
         operators may still invoke octop-memory's explicit compact command.
@@ -1108,7 +1099,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             # Deliberately NOT ``run_idle_maintenance``: that helper has no
             # switch for the backup-before-delete step. This tick keeps the
             # newest 20 checkpoints (override with OCTOP_CHECKPOINT_KEEP_*),
-            # copies the SQLite file first, then reclaims memory rows.
+            # applies the configured SQLite backup policy, then reclaims memory rows.
             from octop_memory.pipeline.lifecycle import nudge_vacuum, run_gc
 
             memory = getattr(service, "memory", None)
