@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- `browser_use` 工具在执行 `navigate`（含 `goto`）和 `new_tab`（含 `url`/`target_url`/`href` 等别名参数）前校验目标 URL，仅放行带有效主机名的 `http://` 与 `https://` 地址，拒绝 `file://`、`view-source:`、`javascript:`、`data:`、`chrome://` 等危险或无协议输入，在进入标签页复用检测或调用 `octop-browser` 前直接拦截（对应 `TencentCloud/Octop#2945`）。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增

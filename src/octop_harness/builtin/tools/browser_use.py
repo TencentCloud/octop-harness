@@ -373,19 +373,39 @@ def _kwargs_from_candidates(candidates: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _validate_action_params(action: str, kwargs: dict[str, Any]) -> str | None:
-    """Return a human-readable error when required kwargs are missing."""
-    if action == "navigate" and not kwargs.get("url"):
-        return "navigate requires a non-empty `url` (e.g. https://example.com). Pass the full destination URL."
-    if action == "click" and not kwargs.get("ref") and not kwargs.get("selector"):
-        return "click requires `ref` (from dom_tree) or `selector`."
-    if action == "type" and not kwargs.get("text"):
-        return "type requires `text` to insert."
-    if action == "eval_js" and not kwargs.get("expression"):
-        return "eval_js requires `expression` JavaScript to run."
-    if action in ("switch_tab", "close_tab") and not kwargs.get("tab_id"):
-        return f"{action} requires `tab_id` from list_tabs."
+def _validate_browser_url(action: str, raw_url: str) -> str | None:
+    """Return a validation error if ``raw_url`` is not an HTTP(S) URL."""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw_url):
+        return f"{action} `url` must not contain control characters."
+    try:
+        parsed = urlsplit(raw_url.strip())
+    except ValueError as exc:
+        return f"{action} received an invalid `url`: {exc}"
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.netloc:
+        return (
+            f"Blocked unsafe or invalid URL scheme {scheme or '<none>'!r} for {action}: "
+            "only http:// and https:// URLs with a host are allowed."
+        )
     return None
+
+
+def _validate_action_params(action: str, kwargs: dict[str, Any]) -> str | None:
+    """Return a human-readable error when required kwargs are missing or unsafe."""
+    error: str | None = None
+    if action == "navigate" and not kwargs.get("url"):
+        error = "navigate requires a non-empty `url` (e.g. https://example.com). Pass the full destination URL."
+    elif action in {"navigate", "new_tab"} and kwargs.get("url"):
+        error = _validate_browser_url(action, str(kwargs["url"]))
+    elif action == "click" and not kwargs.get("ref") and not kwargs.get("selector"):
+        error = "click requires `ref` (from dom_tree) or `selector`."
+    elif action == "type" and not kwargs.get("text"):
+        error = "type requires `text` to insert."
+    elif action == "eval_js" and not kwargs.get("expression"):
+        error = "eval_js requires `expression` JavaScript to run."
+    elif action in ("switch_tab", "close_tab") and not kwargs.get("tab_id"):
+        error = f"{action} requires `tab_id` from list_tabs."
+    return error
 
 
 @tool
