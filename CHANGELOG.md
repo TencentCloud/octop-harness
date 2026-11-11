@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 媒体生成新增 OpenAI 适配器（`provider="openai"`，`OpenAIMediaProvider`）：调用 Images API 的 `/images/generations` 生图，带参考图时调用 `/images/edits`（JSON `images: [{"image_url": ...}]`，URL 与 data URL 均可）；默认模型 `gpt-image-2.6-flare`，凭据读 `OPENAI_API_KEY`。只支持生图，该服务商的 `video_enabled` 会被强制关闭；尺寸接受 `WIDTHxHEIGHT` 或 `auto`，`seed` 与 `watermark` 不被 Images API 支持而忽略。
+- 媒体生成新增 Gemini 适配器（`provider="gemini"`，`GeminiMediaProvider`）：调用 Interactions API（`POST /v1beta/interactions`，请求头 `x-goog-api-key` 与 `Api-Revision: 2026-05-20`）生成 Nano Banana 图片；参考图放进 `input`（公网地址用 `uri`，data URL 转为内联 `data`）；`size` 可写宽高比（`16:9`）、分辨率档（`1K`/`2K`/`4K`）或 `WIDTHxHEIGHT`（换算为宽高比）。默认模型 `gemini-nano-banana-2.1`，凭据读 `GEMINI_API_KEY`；只支持生图，`count` 大于 1 时按张数逐次请求，`seed` 与 `watermark` 忽略。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增

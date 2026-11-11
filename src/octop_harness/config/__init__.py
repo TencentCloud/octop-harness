@@ -48,7 +48,7 @@ else:
 
 ProtocolName = Literal["openai", "anthropic", "bedrock"]
 InputModality = Literal["text", "image", "audio", "video"]
-MediaProviderName = Literal["volcengine", "dashscope", "minimax"]
+MediaProviderName = Literal["volcengine", "dashscope", "minimax", "openai", "gemini"]
 
 DEFAULT_CONFIG_FILENAME = "octop-harness.json"
 
@@ -71,7 +71,21 @@ _MEDIA_PROVIDER_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
         "image-01",
         "MiniMax-H3",
     ),
+    "openai": (
+        "OPENAI_API_KEY",
+        "https://api.openai.com/v1",
+        "gpt-image-2.6-flare",
+        "",
+    ),
+    "gemini": (
+        "GEMINI_API_KEY",
+        "https://generativelanguage.googleapis.com/v1beta",
+        "gemini-nano-banana-2.1",
+        "",
+    ),
 }
+# Adapters without a video API: ``video_enabled`` is always forced off for these providers.
+_IMAGE_ONLY_MEDIA_PROVIDERS: frozenset[str] = frozenset({"openai", "gemini"})
 
 
 @dataclass
@@ -112,6 +126,8 @@ class MediaProviderConfig:
             self.image_model = defaults[2]
         if not self.video_model:
             self.video_model = defaults[3]
+        if self.provider in _IMAGE_ONLY_MEDIA_PROVIDERS:
+            self.video_enabled = False
         if not self.base_url.startswith(("https://", "http://")):
             raise ValueError(f"MediaProviderConfig({self.id}).base_url must be an HTTP(S) URL")
         if self.enabled and not self.image_enabled and not self.video_enabled:
@@ -202,6 +218,8 @@ class MediaGenerationConfig:
                 self.image_model = provider_defaults[2]
             if self.video_model == volcengine_defaults[3]:
                 self.video_model = provider_defaults[3]
+        if self.provider in _IMAGE_ONLY_MEDIA_PROVIDERS:
+            self.video_enabled = False
         if not self.api_key_env:
             raise ValueError("MediaGenerationConfig.api_key_env is required")
         if not self.base_url.startswith(("https://", "http://")):

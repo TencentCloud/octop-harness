@@ -9,13 +9,17 @@ from octop_harness.config import MediaGenerationConfig, MediaProviderConfig
 from octop_harness.media.base import BaseMediaProvider
 from octop_harness.media.manager import MediaJobStore, MediaManager
 from octop_harness.media.providers.dashscope import DashScopeMediaProvider
+from octop_harness.media.providers.gemini import GeminiMediaProvider
 from octop_harness.media.providers.minimax import MiniMaxMediaProvider
+from octop_harness.media.providers.openai import OpenAIMediaProvider
 from octop_harness.media.providers.volcengine import VolcengineMediaProvider
 
 BUILTIN_MEDIA_PROVIDERS: dict[str, type[BaseMediaProvider]] = {
     "volcengine": VolcengineMediaProvider,
     "dashscope": DashScopeMediaProvider,
     "minimax": MiniMaxMediaProvider,
+    "openai": OpenAIMediaProvider,
+    "gemini": GeminiMediaProvider,
 }
 
 
