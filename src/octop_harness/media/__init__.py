@@ -18,6 +18,7 @@ from octop_harness.media.models import (
 )
 from octop_harness.media.providers.dashscope import DashScopeMediaProvider
 from octop_harness.media.providers.minimax import MiniMaxMediaProvider
+from octop_harness.media.providers.openai import OpenAIMediaProvider
 from octop_harness.media.providers.volcengine import VolcengineMediaProvider
 from octop_harness.media.registry import BUILTIN_MEDIA_PROVIDERS, create_media_manager, create_media_provider
 
@@ -39,6 +40,7 @@ __all__ = [
     "MediaRouteInfo",
     "MediaSubmission",
     "MiniMaxMediaProvider",
+    "OpenAIMediaProvider",
     "ProviderTask",
     "RemoteArtifact",
     "StoredMedia",

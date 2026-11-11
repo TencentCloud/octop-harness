@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 媒体生成新增 OpenAI 适配器（`provider="openai"`，`OpenAIMediaProvider`）：调用 Images API 的 `/images/generations` 生图，带参考图时调用 `/images/edits`（JSON `images: [{"image_url": ...}]`，URL 与 data URL 均可）；默认模型 `gpt-image-2.6-flare`，凭据读 `OPENAI_API_KEY`。只支持生图，该服务商的 `video_enabled` 会被强制关闭；尺寸接受 `WIDTHxHEIGHT` 或 `auto`，`seed` 与 `watermark` 不被 Images API 支持而忽略。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增

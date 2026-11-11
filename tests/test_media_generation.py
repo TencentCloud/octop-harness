@@ -39,6 +39,7 @@ from octop_harness.media.models import (
 )
 from octop_harness.media.providers.dashscope import DashScopeMediaProvider
 from octop_harness.media.providers.minimax import MiniMaxMediaProvider
+from octop_harness.media.providers.openai import OpenAIMediaProvider
 from octop_harness.media.providers.volcengine import VolcengineMediaProvider
 from octop_harness.media.registry import create_media_manager, create_media_provider
 
@@ -487,6 +488,7 @@ async def test_volcengine_video_timeout_cancels_remote_task() -> None:
             "wan3.0-video-prime",
         ),
         ("minimax", MiniMaxMediaProvider, "MINIMAX_API_KEY", "image-01", "MiniMax-H3"),
+        ("openai", OpenAIMediaProvider, "OPENAI_API_KEY", "gpt-image-2.6-flare", ""),
     ],
 )
 def test_media_provider_registry_applies_provider_defaults(
@@ -1055,3 +1057,94 @@ def test_agent_registers_only_enabled_media_tools(
     assert media_names == expected
     search = next(item for item in captured["middleware"] if type(item).__name__ == "ToolSearchMiddleware")
     assert search._deferred_tools & {"generate_image", "generate_video"} == expected
+
+
+def _openai_config() -> MediaGenerationConfig:
+    return MediaGenerationConfig(provider="openai", api_key="oa-test-key")
+
+
+@pytest.mark.asyncio
+async def test_openai_image_request_uses_images_api_and_decodes_base64() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(_PNG).decode()}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAIMediaProvider(_openai_config(), client=client)
+        result = await provider.generate_image(
+            ImageGenerationRequest(prompt="a red panda", size="1536X1024", count=2, seed=7, watermark=True)
+        )
+
+    assert seen["path"] == "/v1/images/generations"
+    assert seen["auth"] == "Bearer oa-test-key"
+    assert seen["body"] == {"model": "gpt-image-2.6-flare", "prompt": "a red panda", "n": 2, "size": "1536x1024"}
+    assert result == [GeneratedMedia(data=_PNG, media_type="image/png", extension="png")]
+
+
+@pytest.mark.asyncio
+async def test_openai_reference_images_use_edits_with_json_image_urls() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["content_type"] = request.headers.get("Content-Type")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(_PNG).decode()}]})
+
+    references = ("https://example.com/ref.png", "data:image/png;base64,AAAA")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAIMediaProvider(_openai_config(), client=client)
+        await provider.generate_image(ImageGenerationRequest(prompt="make it blue", reference_images=references))
+
+    assert seen["path"] == "/v1/images/edits"
+    assert seen["content_type"] == "application/json"
+    assert seen["body"]["images"] == [{"image_url": url} for url in references]
+    assert seen["body"]["model"] == "gpt-image-2.6-flare"
+
+
+@pytest.mark.asyncio
+async def test_openai_rejects_aspect_ratio_size_before_calling_the_api() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the API must not be called")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAIMediaProvider(_openai_config(), client=client)
+        with pytest.raises(MediaGenerationError) as excinfo:
+            await provider.generate_image(ImageGenerationRequest(prompt="x", size="16:9"))
+
+    assert excinfo.value.code == "unsupported_input"
+
+
+@pytest.mark.asyncio
+async def test_openai_http_auth_error_is_actionable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "Incorrect API key", "type": "invalid_request_error"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAIMediaProvider(_openai_config(), client=client)
+        with pytest.raises(MediaGenerationError) as excinfo:
+            await provider.generate_image(ImageGenerationRequest(prompt="x"))
+
+    assert excinfo.value.code == "credential_invalid"
+
+
+def test_openai_provider_is_image_only_and_never_claims_a_video_route(tmp_path: Path) -> None:
+    named = MediaProviderConfig(id="oa", provider="openai", api_key="k")
+    legacy = MediaGenerationConfig(provider="openai", api_key="k")
+
+    assert named.video_enabled is False
+    assert legacy.video_enabled is False
+    assert legacy.has_image_provider() is True
+    assert legacy.has_video_provider() is False
+    assert OpenAIMediaProvider.capabilities.video_generation is False
+
+    config = MediaGenerationConfig(providers=[named])
+    manager = create_media_manager(config, _workspace(tmp_path))
+    assert config.has_video_provider() is False
+    assert manager.has_route("image") is True
+    assert manager.has_route("video") is False
+    assert manager.route_info("image").provider_type == "openai"
