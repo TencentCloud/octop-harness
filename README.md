@@ -177,8 +177,10 @@ Expected provider failures return a structured, model-visible error envelope wit
 terminating the agent stream.
 
 For separate image and video routes, configure named providers. Built-in adapters cover Volcengine Ark
-(Seedream/Seedance), Alibaba Cloud Model Studio (Wan), MiniMax (image-01/H3), and OpenAI (GPT Image,
-image-only via the Images API; `OPENAI_API_KEY`, default `gpt-image-2.6-flare`, video is always disabled):
+(Seedream/Seedance), Alibaba Cloud Model Studio (Wan), MiniMax (image-01/H3), OpenAI (GPT Image,
+image-only via the Images API; `OPENAI_API_KEY`, default `gpt-image-2.6-flare`), and Gemini (Nano Banana,
+image-only via the Interactions API; `GEMINI_API_KEY`, default `gemini-nano-banana-2.1`). Video is always disabled
+for the image-only adapters:
 
 ```python
 from octop_harness import HarnessAgentConfig, MediaGenerationConfig, MediaProviderConfig

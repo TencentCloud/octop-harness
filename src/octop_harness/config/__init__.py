@@ -48,7 +48,7 @@ else:
 
 ProtocolName = Literal["openai", "anthropic", "bedrock"]
 InputModality = Literal["text", "image", "audio", "video"]
-MediaProviderName = Literal["volcengine", "dashscope", "minimax", "openai"]
+MediaProviderName = Literal["volcengine", "dashscope", "minimax", "openai", "gemini"]
 
 DEFAULT_CONFIG_FILENAME = "octop-harness.json"
 
@@ -77,9 +77,15 @@ _MEDIA_PROVIDER_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
         "gpt-image-2.6-flare",
         "",
     ),
+    "gemini": (
+        "GEMINI_API_KEY",
+        "https://generativelanguage.googleapis.com/v1beta",
+        "gemini-nano-banana-2.1",
+        "",
+    ),
 }
 # Adapters without a video API: ``video_enabled`` is always forced off for these providers.
-_IMAGE_ONLY_MEDIA_PROVIDERS: frozenset[str] = frozenset({"openai"})
+_IMAGE_ONLY_MEDIA_PROVIDERS: frozenset[str] = frozenset({"openai", "gemini"})
 
 
 @dataclass
