@@ -763,7 +763,7 @@ class HarnessAgentConfig:
     # loaded. ``searchfree`` (zero-config) is always included. Accepted values:
     #   - ``"auto"`` / ``True`` (default): every provider whose required env
     #     vars are set is loaded (tavily / brave / deepseek / google / kimi /
-    #     yuanbao / searchfree, plus ``you`` once ``YDC_API_KEY`` is set).
+    #     yuanbao / cloro / searchfree, plus ``you`` once ``YDC_API_KEY`` is set).
     #   - ``False``: no web-search tools loaded.
     #   - ``"all"``: every provider is loaded; the ones missing env vars
     #     return a plain-text error string when invoked.
