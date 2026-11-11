@@ -818,3 +818,78 @@ class TestTabsAndErrors:
         # removed ``[browser]`` extras.
         assert "pip install" in result
         assert "[browser]" not in result
+
+    @pytest.mark.parametrize("action", ["navigate", "goto", "new_tab"])
+    @pytest.mark.parametrize(
+        "blocked_url",
+        [
+            "file:///etc/passwd",
+            "file:/etc/passwd",
+            "FILE:///C:/Windows/win.ini",
+            "  file:///etc/hosts  ",
+            "view-source:file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/html,<h1>x</h1>",
+            "chrome://settings",
+            "about:blank",
+            "https://",
+            "/etc/passwd",
+            "https://exa\nmple.com",
+        ],
+    )
+    async def test_navigation_blocks_unsafe_url_schemes(
+        self,
+        install_fake: Callable[..., list[dict[str, Any]]],
+        action: str,
+        blocked_url: str,
+    ) -> None:
+        def builder(*, action: str, **_: Any) -> ToolResult:
+            raise AssertionError(f"browser_tool should not be called for {action}")
+
+        captured = install_fake(builder)
+        raw = await browser_use.ainvoke({"action": action, "url": blocked_url})
+        assert isinstance(raw, str)
+        payload = json.loads(raw)
+
+        assert payload["success"] is False
+        assert payload["error"]
+        assert payload["action_history"] == [{"action": action, "success": False}]
+        assert captured == []
+
+    @pytest.mark.parametrize("alias_key", ["target_url", "href"])
+    async def test_url_alias_also_enforces_scheme_guard(
+        self,
+        install_fake: Callable[..., list[dict[str, Any]]],
+        alias_key: str,
+    ) -> None:
+        def builder(*, action: str, **_: Any) -> ToolResult:
+            raise AssertionError(f"browser_tool should not be called for {action}")
+
+        captured = install_fake(builder)
+        raw = await browser_use.ainvoke({"action": "navigate", alias_key: "file:///etc/passwd"})
+        assert isinstance(raw, str)
+        payload = json.loads(raw)
+
+        assert payload["success"] is False
+        assert "Blocked" in payload["error"]
+        assert captured == []
+
+    async def test_navigate_still_allows_localhost_http(
+        self,
+        install_fake: Callable[..., list[dict[str, Any]]],
+    ) -> None:
+        def builder(*, action: str, **_: Any) -> ToolResult:
+            if action == "list_tabs":
+                return ToolResult(success=True, content="", metrics=_make_metrics(action))
+            return ToolResult(success=True, content="navigated", metrics=_make_metrics(action))
+
+        captured = install_fake(builder)
+        raw = await browser_use.ainvoke({"action": "navigate", "url": "http://localhost:8080/app"})
+        assert isinstance(raw, str)
+        payload = json.loads(raw)
+
+        assert payload["success"] is True
+        assert list(captured) == [
+            {"action": "list_tabs", "profile": "default"},
+            {"action": "navigate", "profile": "default", "url": "http://localhost:8080/app"},
+        ]
