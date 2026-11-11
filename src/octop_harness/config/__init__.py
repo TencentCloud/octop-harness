@@ -48,7 +48,7 @@ else:
 
 ProtocolName = Literal["openai", "anthropic", "bedrock"]
 InputModality = Literal["text", "image", "audio", "video"]
-MediaProviderName = Literal["volcengine", "dashscope", "minimax", "openai", "gemini"]
+MediaProviderName = Literal["volcengine", "dashscope", "minimax", "openai", "gemini", "tencent"]
 
 DEFAULT_CONFIG_FILENAME = "octop-harness.json"
 
@@ -83,9 +83,15 @@ _MEDIA_PROVIDER_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
         "gemini-nano-banana-2.1",
         "",
     ),
+    "tencent": (
+        "TENCENT_TOKENHUB_API_KEY",
+        "https://tokenhub.tencentmaas.com/v1",
+        "hy-image-v3.5-preview",
+        "",
+    ),
 }
 # Adapters without a video API: ``video_enabled`` is always forced off for these providers.
-_IMAGE_ONLY_MEDIA_PROVIDERS: frozenset[str] = frozenset({"openai", "gemini"})
+_IMAGE_ONLY_MEDIA_PROVIDERS: frozenset[str] = frozenset({"openai", "gemini", "tencent"})
 
 
 @dataclass
