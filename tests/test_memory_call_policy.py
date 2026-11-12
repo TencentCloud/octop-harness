@@ -286,3 +286,173 @@ def test_auth_error_mentioning_temperature_does_not_retry(monkeypatch: pytest.Mo
         assert len(requests) == 1
     finally:
         factory.close()
+
+
+class _RecordingCallbackHandler:
+    """Minimal LangChain callback handler collecting start/end chat model events."""
+
+    def __init__(self) -> None:
+        from langchain_core.callbacks import BaseCallbackHandler
+
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+        events = self.events
+
+        class _Impl(BaseCallbackHandler):
+            def on_chat_model_start(
+                self,
+                serialized: dict[str, Any],
+                messages: list[Any],
+                **kwargs: Any,
+            ) -> None:
+                del serialized, messages
+                events.append(("on_chat_model_start", dict(kwargs)))
+
+            def on_llm_start(
+                self,
+                serialized: dict[str, Any],
+                prompts: list[str],
+                **kwargs: Any,
+            ) -> None:
+                del serialized, prompts
+                events.append(("on_llm_start", dict(kwargs)))
+
+            def on_chat_model_stream(self, chunk: Any, **kwargs: Any) -> None:
+                del chunk
+                events.append(("on_chat_model_stream", dict(kwargs)))
+
+        self.handler = _Impl()
+
+
+def test_call_llm_detaches_from_parent_runnable_callbacks_and_restores_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_core.messages import HumanMessage
+    from langchain_core.runnables import RunnableLambda
+
+    from octop_harness.llm.session_header import session_header_scope
+
+    requests: list[httpx.Request] = []
+
+    def handle_request(self: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        del self
+        requests.append(request)
+        return _response(request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+
+    factory = ChatModelFactory(
+        [
+            ProviderConfig(
+                id="local",
+                base_url="https://local.example/v1",
+                api_key="test",
+                session_header="X-Session-Id",
+                models=[ModelConfig(id="Qwen3")],
+            ),
+        ]
+    )
+    client = HarnessAgentLLMClient(factory, default_model="local/Qwen3")
+    main_model = factory.get_chat_model("local/Qwen3")
+    collector = _RecordingCallbackHandler()
+
+    try:
+
+        def _turn_step(_: object) -> tuple[str, str]:
+            with session_header_scope("thread-42"):
+                aux_text = client.call_llm("review memory documents", temperature=0.0, max_tokens=256)
+                assert len(collector.events) == 0
+                main_reply = main_model.invoke([HumanMessage(content="after aux")])
+                return aux_text, str(main_reply.content)
+
+        parent_config = {
+            "callbacks": [collector.handler],
+            "metadata": {"thread_id": "thread-42", "langgraph_node": "tools"},
+            "tags": ["turn-tag"],
+        }
+        aux_text, main_text = RunnableLambda(_turn_step).invoke({}, config=parent_config)
+
+        assert aux_text == "ok"
+        assert main_text == "ok"
+        # Only the subsequent main-chat call triggered the parent callback; the aux call stayed silent.
+        assert [name for name, _ in collector.events] == ["on_chat_model_start"]
+        main_event = collector.events[0][1]
+        assert main_event["metadata"]["thread_id"] == "thread-42"
+        assert main_event["metadata"]["langgraph_node"] == "tools"
+        assert "turn-tag" in main_event["tags"]
+        # Clearing LangChain runnable config did not clobber ProviderConfig.session_header.
+        assert [r.headers.get("X-Session-Id") for r in requests] == ["thread-42", "thread-42"]
+    finally:
+        factory.close()
+
+
+def test_call_llm_restores_parent_runnable_config_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_core.messages import HumanMessage
+    from langchain_core.runnables import RunnableLambda
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        del self, kwargs
+        if b"fail-aux" in request.content:
+            return httpx.Response(401, request=request, json={"error": {"message": "unauthorized"}})
+        return _response(request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    factory = _factory()
+    client = HarnessAgentLLMClient(factory, default_model="local/Qwen3", max_retries=0)
+    main_model = factory.get_chat_model("local/Qwen3")
+    collector = _RecordingCallbackHandler()
+
+    try:
+
+        def _turn_step(_: object) -> str:
+            with pytest.raises(LLMClientError, match="unauthorized"):
+                client.call_llm("fail-aux")
+            assert collector.events == []
+            reply = main_model.invoke([HumanMessage(content="main continues")])
+            return str(reply.content)
+
+        result = RunnableLambda(_turn_step).invoke(
+            {},
+            config={"callbacks": [collector.handler], "metadata": {"thread_id": "thread-err"}},
+        )
+        assert result == "ok"
+        assert len(collector.events) == 1
+        assert collector.events[0][1]["metadata"]["thread_id"] == "thread-err"
+    finally:
+        factory.close()
+
+
+@pytest.mark.asyncio
+async def test_call_llm_inside_astream_events_emits_no_chat_model_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_core.runnables import RunnableLambda
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        del self, kwargs
+        return _response(request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    factory = _factory()
+    client = HarnessAgentLLMClient(factory, default_model="local/Qwen3")
+
+    try:
+
+        def _tool_step(_: object) -> str:
+            return client.call_llm("reconcile manual docs", max_tokens=128)
+
+        chat_events: list[str] = []
+        outputs: list[Any] = []
+        async for ev in RunnableLambda(_tool_step).astream_events({}, version="v2"):
+            kind = str(ev.get("event", ""))
+            if kind.startswith("on_chat_model_") or kind.startswith("on_llm_"):
+                chat_events.append(kind)
+            if kind == "on_chain_end":
+                outputs.append(ev.get("data", {}).get("output"))
+
+        assert chat_events == []
+        assert "ok" in outputs
+    finally:
+        factory.close()
