@@ -31,6 +31,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -204,13 +205,27 @@ def _reclaimable_checkpoint_bytes(path: Path) -> int:
 
 
 def _prune_checkpoints_if_configured(memory: Any, *, messages_channel: DeltaChannel[list[Any]] | None = None) -> None:
-    """Keep the configured SQLite window and snapshot replayed messages when supported."""
+    """Keep the configured checkpoint window and snapshot replayed messages when supported."""
     keep_last, keep_days = _checkpoint_retention_from_env()
     try:
         path = _checkpoint_sqlite_path(memory)
         backup_mode, backup_keep_days = checkpoint_backup_policy_from_env()
-        if path is not None:
-            expire_checkpoint_backups(path, backup_keep_days)
+        backup_path = path
+        write_dump = None
+        if path is None:
+            from octop_memory.application import checkpoint_maintenance
+
+            key_for = getattr(checkpoint_maintenance, "postgres_checkpoint_backup_key", None)
+            dump_for = getattr(checkpoint_maintenance, "backup_postgres_checkpoints", None)
+            if callable(key_for) and callable(dump_for) and (key := key_for(memory)):
+                directory = Path(
+                    os.environ.get("OCTOP_CHECKPOINT_BACKUP_DIR")
+                    or Path.home() / ".octop-harness" / "checkpoint-backups"
+                )
+                backup_path = directory.expanduser() / f"postgres-{key}.sql"
+                write_dump = partial(dump_for, memory)
+        if backup_path is not None:
+            expire_checkpoint_backups(backup_path, backup_keep_days)
         if keep_last is None and keep_days is None:
             return
 
@@ -227,8 +242,10 @@ def _prune_checkpoints_if_configured(memory: Any, *, messages_channel: DeltaChan
                 keep_days,
             )
             return
-        if path is not None and not prepare_checkpoint_backup(path, backup_mode, backup_keep_days):
-            return
+        if backup_path is not None:
+            options_for_backup = {"write_dump": write_dump} if write_dump is not None else {}
+            if not prepare_checkpoint_backup(backup_path, backup_mode, backup_keep_days, **options_for_backup):
+                return
         stats = prune_checkpoints(memory, **options)
     except Exception:  # maintenance runs off the user path; pylint: disable=broad-except
         logger.warning("memory.maintenance prune_checkpoints failed", exc_info=True)

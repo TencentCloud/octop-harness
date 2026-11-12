@@ -24,6 +24,38 @@ _MODE = "OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE"
 _KEEP_DAYS = "OCTOP_CHECKPOINT_BACKUP_KEEP_DAYS"
 
 
+def test_postgres_logical_backup_uses_existing_modes_and_expiration(tmp_path):
+    path = tmp_path / "pg" / "checkpoint.sql"
+    backup = path.with_suffix(".sql.pre-prune.bak")
+    marker = path.with_suffix(".sql.pre-prune.done")
+    attempts = []
+
+    def write(output):
+        attempts.append(1)
+        output.write(b"complete dump")
+
+    def fail(output):
+        attempts.append(1)
+        output.write(b"partial dump")
+        raise OSError("injected failure")
+
+    assert checkpoint_backup.prepare_checkpoint_backup(path, "off", 7, write_dump=write)
+    assert not attempts
+    assert checkpoint_backup.prepare_checkpoint_backup(path, "first", 7, write_dump=write)
+    assert checkpoint_backup.prepare_checkpoint_backup(path, "first", 7, write_dump=fail)
+    assert len(attempts) == 1
+    assert not checkpoint_backup.prepare_checkpoint_backup(path, "always", 7, write_dump=fail)
+    assert backup.read_bytes() == b"complete dump"
+    assert _marker_result(marker) == "backed_up"
+    os.utime(backup, (time.time() - 8 * 86400,) * 2)
+    checkpoint_backup.expire_checkpoint_backups(path, 7)
+    assert not backup.exists()
+    assert checkpoint_backup.prepare_checkpoint_backup(path, "first", 7, write_dump=write)
+    assert len(attempts) == 2
+    assert checkpoint_backup.prepare_checkpoint_backup(path, "always", 7, write_dump=write)
+    assert backup.read_bytes() == b"complete dump"
+
+
 def _append(memory: Memory, count: int = 1) -> None:
     config: dict[str, Any] = {"configurable": {"thread_id": "thread", "checkpoint_ns": ""}}
     latest = memory.get_tuple(config)
