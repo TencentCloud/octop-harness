@@ -51,6 +51,12 @@ def _content_block_delta(block: Any) -> tuple[str, str]:
     block_type = block.get("type", "text")
     if block_type == "thinking":
         return "", str(block.get("thinking") or "")
+    if block_type == "reasoning":
+        # OpenAI-Responses streams deliver reasoning summaries as
+        # {"type": "reasoning", "summary": [{"type": "summary_text", "text": ...}]}.
+        summary = block.get("summary") or []
+        text = "".join(str(part.get("text") or "") for part in summary if isinstance(part, dict))
+        return "", text
     if block_type == "text":
         return str(block.get("text") or ""), ""
     return "", ""

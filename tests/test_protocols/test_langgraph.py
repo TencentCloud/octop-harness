@@ -638,6 +638,41 @@ class TestStream:
         assert chunks == [{"type": "token", "content": "plain answer", "node": "agent"}]
 
     @pytest.mark.asyncio
+    async def test_stream_yields_reasoning_from_responses_summary_blocks(self) -> None:
+        """OpenAI-Responses reasoning summary blocks stream as reasoning events.
+
+        langchain-openai converts `response.reasoning_summary_text.delta`
+        chunks into content blocks shaped like
+        ``{"type": "reasoning", "summary": [{"type": "summary_text", ...}]}``.
+        """
+        msg_chunk = MagicMock()
+        msg_chunk.type = "AIMessageChunk"
+        msg_chunk.content = [
+            {
+                "type": "reasoning",
+                "summary": [{"index": 0, "type": "summary_text", "text": "weighing options"}],
+            },
+            {"type": "text", "text": "Here is the answer"},
+        ]
+        msg_chunk.additional_kwargs = {}
+        msg_chunk.tool_call_chunks = []
+
+        graph = MagicMock()
+        graph.astream = self._make_astream(
+            [
+                {"type": "messages", "data": (msg_chunk, {"langgraph_node": "agent"})},
+            ]
+        )
+
+        protocol = _make_protocol(graph)
+        chunks: list[dict[str, Any]] = []
+        async for chunk in protocol.stream([HumanMessage(content="hi")], {}):
+            chunks.append(chunk)
+
+        assert {"type": "reasoning", "content": "weighing options", "node": "agent"} in chunks
+        assert {"type": "token", "content": "Here is the answer", "node": "agent"} in chunks
+
+    @pytest.mark.asyncio
     async def test_stream_yields_hitl_required_on_interrupt(self) -> None:
         interrupt = MagicMock()
         interrupt.value = {
