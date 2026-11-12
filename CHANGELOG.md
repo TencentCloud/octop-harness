@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- OpenAI 兼容 Chat Completions 出站请求将对话历史中非首位的 `system` / `developer` 消息按原有顺序合并至 `messages[0]`（保留 multipart 内容块与 `cache_control` 前缀块），修复多智能体委派或历史 checkpoint 残留系统消息导致 `llama.cpp --jinja`、Qwen 等严格模板服务返回 HTTP 500 的问题（对应 `#227`）。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增

@@ -678,6 +678,7 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             supported: set[str] = getattr(self, "_harness_supported_input", set()) or {"text", "image"}
             if "image" not in supported:
                 _strip_unsupported_content_types(messages_out)
+            _coalesce_system_messages(messages_out)
             source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
             if not source_messages:
                 return payload
@@ -878,6 +879,63 @@ def _strip_unsupported_content_types(messages: list[Any]) -> None:
             msg["content"] = text_parts[0].get("text", "")
         else:
             msg["content"] = text_parts
+
+
+_SYSTEM_ROLES: frozenset[str] = frozenset({"system", "developer"})
+
+
+def _merge_system_contents(contents: list[Any]) -> str | list[Any]:
+    """Combine system/developer contents in order without breaking cache prefixes."""
+    if not any(isinstance(content, list) for content in contents):
+        parts: list[str] = []
+        for content in contents:
+            if isinstance(content, str):
+                if content:
+                    parts.append(content)
+            elif content is not None:
+                text = str(content)
+                if text:
+                    parts.append(text)
+        return "\n\n".join(parts)
+
+    blocks: list[Any] = []
+    for content in contents:
+        if isinstance(content, list):
+            blocks.extend(content)
+        elif isinstance(content, str):
+            if content:
+                blocks.append({"type": "text", "text": content})
+        elif content is not None:
+            text = str(content)
+            if text:
+                blocks.append({"type": "text", "text": text})
+    return blocks
+
+
+def _coalesce_system_messages(messages: list[Any]) -> None:
+    """Coalesce all ``system``/``developer`` messages into a single leading entry.
+
+    Strict Jinja chat templates (such as Qwen via ``llama.cpp --jinja``)
+    reject any ``system`` or ``developer`` message at ``index > 0``. Keeping
+    entries in order with the original leading content first preserves prefix
+    cache boundaries and multipart block metadata.
+    """
+    system_indices = [
+        index for index, msg in enumerate(messages) if isinstance(msg, dict) and msg.get("role") in _SYSTEM_ROLES
+    ]
+    if not system_indices:
+        return
+    if len(system_indices) == 1 and system_indices[0] == 0:
+        return
+
+    systems = [messages[index] for index in system_indices]
+    system_index_set = set(system_indices)
+    non_system = [msg for index, msg in enumerate(messages) if index not in system_index_set]
+    merged_head = {
+        **systems[0],
+        "content": _merge_system_contents([msg.get("content") for msg in systems]),
+    }
+    messages[:] = [merged_head, *non_system]
 
 
 def _inject_model_token_limits(instance: BaseChatModel, model: ModelConfig) -> None:
