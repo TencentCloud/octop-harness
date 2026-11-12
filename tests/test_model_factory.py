@@ -848,3 +848,166 @@ class TestResponsesApiFallback:
             list(instance._stream([HumanMessage(content="ping")]))
 
         assert fallback_calls == 0
+
+
+class TestChatCompletionsSystemCoalescing:
+    """Strict Jinja templates reject ``system``/``developer`` entries after index 0."""
+
+    def _build(self) -> Any:
+        provider = ProviderConfig(
+            id="local",
+            base_url="https://llama.local/v1",
+            api_key="sk-local",
+            protocol="openai",
+        )
+        return build_chat_model(provider, ModelConfig(id="Qwen3-27B"))
+
+    def test_coalesces_consecutive_and_mid_history_system_messages_without_mutating_source(self) -> None:
+        from copy import deepcopy
+
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        history = [
+            SystemMessage(content="Base agent policy."),
+            SystemMessage(content="Secondary prefix."),
+            HumanMessage(content="Question 1"),
+            AIMessage(content="Answer 1", additional_kwargs={"reasoning_content": "thought 1"}),
+            SystemMessage(content="Team dispatch instructions."),
+            HumanMessage(content="Question 2"),
+        ]
+        before = deepcopy(history)
+        payload = self._build()._get_request_payload(history)
+
+        messages = payload["messages"]
+        assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+        assert messages[0]["content"] == "Base agent policy.\n\nSecondary prefix.\n\nTeam dispatch instructions."
+        assert messages[2]["reasoning_content"] == "thought 1"
+        assert history == before
+
+    def test_moves_trailing_system_message_to_index_zero_without_dropping_user_turn(self) -> None:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        payload = self._build()._get_request_payload(
+            [HumanMessage(content="ping"), SystemMessage(content="Late instructions.")]
+        )
+
+        messages = payload["messages"]
+        assert [m["role"] for m in messages] == ["system", "user"]
+        assert messages[0]["content"] == "Late instructions."
+        assert messages[1]["content"] == "ping"
+
+    @pytest.mark.parametrize(
+        ("first_role", "second_role", "expected_role"),
+        [
+            ("system", "developer", "system"),
+            ("developer", "system", "developer"),
+            ("developer", "developer", "developer"),
+        ],
+    )
+    def test_coalesces_mixed_system_and_developer_roles(
+        self,
+        first_role: str,
+        second_role: str,
+        expected_role: str,
+    ) -> None:
+        payload = self._build()._get_request_payload(
+            [
+                (first_role, "Leading rules."),
+                ("human", "Hello"),
+                (second_role, "Mid-history rules."),
+            ]
+        )
+
+        messages = payload["messages"]
+        assert [m["role"] for m in messages] == [expected_role, "user"]
+        assert messages[0]["content"] == "Leading rules.\n\nMid-history rules."
+
+    def test_preserves_cache_control_blocks_at_head_when_merging_multipart_content(self) -> None:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        history = [
+            SystemMessage(
+                content=[
+                    {"type": "text", "text": "Static policy.", "cache_control": {"type": "ephemeral"}},
+                ]
+            ),
+            HumanMessage(content="ping"),
+            SystemMessage(content="Dynamic dispatch."),
+        ]
+        payload = self._build()._get_request_payload(history)
+
+        messages = payload["messages"]
+        assert [m["role"] for m in messages] == ["system", "user"]
+        assert messages[0]["content"] == [
+            {"type": "text", "text": "Static policy.", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "Dynamic dispatch."},
+        ]
+
+    @pytest.mark.parametrize(
+        ("history", "expected_roles"),
+        [
+            ([("system", "Only one."), ("human", "ping")], ["system", "user"]),
+            ([("human", "ping"), ("assistant", "pong")], ["user", "assistant"]),
+        ],
+    )
+    def test_leaves_well_formed_and_systemless_histories_intact(
+        self,
+        history: list[tuple[str, str]],
+        expected_roles: list[str],
+    ) -> None:
+        payload = self._build()._get_request_payload(history)
+        assert [m["role"] for m in payload["messages"]] == expected_roles
+
+    @pytest.mark.asyncio
+    async def test_http_wire_payload_places_single_system_message_at_index_zero(self) -> None:
+        import json
+
+        import httpx
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from openai import AsyncOpenAI
+
+        captured_bodies: list[dict[str, Any]] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured_bodies.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "Qwen3-27B",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "OK"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+
+        instance = self._build()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            client = AsyncOpenAI(
+                api_key="sk-local",
+                base_url=instance.openai_api_base,
+                http_client=http,
+            )
+            instance.root_async_client = client
+            instance.async_client = client.chat.completions
+            result = await instance.ainvoke(
+                [
+                    SystemMessage(content="System base."),
+                    HumanMessage(content="step 1"),
+                    SystemMessage(content="Injected mid-turn."),
+                    HumanMessage(content="step 2"),
+                ]
+            )
+
+        assert result.text == "OK"
+        assert len(captured_bodies) == 1
+        wire_messages = captured_bodies[0]["messages"]
+        assert [m["role"] for m in wire_messages] == ["system", "user", "user"]
+        assert wire_messages[0]["content"] == "System base.\n\nInjected mid-turn."
+        assert [m["content"] for m in wire_messages[1:]] == ["step 1", "step 2"]
