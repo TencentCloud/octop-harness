@@ -73,6 +73,7 @@ def _review_pending_manual_documents(service: Any) -> None:
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from langgraph.channels.delta import DeltaChannel
     from octop_memory import MemoryService
 
 logger = logging.getLogger(__name__)
@@ -202,8 +203,8 @@ def _reclaimable_checkpoint_bytes(path: Path) -> int:
     return page * free
 
 
-def _prune_checkpoints_if_configured(memory: Any) -> None:
-    """Retain completed SQLite threads' newest 20 checkpoints and their dependencies by default."""
+def _prune_checkpoints_if_configured(memory: Any, *, messages_channel: DeltaChannel[list[Any]] | None = None) -> None:
+    """Keep the configured SQLite window and snapshot replayed messages when supported."""
     keep_last, keep_days = _checkpoint_retention_from_env()
     try:
         path = _checkpoint_sqlite_path(memory)
@@ -215,7 +216,10 @@ def _prune_checkpoints_if_configured(memory: Any) -> None:
 
         from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
 
-        preview = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, skip_pending=True, dry_run=True)
+        options: dict[str, Any] = {"keep_last": keep_last, "keep_days": keep_days, "skip_pending": True}
+        if messages_channel is not None and "messages_channel" in inspect.signature(prune_checkpoints).parameters:
+            options["messages_channel"] = messages_channel
+        preview = prune_checkpoints(memory, **options, dry_run=True)
         if int(getattr(preview, "checkpoints_deleted", 0) or 0) <= 0:
             logger.debug(
                 "memory.maintenance prune_checkpoints keep_last=%s keep_days=%s deleted=0",
@@ -225,7 +229,7 @@ def _prune_checkpoints_if_configured(memory: Any) -> None:
             return
         if path is not None and not prepare_checkpoint_backup(path, backup_mode, backup_keep_days):
             return
-        stats = prune_checkpoints(memory, keep_last=keep_last, keep_days=keep_days, skip_pending=True)
+        stats = prune_checkpoints(memory, **options)
     except Exception:  # maintenance runs off the user path; pylint: disable=broad-except
         logger.warning("memory.maintenance prune_checkpoints failed", exc_info=True)
         return
@@ -335,6 +339,8 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         maintenance_initial_delay_seconds: Delay before the first cheap
             maintenance tick. Hosts use ~1s so reclaim starts shortly after
             the service is bound.
+        checkpoint_messages_channel: The graph's messages reducer for
+            snapshotting at SQLite checkpoint retention boundaries.
     """
 
     @property
@@ -357,6 +363,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         on_chat_model: Callable[[str], None] | None = None,
         maintenance_interval_seconds: float = 0.0,
         maintenance_initial_delay_seconds: float = 60.0,
+        checkpoint_messages_channel: DeltaChannel[list[Any]] | None = None,
     ) -> None:
         super().__init__()
         if jsonl_max_bytes <= 0:
@@ -379,6 +386,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self._on_chat_model = on_chat_model
         self._maintenance_interval_seconds = maintenance_interval_seconds
         self._maintenance_initial_delay_seconds = maintenance_initial_delay_seconds
+        self._checkpoint_messages_channel = checkpoint_messages_channel
         self._lock = threading.Lock()
         self._background_condition = threading.Condition()
         self._background_active = 0
@@ -1114,7 +1122,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 logger.debug("memory.maintenance skip: another agent just reclaimed this store")
                 return
 
-            _prune_checkpoints_if_configured(memory)
+            _prune_checkpoints_if_configured(memory, messages_channel=self._checkpoint_messages_channel)
 
             def _nudge(store: Any) -> Any:
                 return nudge_vacuum(store, pages=_MAINTENANCE_VACUUM_PAGES)

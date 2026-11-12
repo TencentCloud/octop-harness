@@ -365,6 +365,59 @@ async def test_pruning_preserves_state_and_pending_approval(tmp_path, monkeypatc
         assert {tid: await state(agent, tid) for tid in before} == before
 
 
+@pytest.mark.parametrize("approval", ["parent", "child"])
+async def test_scheduled_pruning_snapshots_messages_and_preserves_approval(tmp_path, monkeypatch, approval):
+    import inspect
+
+    from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
+
+    from octop_harness.middleware.memory import _prune_checkpoints_if_configured
+
+    if "messages_channel" not in inspect.signature(prune_checkpoints).parameters:
+        pytest.skip("installed octop-memory does not support message snapshots")
+    monkeypatch.setenv("OCTOP_CHECKPOINT_DURABILITY", "async")
+    monkeypatch.setenv("OCTOP_CHECKPOINT_RETENTION", "1")
+    monkeypatch.setenv("OCTOP_CHECKPOINT_KEEP_LAST", "20")
+    monkeypatch.delenv("OCTOP_CHECKPOINT_KEEP_DAYS", raising=False)
+    monkeypatch.setenv("OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE", "first")
+    db = tmp_path / "memory.sqlite"
+    async with open_probe(db, tmp_path / "workspace", approval=approval, subagent=approval == "child") as (
+        agent,
+        model,
+        memory,
+        _,
+    ):
+        for index in range(16):
+            await agent.call(request("done", f"done {index}"))
+            await agent.call(request("pending", f"pending {index}"))
+        prompt = "SUBAGENT_APPROVAL" if approval == "child" else "APPROVAL"
+        events = await _stream(agent, "pending", prompt)
+        assert any(event["type"] == "hitl_required" for event in events)
+        pending = await state(agent, "pending")
+        pending_rows = rows(memory, "pending")
+        done = {"configurable": {"thread_id": "done", "checkpoint_ns": ""}}
+        retained = list(memory.list(done, limit=20))
+        assert "messages" not in retained[-1].checkpoint["channel_values"]
+        before_states = [(await agent.graph.aget_state(row.config)).values for row in retained]
+        before_history = await agent.aget_history("done", limit=100)
+
+        monkeypatch.setenv("OCTOP_CHECKPOINT_DURABILITY", "exit")
+        _prune_checkpoints_if_configured(memory, messages_channel=agent.graph.channels["messages"])
+
+        assert db.with_name("memory.sqlite.pre-prune.bak").is_file()
+        assert rows(memory, "done")[0] == 20
+        assert list(memory.list(done))[-1].parent_config is None
+        assert [(await agent.graph.aget_state(row.config)).values for row in retained] == before_states
+        assert await agent.aget_history("done", limit=100) == before_history
+        assert rows(memory, "pending") == pending_rows
+        assert await state(agent, "pending") == pending
+        await agent.call(request("done", "continue"))
+        assert model._inputs[-1][-2]["data"]["content"] == "reply: done 15"
+        events = [event async for event in agent.resume_hitl("pending", [{"type": "approve"}])]
+        assert all(event["type"] != "hitl_required" for event in events)
+        assert not (await state(agent, "pending"))["next"]
+
+
 async def _crash_child(db: Path, workspace: Path) -> None:
     async with open_probe(db, workspace) as (agent, _, memory, started):
         await agent.call(request("thread", "last completed turn"))

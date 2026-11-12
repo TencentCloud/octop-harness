@@ -474,6 +474,7 @@ class TestIdleMaintenance:
             assert mw._maintenance_interval_seconds == 3600.0
             assert mw._maintenance_initial_delay_seconds == 1.0
             assert mw._maintenance_timer is not None
+            assert mw._checkpoint_messages_channel is not None
         finally:
             runtime.close()
 
