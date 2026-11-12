@@ -12,10 +12,16 @@ from octop_harness.builtin.tools.desktop_screenshot import (
 from octop_harness.builtin.tools.env_file import build_env_file_tools
 from octop_harness.builtin.tools.media_generation import build_media_generation_tools
 from octop_harness.builtin.tools.send_file import send_file_to_user
+from octop_harness.builtin.tools.structured_form import (
+    STRUCTURED_FORM_TOOL_NAME,
+    request_structured_form,
+)
 from octop_harness.builtin.tools.web_fetch import web_fetch
 
 __all__ = [
+    "STRUCTURED_FORM_TOOL_NAME",
     "ASK_USER_TOOL_NAME",
+    "request_structured_form",
     "ask_user_question",
     "browser_use",
     "build_desktop_screenshot_tool",
