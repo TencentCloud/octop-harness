@@ -36,11 +36,14 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
+from langchain_core.runnables.config import var_child_runnable_config
 from octop_memory.ports.llm import LLMClientError, LLMTier
 
 from octop_harness.llm.invoke_helpers import bind_call_options, build_text_messages, stringify_content
 
 if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
+
     from octop_harness.llm.factory import ChatModelFactory
 
 logger = logging.getLogger(__name__)
@@ -250,7 +253,7 @@ class HarnessAgentLLMClient:
                 extra_body=_aux_extra_body(ref, self._thinking, extra_body),
             )
             try:
-                response = bound_model.invoke(messages, config={"callbacks": []})
+                response = _invoke_detached(bound_model, messages)
                 return stringify_content(response.content)
             except Exception as exc:
                 if temperature is not None and _is_temperature_rejection(exc):
@@ -280,6 +283,20 @@ class HarnessAgentLLMClient:
                 raise LLMClientError(
                     f"chat model {ref!r} failed for tier={tier!r}: {type(exc).__name__}: {detail}",
                 ) from exc
+
+
+def _invoke_detached(bound_model: Any, messages: list[BaseMessage]) -> Any:
+    """Invoke an auxiliary model isolated from any enclosing runnable config.
+
+    Clearing ``var_child_runnable_config`` prevents ``RunnableBinding`` from
+    re-attaching inherited callbacks, metadata, or tags onto in-turn auxiliary
+    calls (keeping auxiliary JSON outputs out of the chat transcript).
+    """
+    token = var_child_runnable_config.set(None)
+    try:
+        return bound_model.invoke(messages, config={"callbacks": []})
+    finally:
+        var_child_runnable_config.reset(token)
 
 
 def _is_temperature_rejection(exc: BaseException) -> bool:

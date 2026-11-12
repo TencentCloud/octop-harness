@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 隔离 `HarnessAgentLLMClient` 在对话轮次内发起的辅助模型调用：暂清 `var_child_runnable_config` 并保留 `callbacks=[]`，防止 `RunnableBinding` 重新合并外层 LangGraph 回调树与元数据，导致记忆文档比对等辅助 JSON 输出泄漏进对话历史与轨迹事件（对应 `#208`）。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增
