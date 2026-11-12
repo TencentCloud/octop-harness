@@ -82,6 +82,31 @@ class TestSlugAndParse:
         text = "---\nname: X\n---\nbody"
         assert parse_agent_markdown(text, path_fragment="agents/x.md", workspace=workspace) is None
 
+    def test_parse_frontmatter_with_crlf_line_endings(self, workspace: BackendWorkspace) -> None:
+        """Files written on Windows (CRLF) still parse their frontmatter."""
+        parent_tool = MagicMock()
+        parent_tool.name = "current_time"
+        text = (
+            "---\r\n"
+            "name: Windows Helper\r\n"
+            "id: windows-helper\r\n"
+            "description: Written on Windows\r\n"
+            "---\r\n"
+            "# Body\r\n"
+            "\r\n"
+            "Use tools wisely.\r\n"
+        )
+        spec = parse_agent_markdown(
+            text,
+            path_fragment="agents/windows-helper.md",
+            parent_tools=[parent_tool],
+            workspace=workspace,
+        )
+        assert spec is not None
+        assert spec["name"] == "windows-helper"
+        assert spec["description"] == "Written on Windows"
+        assert "Body" in spec["system_prompt"]
+
 
 class TestCollectAndLoad:
     def test_collect_nested_markdown(self, workspace: BackendWorkspace, tmp_path: Path) -> None:
