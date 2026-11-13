@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
-- PostgreSQL 定时 checkpoint 裁剪采用与 SQLite 相同的根图保留窗口、待办保护和备份策略。PG 的逻辑备份默认写到 `~/.octop-harness/checkpoint-backups`，可用 `OCTOP_CHECKPOINT_BACKUP_DIR` 指定目录，空间回收继续使用普通 VACUUM。
+- 定时 checkpoint 裁剪跳过 PostgreSQL 共享表。宿主可通过支持 PG 裁剪的 octop-memory，在核实线程归属并暂停该线程在所有宿主上的执行、恢复和分叉后，显式裁剪该线程。
 - SQLite 定时裁剪在已完成的纯根图线程上，把保留边界所需的旧消息增量合并到边界 checkpoint，再删除旧父链。安装支持此参数的 octop-memory 时启用。
 
 ## [1.0.9] - 2026-11-10

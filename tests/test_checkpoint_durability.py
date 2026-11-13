@@ -397,7 +397,7 @@ def retention_dsn(backend):
 
 @pytest.mark.parametrize("approval", ["parent", "child"])
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_scheduled_pruning_snapshots_messages_and_preserves_approval(
+async def test_pruning_snapshots_messages_and_preserves_approval(
     tmp_path, monkeypatch, approval, backend, retention_dsn
 ):
     import inspect
@@ -413,7 +413,6 @@ async def test_scheduled_pruning_snapshots_messages_and_preserves_approval(
     monkeypatch.setenv("OCTOP_CHECKPOINT_KEEP_LAST", "20")
     monkeypatch.delenv("OCTOP_CHECKPOINT_KEEP_DAYS", raising=False)
     monkeypatch.setenv("OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE", "first")
-    monkeypatch.setenv("OCTOP_CHECKPOINT_BACKUP_DIR", str(tmp_path / "backups"))
     db = tmp_path / "memory.sqlite"
     async with open_probe(
         db, tmp_path / "workspace", approval=approval, subagent=approval == "child", postgres_dsn=retention_dsn
@@ -433,7 +432,8 @@ async def test_scheduled_pruning_snapshots_messages_and_preserves_approval(
         pending_config = {"configurable": {"thread_id": "pending"}}
         pending_rows = list(memory.list(pending_config))
         done = {"configurable": {"thread_id": "done", "checkpoint_ns": ""}}
-        retained = list(memory.list(done, limit=20))
+        done_rows = list(memory.list(done))
+        retained = done_rows[:20]
         assert "messages" not in retained[-1].checkpoint["channel_values"]
         before_states = [(await agent.graph.aget_state(row.config)).values for row in retained]
         before_history = await agent.aget_history("done", limit=100)
@@ -444,8 +444,16 @@ async def test_scheduled_pruning_snapshots_messages_and_preserves_approval(
         if backend == "sqlite":
             assert db.with_name("memory.sqlite.pre-prune.bak").is_file()
         else:
-            (dump,) = (tmp_path / "backups").glob("postgres-*.sql.pre-prune.bak")
-            assert "COPY checkpoint_writes FROM stdin;" in dump.read_text(encoding="utf-8")
+            assert list(memory.list(done)) == done_rows
+            stats = prune_checkpoints(
+                memory,
+                thread_id="done",
+                keep_last=20,
+                skip_pending=True,
+                offline=True,
+                messages_channel=agent.graph.channels["messages"],
+            )
+            assert stats.checkpoints_deleted == len(done_rows) - 20 > 0
         remaining = list(memory.list(done))
         assert len(remaining) == 20
         assert remaining[-1].parent_config is None
