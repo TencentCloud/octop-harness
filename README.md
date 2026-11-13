@@ -343,6 +343,10 @@ and released when the resumed stream finishes or the agent closes.
 
 ### Scheduled SQLite checkpoint backups
 
+PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
+With octop-memory's PostgreSQL pruning support, hosts can prune a verified
+thread after pausing its execution, resumption and forks across all hosts.
+
 With checkpoint retention enabled, `OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE`
 defaults to `first`. The first cleanup with eligible checkpoints attempts to
 write `memory.sqlite.pre-prune.bak`. If the database plus WAL and 10% headroom

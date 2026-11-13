@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -116,12 +117,21 @@ class ProbeModel(BaseChatModel):
 
 @asynccontextmanager
 async def open_probe(
-    db: Path, workspace: Path, *, approval: str | None = None, subagent: bool = False
+    db: Path,
+    workspace: Path,
+    *,
+    approval: str | None = None,
+    subagent: bool = False,
+    postgres_dsn: str | None = None,
 ) -> AsyncIterator[tuple[HarnessAgent, ProbeModel, Memory, asyncio.Event]]:
     db.parent.mkdir(parents=True, exist_ok=True)
     for folder in ("_builtin_skills", "skills"):
         (workspace / folder).mkdir(parents=True, exist_ok=True)
-    memory = Memory("durability_probe", backend_config={"db_path": str(db)})
+    memory = (
+        Memory("durability_probe", backend="postgres", backend_config={"dsn": postgres_dsn})
+        if postgres_dsn
+        else Memory("durability_probe", backend_config={"db_path": str(db)})
+    )
     model = ProbeModel()
     tool_started = asyncio.Event()
 
@@ -180,7 +190,8 @@ async def open_probe(
         finally:
             await agent.aclose()
             await factory.aclose()
-            memory._checkpointer.conn.close()
+            if memory._checkpointer is not None:
+                memory._checkpointer.conn.close()
             memory.backend.close()
 
 
@@ -363,6 +374,98 @@ async def test_pruning_preserves_state_and_pending_approval(tmp_path, monkeypatc
         assert stats.parent_prunes_skipped >= 1
         assert rows(memory, "pending") == pending_rows
         assert {tid: await state(agent, tid) for tid in before} == before
+
+
+@pytest.fixture
+def retention_dsn(backend):
+    if backend == "sqlite":
+        yield None
+        return
+    dsn = os.environ.get("TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("set TEST_POSTGRES_DSN to a disposable PostgreSQL database")
+    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("langgraph.checkpoint.postgres")
+    schema = "checkpoint_retention_" + uuid4().hex
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
+        try:
+            yield psycopg.conninfo.make_conninfo(dsn, options=f"-csearch_path={schema}")
+        finally:
+            conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(schema)))
+
+
+@pytest.mark.parametrize("approval", ["parent", "child"])
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_pruning_snapshots_messages_and_preserves_approval(
+    tmp_path, monkeypatch, approval, backend, retention_dsn
+):
+    import inspect
+
+    from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
+
+    from octop_harness.middleware.memory import _prune_checkpoints_if_configured
+
+    if "messages_channel" not in inspect.signature(prune_checkpoints).parameters:
+        pytest.skip("installed octop-memory does not support message snapshots")
+    monkeypatch.setenv("OCTOP_CHECKPOINT_DURABILITY", "async")
+    monkeypatch.setenv("OCTOP_CHECKPOINT_RETENTION", "1")
+    monkeypatch.setenv("OCTOP_CHECKPOINT_KEEP_LAST", "20")
+    monkeypatch.delenv("OCTOP_CHECKPOINT_KEEP_DAYS", raising=False)
+    monkeypatch.setenv("OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE", "first")
+    db = tmp_path / "memory.sqlite"
+    async with open_probe(
+        db, tmp_path / "workspace", approval=approval, subagent=approval == "child", postgres_dsn=retention_dsn
+    ) as (
+        agent,
+        model,
+        memory,
+        _,
+    ):
+        for index in range(16):
+            await agent.call(request("done", f"done {index}"))
+            await agent.call(request("pending", f"pending {index}"))
+        prompt = "SUBAGENT_APPROVAL" if approval == "child" else "APPROVAL"
+        events = await _stream(agent, "pending", prompt)
+        assert any(event["type"] == "hitl_required" for event in events)
+        pending = await state(agent, "pending")
+        pending_config = {"configurable": {"thread_id": "pending"}}
+        pending_rows = list(memory.list(pending_config))
+        done = {"configurable": {"thread_id": "done", "checkpoint_ns": ""}}
+        done_rows = list(memory.list(done))
+        retained = done_rows[:20]
+        assert "messages" not in retained[-1].checkpoint["channel_values"]
+        before_states = [(await agent.graph.aget_state(row.config)).values for row in retained]
+        before_history = await agent.aget_history("done", limit=100)
+
+        monkeypatch.setenv("OCTOP_CHECKPOINT_DURABILITY", "exit")
+        _prune_checkpoints_if_configured(memory, messages_channel=agent.graph.channels["messages"])
+
+        if backend == "sqlite":
+            assert db.with_name("memory.sqlite.pre-prune.bak").is_file()
+        else:
+            assert list(memory.list(done)) == done_rows
+            stats = prune_checkpoints(
+                memory,
+                thread_id="done",
+                keep_last=20,
+                skip_pending=True,
+                offline=True,
+                messages_channel=agent.graph.channels["messages"],
+            )
+            assert stats.checkpoints_deleted == len(done_rows) - 20 > 0
+        remaining = list(memory.list(done))
+        assert len(remaining) == 20
+        assert remaining[-1].parent_config is None
+        assert [(await agent.graph.aget_state(row.config)).values for row in retained] == before_states
+        assert await agent.aget_history("done", limit=100) == before_history
+        assert list(memory.list(pending_config)) == pending_rows
+        assert await state(agent, "pending") == pending
+        await agent.call(request("done", "continue"))
+        assert model._inputs[-1][-2]["data"]["content"] == "reply: done 15"
+        events = [event async for event in agent.resume_hitl("pending", [{"type": "approve"}])]
+        assert all(event["type"] != "hitl_required" for event in events)
+        assert not (await state(agent, "pending"))["next"]
 
 
 async def _crash_child(db: Path, workspace: Path) -> None:

@@ -1,4 +1,4 @@
-"""Manage the SQLite snapshot taken before scheduled checkpoint pruning."""
+"""Manage the backup taken before scheduled checkpoint pruning."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ import tempfile
 import threading
 import time
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import BinaryIO, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,8 @@ def expire_checkpoint_backups(path: Path, keep_days: int) -> None:
             for candidate in backup.parent.iterdir():
                 if candidate.name.startswith(prefix):
                     _remove_file(candidate, max_age_seconds=_DAY_SECONDS)
+        except FileNotFoundError:
+            pass
         except OSError:
             logger.warning("could not inspect temporary checkpoint backups in %s", backup.parent, exc_info=True)
 
@@ -180,7 +182,9 @@ def _marker_exists(marker: Path) -> bool:
         return False
 
 
-def prepare_checkpoint_backup(path: Path, mode: BackupMode, keep_days: int) -> bool:
+def prepare_checkpoint_backup(
+    path: Path, mode: BackupMode, keep_days: int, *, write_dump: Callable[[BinaryIO], None] | None = None
+) -> bool:
     """Return whether pruning may proceed after applying the configured backup policy."""
     if mode == "off":
         return True
@@ -196,11 +200,35 @@ def prepare_checkpoint_backup(path: Path, mode: BackupMode, keep_days: int) -> b
         if mode == "first" and marked:
             return True
 
-        result = _attempt_backup(path, backup, mode, keep_days)
+        result = (
+            _attempt_backup(path, backup, mode, keep_days)
+            if write_dump is None
+            else _attempt_logical_backup(backup, mode, write_dump)
+        )
         if not marked and (mode == "first" or result == "backed_up"):
             record = json.dumps({"completed_at": datetime.now(UTC).isoformat(), "result": result}) + "\n"
             _write_marker(backup, marker, record)
         return mode == "first" or result == "backed_up"
+
+
+def _attempt_logical_backup(backup: Path, mode: BackupMode, write_dump: Callable[[BinaryIO], None]) -> str:
+    try:
+        backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with _temporary_backup_file(backup) as temp:
+            with temp.open("wb") as output:
+                write_dump(output)
+            os.replace(temp, backup)
+        logger.info("checkpoint backup %s: %d bytes", backup, backup.stat().st_size)
+        return "backed_up"
+    except Exception as exc:
+        # Connection errors can contain details about the configured server.
+        reason = type(exc).__name__
+        message = "PostgreSQL checkpoint backup failed for %s (%s); %s"
+        if mode == "first":
+            logger.warning(message, backup, reason, "continuing without a backup")
+        else:
+            _warn_always(backup, "backup_failed", message, backup, reason, "skipping checkpoint pruning")
+        return "failed_then_skipped"
 
 
 def _attempt_backup(path: Path, backup: Path, mode: BackupMode, keep_days: int) -> str:

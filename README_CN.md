@@ -107,6 +107,7 @@
 
 - 对话经采集策略过滤后记录为 **L0 原始事件**，再异步蒸馏为 **L2 原子**（`AtomCard`）与 **L3 实体页**。系统运行报错不进入记忆，正常排障经验和用户明确记忆请求仍可保存。
 - 模型重试耗尽后抛出异常；重试范围沿用 LangChain 默认判断，次数与退避参数保持原配置。调用方需处理 `call()` / 流式调用的异常；checkpoint 保留失败任务，不添加合成助手回复。宿主单独展示错误；团队自动失败通知设置 `configurable.octop_memory_capture_exclude=true`，避免诊断信息被采集为记忆。
+- 定时 checkpoint 裁剪只用于 SQLite。PostgreSQL 的 checkpoint 表由多个 agent 和宿主共用。支持 PG 裁剪的 octop-memory 版本允许宿主在核实线程归属、暂停该线程在所有宿主上的执行、恢复和分叉后，裁剪该线程。
 - 由 octop-memory 中间件驱动，记忆随工作区一同迁移。
 
 
