@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 
 import httpx
 from langchain_core.tools import tool
+
+from octop_harness.tool_env_scope import current_tool_env
 
 DEFAULT_ENDPOINT = "https://api.deepseek.com/v1/tools/search"
 DEFAULT_TIMEOUT = 30.0
@@ -44,9 +45,13 @@ async def deepseek_search(  # noqa: PLR0911 - explicit API failures keep remedia
     Returns:
         A JSON array of ranked results, or a plain-text error message.
     """
-    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    api_key = current_tool_env("DEEPSEEK_API_KEY")
     if not api_key:
-        return "Error: DEEPSEEK_API_KEY environment variable is not set."
+        return (
+            "Error: DEEPSEEK_API_KEY is not set. Configure a personal search key "
+            "in the host application or ask the administrator to set the global key."
+        )
+    endpoint = current_tool_env("DEEPSEEK_SEARCH_ENDPOINT") or DEFAULT_ENDPOINT
 
     clean_query = query.strip()
     if not clean_query or len(clean_query) > 128:
@@ -68,14 +73,14 @@ async def deepseek_search(  # noqa: PLR0911 - explicit API failures keep remedia
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             response = await client.post(
-                DEFAULT_ENDPOINT,
+                endpoint,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json=payload,
             )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
         return f"Error: DeepSeek Search request failed: {exc}"
 
     if response.status_code >= 400:

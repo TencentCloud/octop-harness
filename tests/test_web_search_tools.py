@@ -15,6 +15,7 @@ from octop_harness.builtin.tools.web_search._registry import (
     WEB_SEARCH_PROVIDERS,
     _missing_env,
     _provider_available,
+    web_search_tool_requirements,
 )
 from octop_harness.builtin.tools.web_search.brave import brave_search
 from octop_harness.builtin.tools.web_search.deepseek import deepseek_search
@@ -23,6 +24,7 @@ from octop_harness.builtin.tools.web_search.kimi import kimi_search
 from octop_harness.builtin.tools.web_search.searchfree import searchfree_search
 from octop_harness.builtin.tools.web_search.tavily import tavily_search
 from octop_harness.builtin.tools.web_search.yuanbao import yuanbao_search
+from octop_harness.tool_env_scope import tool_env_scope
 
 # ---------------------------------------------------------------------------
 # Registry — provider lookup, env-var gating, policy dispatch
@@ -910,3 +912,326 @@ class TestYouSearch:
         with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body={"results": {"web": []}}), [])):
             result = await mod.you_search.ainvoke({"query": "hi"})
         assert result == "No results found."
+
+
+# ---------------------------------------------------------------------------
+# Per-call tool env: ``require_env`` mounting and scoped credentials
+# ---------------------------------------------------------------------------
+
+
+class TestRequireEnv:
+    def test_explicit_list_mounts_without_env_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        assert [t.name for t in load_web_search_tools(["tavily"], require_env=False)] == ["tavily_search"]
+
+    def test_default_still_requires_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        with pytest.raises(RuntimeError, match=r"env var.*missing"):
+            load_web_search_tools(["tavily"])
+
+    def test_auto_stays_env_gated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in ("TAVILY_API_KEY", "BRAVE_API_KEY", "DEEPSEEK_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CSE_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.delenv("TENCENTCLOUD_WSA_APIKEY", raising=False)
+        monkeypatch.delenv("YDC_API_KEY", raising=False)
+        assert {t.name for t in load_web_search_tools("auto", require_env=False)} == {"searchfree_search"}
+
+    def test_requirements_map(self) -> None:
+        requirements = web_search_tool_requirements()
+        assert requirements["deepseek_search"] == ("DEEPSEEK_API_KEY",)
+        assert requirements["google_search"] == ("GOOGLE_API_KEY", "GOOGLE_CSE_ID")
+        assert requirements["searchfree_search"] == ()
+        assert requirements["you_search"] == ()
+
+    def test_requirements_cover_every_provider(self) -> None:
+        requirements = web_search_tool_requirements()
+        expected = {name: load_web_search_tools([name], require_env=False)[0].name for name in WEB_SEARCH_PROVIDERS}
+        assert set(requirements) == set(expected.values())
+        assert all(requirements[tool_name] == WEB_SEARCH_PROVIDERS[name][0] for name, tool_name in expected.items())
+
+
+class TestScopedToolEnv:
+    """Every provider reads credentials through ``current_tool_env``."""
+
+    @pytest.mark.asyncio
+    async def test_deepseek_personal_key_overrides_global(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-global")
+        monkeypatch.delenv("DEEPSEEK_SEARCH_ENDPOINT", raising=False)
+        captured: dict[str, Any] = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                return {"results": []}
+
+        class _Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                """No-op."""
+
+            async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _Resp:
+                captured["url"] = url
+                captured["headers"] = headers
+                return _Resp()
+
+        with (
+            patch.object(mod.httpx, "AsyncClient", _Client),
+            tool_env_scope(
+                {"DEEPSEEK_API_KEY": "sk-personal"},
+            ),
+        ):
+            await mod.deepseek_search.ainvoke({"query": "hi"})
+        assert captured["headers"]["Authorization"] == "Bearer sk-personal"
+        assert captured["url"] == mod.DEFAULT_ENDPOINT
+
+    @pytest.mark.asyncio
+    async def test_deepseek_global_endpoint_overrides_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-global")
+        monkeypatch.setenv("DEEPSEEK_SEARCH_ENDPOINT", "https://search.example/v1/search")
+        captured: dict[str, Any] = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                return {"results": []}
+
+        class _Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                """No-op."""
+
+            async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _Resp:
+                captured["url"] = url
+                return _Resp()
+
+        with patch.object(mod.httpx, "AsyncClient", _Client):
+            await mod.deepseek_search.ainvoke({"query": "hi"})
+        assert captured["url"] == "https://search.example/v1/search"
+
+    @pytest.mark.asyncio
+    async def test_deepseek_malformed_endpoint_returns_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-global")
+        monkeypatch.setenv("DEEPSEEK_SEARCH_ENDPOINT", "not a url")
+        result = await mod.deepseek_search.ainvoke({"query": "hi"})
+        assert result.startswith("Error: DeepSeek Search request failed:")
+
+    @pytest.mark.asyncio
+    async def test_deepseek_missing_key_points_at_settings(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from octop_harness.builtin.tools.web_search import deepseek as mod
+
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        result = await mod.deepseek_search.ainvoke({"query": "hi"})
+        assert "DEEPSEEK_API_KEY" in result
+        assert "personal search key" in result
+
+    @pytest.mark.asyncio
+    async def test_tavily_uses_scoped_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import tavily as mod
+
+        monkeypatch.setenv("TAVILY_API_KEY", "global")
+        captured: dict[str, Any] = {}
+
+        class _FakeTavily:
+            def __init__(self, **kwargs: Any) -> None:
+                captured.update(kwargs)
+
+            async def ainvoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+                return {"results": []}
+
+        fake_module = ModuleType("langchain_tavily")
+        fake_module.TavilySearch = _FakeTavily  # type: ignore[attr-defined]
+        with (
+            patch.dict(sys.modules, {"langchain_tavily": fake_module}),
+            tool_env_scope(
+                {"TAVILY_API_KEY": "personal"},
+            ),
+        ):
+            await mod.tavily_search.ainvoke({"query": "hi"})
+        assert captured["api_key"] == "personal"
+
+    @pytest.mark.asyncio
+    async def test_brave_uses_scoped_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import brave as mod
+
+        monkeypatch.setenv("BRAVE_API_KEY", "global")
+        captured: dict[str, Any] = {}
+
+        class _FakeBrave:
+            @classmethod
+            def from_api_key(cls, api_key: str, search_kwargs: dict[str, Any]) -> _FakeBrave:
+                captured["api_key"] = api_key
+                return cls()
+
+            def run(self, query: str) -> str:
+                return "[]"
+
+        fake_tools = ModuleType("langchain_community.tools")
+        fake_tools.BraveSearch = _FakeBrave  # type: ignore[attr-defined]
+        fake_pkg = ModuleType("langchain_community")
+        fake_pkg.tools = fake_tools  # type: ignore[attr-defined]
+        with (
+            patch.dict(
+                sys.modules,
+                {"langchain_community": fake_pkg, "langchain_community.tools": fake_tools},
+            ),
+            tool_env_scope({"BRAVE_API_KEY": "personal"}),
+        ):
+            await mod.brave_search.ainvoke({"query": "hi"})
+        assert captured["api_key"] == "personal"
+
+    @pytest.mark.asyncio
+    async def test_google_uses_both_scoped_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import google as mod
+
+        monkeypatch.setenv("GOOGLE_API_KEY", "global-key")
+        monkeypatch.setenv("GOOGLE_CSE_ID", "global-cse")
+        captured: dict[str, Any] = {}
+
+        class _FakeWrapper:
+            def __init__(self, **kwargs: Any) -> None:
+                captured.update(kwargs)
+
+            def results(self, query: str, num_results: int) -> list[dict[str, Any]]:
+                return []
+
+        fake_utilities = ModuleType("langchain_community.utilities")
+        fake_utilities.GoogleSearchAPIWrapper = _FakeWrapper  # type: ignore[attr-defined]
+        fake_pkg = ModuleType("langchain_community")
+        fake_pkg.utilities = fake_utilities  # type: ignore[attr-defined]
+        with (
+            patch.dict(
+                sys.modules,
+                {"langchain_community": fake_pkg, "langchain_community.utilities": fake_utilities},
+            ),
+            tool_env_scope({"GOOGLE_API_KEY": "personal-key", "GOOGLE_CSE_ID": "personal-cse"}),
+        ):
+            await mod.google_search.ainvoke({"query": "hi"})
+        assert captured["google_api_key"] == "personal-key"
+        assert captured["google_cse_id"] == "personal-cse"
+
+    @pytest.mark.asyncio
+    async def test_kimi_uses_scoped_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import kimi as mod
+
+        monkeypatch.setenv("MOONSHOT_API_KEY", "global")
+        captured: dict[str, Any] = {}
+
+        class _FakeChatCompletions:
+            async def create(self, **kwargs: Any) -> Any:
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
+
+        class _FakeChat:
+            def __init__(self) -> None:
+                self.completions = _FakeChatCompletions()
+
+        class _FakeAsyncOpenAI:
+            def __init__(self, **kwargs: Any) -> None:
+                captured.update(kwargs)
+                self.chat = _FakeChat()
+
+        fake_module = ModuleType("openai")
+        fake_module.AsyncOpenAI = _FakeAsyncOpenAI  # type: ignore[attr-defined]
+        with (
+            patch.dict(sys.modules, {"openai": fake_module}),
+            tool_env_scope(
+                {"MOONSHOT_API_KEY": "personal"},
+            ),
+        ):
+            await mod.kimi_search.ainvoke({"query": "hi"})
+        assert captured["api_key"] == "personal"
+
+    @pytest.mark.asyncio
+    async def test_yuanbao_uses_scoped_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import yuanbao as mod
+
+        monkeypatch.setenv("TENCENTCLOUD_WSA_APIKEY", "global")
+        captured: dict[str, Any] = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                return {"Response": {"Pages": []}}
+
+        class _Client:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                """No-op."""
+
+            async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> _Resp:
+                captured["headers"] = headers
+                return _Resp()
+
+        with (
+            patch.object(mod.httpx, "AsyncClient", _Client),
+            tool_env_scope(
+                {"TENCENTCLOUD_WSA_APIKEY": "personal"},
+            ),
+        ):
+            await mod.yuanbao_search.ainvoke({"query": "hi"})
+        assert captured["headers"]["Authorization"] == "Bearer personal"
+
+    @pytest.mark.asyncio
+    async def test_you_uses_scoped_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import you as mod
+
+        monkeypatch.delenv("YDC_API_KEY", raising=False)
+        calls: list[dict[str, Any]] = []
+        with (
+            patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_YOU_BODY), calls)),
+            tool_env_scope(
+                {"YDC_API_KEY": "personal"},
+            ),
+        ):
+            await mod.you_search.ainvoke({"query": "hello"})
+        assert calls[0]["method"] == "POST"
+        assert calls[0]["headers"]["X-API-Key"] == "personal"
+
+
+def test_web_search_require_env_round_trips() -> None:
+    from octop_harness import HarnessAgentConfig, ModelConfig, ProviderConfig
+
+    cfg = HarnessAgentConfig(
+        providers=[
+            ProviderConfig(
+                id="p",
+                base_url="http://x",
+                api_key="x",
+                models=[ModelConfig(id="m", input=["text"])],
+            ),
+        ],
+        web_search_tools=["deepseek"],
+        web_search_require_env=False,
+    )
+    data = cfg.to_dict()
+    assert data["web_search_require_env"] is False
+    restored = HarnessAgentConfig.from_dict(data)
+    assert restored.web_search_require_env is False
+    assert HarnessAgentConfig(providers=[]).web_search_require_env is True

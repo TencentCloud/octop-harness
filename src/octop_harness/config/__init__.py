@@ -783,6 +783,11 @@ class HarnessAgentConfig:
     #     ``ValueError``; missing env vars raise ``RuntimeError`` so
     #     misconfiguration surfaces at agent construction time.
     web_search_tools: bool | Literal["auto", "all"] | Sequence[str] = "auto"
+    # When ``False``, an explicit ``web_search_tools`` list mounts every named
+    # provider even if its env vars are absent; the host supplies credentials
+    # per call (``ChatRequest.configurable["tool_env"]``) and
+    # ``ToolAvailabilityMiddleware`` hides unusable tools from each model call.
+    web_search_require_env: bool = True
 
     # —— MCP servers (langchain-mcp-adapters) ——
     # Connection specs keyed by server name. When created via
@@ -1130,6 +1135,7 @@ class HarnessAgentConfig:
             "summarization_trim_tokens": self.summarization_trim_tokens,
             "media_generation": self.media_generation.to_dict() if self.media_generation is not None else None,
             "web_search_tools": _web_search_tools_to_jsonable(self.web_search_tools),
+            "web_search_require_env": self.web_search_require_env,
             "mcp_server_configs": dict(self.mcp_server_configs),
             "mcp_default_servers": list(self.mcp_default_servers) if self.mcp_default_servers else None,
             "acp_runners": _acp_runners_to_jsonable(self.acp_runners),

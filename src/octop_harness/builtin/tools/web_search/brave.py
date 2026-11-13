@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 from langchain_core.tools import tool
+
+from octop_harness.tool_env_scope import current_tool_env
 
 
 @tool
@@ -30,9 +31,12 @@ async def brave_search(
         message if the API key is missing or the package is not
         installed.
     """
-    api_key = os.getenv("BRAVE_API_KEY", "")
+    api_key = current_tool_env("BRAVE_API_KEY")
     if not api_key:
-        return "Error: BRAVE_API_KEY environment variable is not set."
+        return (
+            "Error: BRAVE_API_KEY is not set. Configure a personal search key "
+            "in the host application or ask the administrator to set the global key."
+        )
 
     try:
         from langchain_community.tools import BraveSearch

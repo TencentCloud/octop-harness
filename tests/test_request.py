@@ -124,6 +124,18 @@ class TestToRunnableConfig:
         cfg = ChatRequest(messages="hi", callbacks=[sentinel]).to_runnable_config()
         assert cfg["callbacks"] == [sentinel]
 
+    def test_tool_env_is_popped_but_kept_on_request(self) -> None:
+        request = ChatRequest(
+            messages="hi",
+            thread_id="t1",
+            configurable={"tool_env": {"DEEPSEEK_API_KEY": "sk-personal"}},
+        )
+        cfg = request.to_runnable_config()
+        assert "tool_env" not in cfg["configurable"]
+        # The agent reads it from the request object and binds a task scope.
+        assert request.configurable is not None
+        assert request.configurable["tool_env"] == {"DEEPSEEK_API_KEY": "sk-personal"}
+
     def test_user_configurable_overrides_auto(self) -> None:
         # When user explicitly sets thread_id inside configurable, it wins
         # (this is the expected escape hatch for advanced users).

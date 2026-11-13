@@ -8,10 +8,11 @@ model invokes itself; we treat the whole thing as a single black-box
 
 from __future__ import annotations
 
-import os
 from typing import Any, cast
 
 from langchain_core.tools import tool
+
+from octop_harness.tool_env_scope import current_tool_env
 
 
 @tool
@@ -29,9 +30,12 @@ async def kimi_search(query: str) -> str:
         Either Kimi's synthesised answer, or a plain-text error if the
         API key is missing or the OpenAI SDK isn't installed.
     """
-    api_key = os.getenv("MOONSHOT_API_KEY", "")
+    api_key = current_tool_env("MOONSHOT_API_KEY")
     if not api_key:
-        return "Error: MOONSHOT_API_KEY environment variable is not set."
+        return (
+            "Error: MOONSHOT_API_KEY is not set. Configure a personal search key "
+            "in the host application or ask the administrator to set the global key."
+        )
 
     try:
         from openai import AsyncOpenAI
