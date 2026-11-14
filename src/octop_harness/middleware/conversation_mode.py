@@ -186,7 +186,9 @@ def _append_mode_note(request: ModelRequest[Any], hint: str) -> ModelRequest[Any
     cleaned = hint.strip()
     if not cleaned:
         return request
-    return request.override(messages=insert_turn_note(list(request.messages or []), "[turn note]\n" + cleaned))
+    return request.override(
+        messages=insert_turn_note(list(request.messages or []), "[turn note]\n" + cleaned, model=request.model)
+    )
 
 
 def _clear_skills_metadata(request: ModelRequest[Any]) -> ModelRequest[Any]:

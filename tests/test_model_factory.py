@@ -195,6 +195,51 @@ class TestBuildChatModel:
         assert instance._harness_native_tool_search is True
         assert instance._harness_tool_search_provider == "anthropic"
 
+    def test_anthropic_stamps_mid_conversation_system_capability(self) -> None:
+        """The per-turn note needs to know whether a non-leading system message is allowed."""
+        provider = ProviderConfig(
+            id="anthropic",
+            base_url="https://api.anthropic.com",
+            api_key="sk-y",
+            protocol="anthropic",
+        )
+        legacy = build_chat_model(provider, ModelConfig(id="claude-sonnet-4-20250514"))
+        if (legacy.profile or {}).get("mid_conversation_system_messages"):
+            pytest.skip("this langchain-anthropic version opts the model into in-place system messages")
+        assert legacy._harness_mid_conversation_system_messages is False
+
+    def test_anthropic_turn_note_payload_does_not_raise(self) -> None:
+        """``[system, human, note]`` must build a request for a model without in-place system messages.
+
+        langchain-anthropic hoists a non-leading system message into the top-level
+        ``system`` field and raises ``Received multiple non-consecutive system
+        messages`` when a leading system message is already there. The note
+        therefore falls back to a user message for those profiles.
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        from octop_harness.middleware.turn_note import insert_turn_note
+
+        provider = ProviderConfig(
+            id="anthropic",
+            base_url="https://api.anthropic.com",
+            api_key="sk-y",
+            protocol="anthropic",
+        )
+        model = build_chat_model(provider, ModelConfig(id="claude-sonnet-4-20250514"))
+        if (model.profile or {}).get("mid_conversation_system_messages"):
+            pytest.skip("this langchain-anthropic version opts the model into in-place system messages")
+        messages = insert_turn_note(
+            [SystemMessage(content="base"), HumanMessage(content="hi")],
+            "[turn note]\nnote",
+            model=model,
+        )
+
+        assert isinstance(messages[-1], HumanMessage)
+        payload = model._get_request_payload(messages, tools=[])
+        assert payload["system"] == "base"
+        assert [turn["role"] for turn in payload["messages"]] == ["user"]
+
     def test_bedrock_protocol_reports_clear_import_error_when_missing(self) -> None:
         """When ``langchain_aws`` is not importable, surface a clear instruction."""
         provider = ProviderConfig(
