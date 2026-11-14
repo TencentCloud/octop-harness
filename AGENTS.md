@@ -239,7 +239,7 @@ deepagents filesystem tools then map `/foo` to `{root_dir}/foo` (implementation 
 - `root_dir` prefixes in execute output are restored to agent-facing `/…`.
 - Reading artifacts uses **multi-layer failback** on the `BackendWorkspace` read side:
   - **Absolute paths:** try the `{root_dir}` mapping (`backend._resolve_path`) first; if missing, the original host path.
-  - **Relative paths:** try `{root_dir}/{rel}`, then `{workspace_dir}/{rel}`.
+  - **相对路径：** 仅从 `{workspace_dir}/{rel}` 读取，与相对写入保持一致。需要读取后端根目录下的产物时，显式使用虚拟绝对路径。
 - Bound `materialize_local` / `exists` / `aexists` / `read_text` / `aread_text` / `download_bytes` / `send_file` all use this failback.
 
 ```text
@@ -251,7 +251,7 @@ model: write_file("/gen/run.py") + execute("python /gen/run.py")
 model/harness then read artifacts:
   BackendWorkspace.materialize_local("/gen/out.pptx")
     → {root}/gen/out.pptx first, then original /gen/out.pptx
-      (and relative paths: root → workspace)
+      (relative paths: workspace only)
 ```
 
 #### `BackendWorkspace.resolve_path` cheat sheet
