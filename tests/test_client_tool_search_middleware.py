@@ -373,3 +373,64 @@ def test_parallel_search_calls_merge_loaded_tools() -> None:
         message for message in result["messages"] if isinstance(message, ToolMessage) and message.name == "tool_search"
     ]
     assert len(search_results) == 2
+
+
+def _run_tool_call(middleware: ClientToolSearchMiddleware, name: str, tool: Any) -> tuple[bool, Any]:
+    called = False
+
+    def handler(_: ToolCallRequest) -> ToolMessage:
+        nonlocal called
+        called = True
+        return ToolMessage("ok", tool_call_id="media-1")
+
+    request = ToolCallRequest(
+        tool_call={"name": name, "args": {"prompt": "sunset"}, "id": "media-1", "type": "tool_call"},
+        tool=tool,
+        state={"loaded_tool_names": []},
+        runtime=cast(Any, _runtime()),
+    )
+    return called, middleware.wrap_tool_call(request, handler)
+
+
+def test_decision_relocated_real_tool_bypasses_catalog_gate() -> None:
+    """Relocated tools that stay executable must not be blocked.
+
+    The decision dispatcher can move a deferred tool out of the model request
+    while still forwarding the real tool object for execution. The per-thread
+    catalog then never sees the name, but the call is authorized and must run
+    instead of returning a false ``tool_not_authorized``.
+    """
+    image = _prompt_tool("generate_image")
+    middleware = ClientToolSearchMiddleware(deferred_tools=frozenset({"generate_image"}))
+    _capture_tools(middleware, _request([_tool("current_time")]))
+
+    called, result = _run_tool_call(middleware, "generate_image", image)
+
+    assert called is True
+    assert isinstance(result, ToolMessage)
+    assert result.text == "ok"
+
+
+def test_unresolved_deferred_reference_without_catalog_is_not_authorized() -> None:
+    middleware = ClientToolSearchMiddleware(deferred_tools=frozenset({"generate_image"}))
+    _capture_tools(middleware, _request([_tool("current_time")]))
+    reference = middleware._deferred_reference(_prompt_tool("generate_image"))
+
+    called, result = _run_tool_call(middleware, "generate_image", reference)
+
+    assert called is False
+    assert isinstance(result, ToolMessage)
+    payload = json.loads(result.text)
+    assert payload["error"]["code"] == "tool_not_authorized"
+
+
+def test_media_call_without_resolved_tool_is_not_authorized() -> None:
+    middleware = ClientToolSearchMiddleware(deferred_tools=frozenset({"generate_image"}))
+    _capture_tools(middleware, _request([_tool("current_time")]))
+
+    called, result = _run_tool_call(middleware, "generate_image", None)
+
+    assert called is False
+    assert isinstance(result, ToolMessage)
+    payload = json.loads(result.text)
+    assert payload["error"]["code"] == "tool_not_authorized"
