@@ -132,12 +132,12 @@ class TestSendFileToUser:
         assert block["source"]["url"] == target.resolve().as_uri()
         assert ws.materialize_local("/generated/deck.pptx") == target.resolve()
 
-    def test_bound_tool_relative_prefers_backend_mount_over_process_cwd(
+    def test_bound_tool_relative_prefers_workspace_over_mount_and_process_cwd(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Relative paths must not resolve against the Octop process cwd."""
+        """相对路径仅从工作区读取。后端根目录和进程当前目录的同名文件不参与回退。"""
         from deepagents.backends import FilesystemBackend
 
         from octop_harness.builtin.tools.send_file import build_send_file_to_user_tool
@@ -151,7 +151,9 @@ class TestSendFileToUser:
         (proc_cwd / "workspace").mkdir()
         (proc_cwd / "workspace" / "Sapiens.pptx").write_bytes(b"decoy")
         (root / "workspace").mkdir()
-        real = root / "workspace" / "Sapiens.pptx"
+        (root / "workspace" / "Sapiens.pptx").write_bytes(b"root-decoy")
+        (workspace / "workspace").mkdir()
+        real = workspace / "workspace" / "Sapiens.pptx"
         real.write_bytes(b"pptx-bytes")
         monkeypatch.chdir(proc_cwd)
 
@@ -160,14 +162,8 @@ class TestSendFileToUser:
         block = tool.invoke({"file_path": "workspace/Sapiens.pptx"})
         assert block["path"] == "workspace/Sapiens.pptx"
         assert block["source"]["url"] == real.resolve().as_uri()
-        from urllib.parse import urlparse
 
-        parsed = urlparse(block["source"]["url"])
-        assert parsed.scheme == "file"
-        assert parsed.netloc in ("", "localhost")
-        assert Path(parsed.path).resolve() == real.resolve()
-
-    def test_bound_tool_missing_relative_skips_process_cwd(
+    def test_bound_tool_missing_relative_skips_mount_and_process_cwd(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -182,6 +178,9 @@ class TestSendFileToUser:
         root.mkdir()
         workspace.mkdir()
         proc_cwd.mkdir()
+        for decoy_dir in (root, proc_cwd):
+            (decoy_dir / "workspace").mkdir()
+            (decoy_dir / "workspace" / "missing.pptx").write_bytes(b"decoy")
         monkeypatch.chdir(proc_cwd)
 
         backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)

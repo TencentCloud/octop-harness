@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 本地挂载后端的 `BackendWorkspace` 相对读取与写入统一使用 `workspace_dir`，不再优先读取 `root_dir` 下的同名文件，也不在工作区文件缺失时回退到其他工作区的文件。依赖旧回退行为的产物路径需改为显式虚拟绝对路径。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增

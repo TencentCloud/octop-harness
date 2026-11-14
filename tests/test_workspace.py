@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -541,20 +542,140 @@ class TestBackendWorkspaceVirtualMode:
         assert local is not None
         assert local.resolve() == target.resolve()
 
-    def test_materialize_relative_prefers_root_then_workspace(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("contents", ["collision", "root_only"])
+    @pytest.mark.parametrize(
+        "operation",
+        ["read_text", "aread_text", "exists", "aexists", "download_bytes", "adownload_bytes", "materialize_local"],
+    )
+    async def test_relative_reads_use_workspace_directory(
+        self,
+        tmp_path: Path,
+        contents: str,
+        operation: str,
+    ) -> None:
+        from deepagents.backends import FilesystemBackend
+
+        root = tmp_path / "root"
+        workspace = root / "agents" / "own" if contents == "collision" else tmp_path / "workspace"
+        workspace.mkdir(parents=True)
+        root.mkdir(exist_ok=True)
+        backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
+        ws = BackendWorkspace(backend, workspace)
+        fragment = "SOUL.md"
+        target = workspace / fragment
+        if contents != "root_only":
+            ws.write_text(fragment, "from-workspace", force=True)
+        (root / fragment).write_text("from-root", encoding="utf-8")
+
+        result = getattr(ws, operation)(fragment)
+        if operation.startswith("a"):
+            result = await result
+        expected = contents != "root_only"
+        if operation.endswith("exists"):
+            assert result is expected
+        elif operation.endswith("read_text"):
+            assert result == ("from-workspace" if expected else None)
+        elif operation.endswith("download_bytes"):
+            assert result == (b"from-workspace" if expected else None)
+        elif expected:
+            assert result == target.resolve()
+        else:
+            assert result is None
+
+    @pytest.mark.parametrize(
+        "operation",
+        ["read_text", "aread_text", "exists", "aexists", "download_bytes", "adownload_bytes", "materialize_local"],
+    )
+    async def test_relative_sibling_alias_requires_explicit_virtual_path(self, tmp_path: Path, operation: str) -> None:
+        from deepagents.backends import FilesystemBackend
+
+        root = tmp_path / "root"
+        workspace = root / "agents" / "own"
+        workspace.mkdir(parents=True)
+        fragment = "agents/other/SOUL.md"
+        foreign = root / fragment
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("from-other", encoding="utf-8")
+        backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
+        ws = BackendWorkspace(backend, workspace)
+
+        result = getattr(ws, operation)(fragment)
+        explicit_result = getattr(ws, operation)(f"/{fragment}")
+        if operation.startswith("a"):
+            result = await result
+            explicit_result = await explicit_result
+        if operation.endswith("exists"):
+            assert result is False
+            assert explicit_result is True
+        else:
+            assert result is None
+            if operation.endswith("read_text"):
+                assert explicit_result == "from-other"
+            elif operation.endswith("download_bytes"):
+                assert explicit_result == b"from-other"
+            else:
+                assert explicit_result == foreign.resolve()
+
+    @pytest.mark.parametrize("contents", ["collision", "root_only"])
+    @pytest.mark.parametrize("operation", ["read_text", "materialize_local"])
+    def test_relative_system_paths_stay_inside_workspace(self, tmp_path: Path, contents: str, operation: str) -> None:
+        from deepagents.backends import FilesystemBackend
+
+        root = tmp_path / "root"
+        workspace = root / "agents" / "own"
+        workspace.mkdir(parents=True)
+        backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
+        ws = BackendWorkspace(backend, workspace, system_files_path=".octop")
+        fragment = "skills/demo/SKILL.md"
+        if contents == "collision":
+            ws.write_text(fragment, "from-workspace", force=True)
+        for root_fragment in (fragment, ws.system_rel(fragment)):
+            foreign = root / root_fragment
+            foreign.parent.mkdir(parents=True, exist_ok=True)
+            foreign.write_text("from-root", encoding="utf-8")
+
+        result = getattr(ws, operation)(fragment)
+        if contents == "root_only":
+            assert result is None
+        elif operation == "read_text":
+            assert result == "from-workspace"
+        else:
+            assert result == (workspace / ws.system_rel(fragment)).resolve()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX 主机路径没有 Windows 盘符")
+    def test_materialize_relative_does_not_remap_missing_host_path(self, tmp_path: Path) -> None:
         from deepagents.backends import FilesystemBackend
 
         root = tmp_path / "root"
         workspace = tmp_path / "workspace"
-        root.mkdir()
         workspace.mkdir()
-        (root / "deck.pptx").write_bytes(b"from-root")
-        (workspace / "deck.pptx").write_bytes(b"from-ws")
+        foreign = root / str(workspace / "SOUL.md").lstrip("/")
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("from-root", encoding="utf-8")
+        backend = FilesystemBackend(root_dir=str(root), virtual_mode=False)
+        ws = BackendWorkspace(backend, workspace)
+
+        assert ws.materialize_local("SOUL.md") is None
+
+    def test_relative_symlink_outside_workspace_is_rejected(self, tmp_path: Path) -> None:
+        from deepagents.backends import FilesystemBackend
+
+        root = tmp_path / "root"
+        workspace = root / "agents" / "own"
+        workspace.mkdir(parents=True)
+        foreign = root / "agents" / "other"
+        foreign.mkdir()
+        (foreign / "SOUL.md").write_text("from-other", encoding="utf-8")
+        try:
+            (workspace / "alias").symlink_to(foreign, target_is_directory=True)
+        except OSError:
+            pytest.skip("当前环境不支持创建目录符号链接")
         backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
         ws = BackendWorkspace(backend, workspace)
-        local = ws.materialize_local("deck.pptx")
-        assert local is not None
-        assert local.read_bytes() == b"from-root"
+
+        for operation in (ws.read_text, ws.exists, ws.materialize_local):
+            with pytest.raises(PermissionError, match="outside workspace"):
+                operation("alias/SOUL.md")
 
     def test_materialize_absolute_virtual_then_original_host(self, tmp_path: Path) -> None:
         from deepagents.backends import FilesystemBackend

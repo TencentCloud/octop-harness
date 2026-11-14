@@ -20,11 +20,10 @@ Path rules for :meth:`resolve_path`:
 ``~/…`` is expanded to a host path (still absolute). ``..`` in relative
 fragments raises ``PermissionError`` if it escapes ``workspace_dir``.
 
-Under ``virtual_mode`` with a non-host ``root_dir``, :meth:`materialize_local`
-(and read helpers) fail back:
+本地挂载的 :meth:`materialize_local` 和读取方法遵循以下路径规则。
 
-* absolute: virtual map under ``root_dir``, then the original host path
-* relative: ``{root_dir}/{rel}``, then ``{workspace_dir}/{rel}``
+* 绝对路径在 ``virtual_mode`` 下先映射到 ``root_dir``。缺失时再尝试原始主机路径。
+* 相对路径仅以 ``workspace_dir`` 为基准。读取与写入规则一致。
 
 Shell alignment is separate: when Linux + ``virtual_mode`` + non-host
 ``root_dir`` + ``bwrap`` are available, ``execute`` runs in a directory jail.
@@ -167,13 +166,6 @@ def _backend_cwd(backend: object) -> Path | None:
     if raw is None:
         return None
     return Path(str(raw)).expanduser().resolve()
-
-
-def _is_host_root_path(path: Path) -> bool:
-    try:
-        return path.resolve() == Path("/").resolve()
-    except OSError:
-        return False
 
 
 def _virtual_key_under_mount(local: Path, backend: object) -> str | None:
@@ -648,9 +640,7 @@ class BackendWorkspace:
           1. virtual map under backend ``root_dir`` when ``virtual_mode``
           2. original host path
 
-        Relative:
-          1. ``{root_dir}/{rel}`` when ``virtual_mode`` and root is scoped (≠ ``/``)
-          2. ``{workspace_dir}/{rel}``
+        相对路径仅使用 ``{workspace_dir}/{rel}``。不隐式探测后端根目录。
 
         When the backend has no local mount (e.g. S3/COS), only workspace-only
         paths (no backend key) use local candidates; otherwise reads go through
@@ -680,7 +670,6 @@ class BackendWorkspace:
                 add(Path(self.resolve_path(fragment)))
             return out
 
-        cwd = _backend_cwd(self._backend)
         virtual = _backend_virtual_mode(self._backend)
 
         if raw.startswith("~"):
@@ -698,8 +687,6 @@ class BackendWorkspace:
 
         fragment = self._stored_relative(raw) if map_system_paths else _strip_relative_prefix(raw)
         workspace_candidate = Path(self.resolve_path(fragment))
-        if virtual and cwd is not None and not _is_host_root_path(cwd):
-            add(cwd / fragment)
         add(workspace_candidate)
         return out
 
@@ -1111,21 +1098,24 @@ class BackendWorkspace:
     def materialize_local(self, path: str, *, map_system_paths: bool = True) -> Path | None:
         """Return a local filesystem path for *path* when bytes are available.
 
-        Local / virtual mounts: failback candidates under ``root_dir`` /
-        ``workspace_dir``. Sandbox / remote backends (no host mount): download
+        本地挂载的相对路径仅在 ``workspace_dir`` 下查找。绝对路径保留虚拟映射回退。
+        Sandbox / remote backends (no host mount): download
         into ``{workspace_dir}/.harness-materialize/`` for channel adapters
         (``send_file_to_user``); this cache is delivery-only, not the workspace.
         """
         for candidate in self._iter_materialize_candidates(path, map_system_paths=map_system_paths):
             if candidate.is_file():
                 return candidate.resolve()
+        has_mount = _has_backend_mount(self._backend)
+        if has_mount and not str(path).strip().replace("\\", "/").startswith(("/", "~")):
+            return None
         key = self._backend_storage_key(path, map_system_paths=map_system_paths)
         if key is None:
             return None
         mounted = materialize_storage_path(key, backend=self._backend, must_exist=True)
         if mounted is not None:
             return mounted.resolve()
-        if _has_backend_mount(self._backend):
+        if has_mount:
             return None
         return self._materialize_via_download(key, path)
 
