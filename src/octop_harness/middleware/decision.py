@@ -723,7 +723,9 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         if not sections:
             return request
         title = "[本轮说明]\n" if self._chinese else "[turn note]\n"
-        return request.override(messages=insert_turn_note(list(request.messages or []), title + "\n\n".join(sections)))
+        return request.override(
+            messages=insert_turn_note(list(request.messages or []), title + "\n\n".join(sections), model=request.model)
+        )
 
     def _relocate_tools(self, request: ModelRequest, kept: set[str]) -> tuple[ModelRequest, str]:
         incoming = list(request.tools or [])

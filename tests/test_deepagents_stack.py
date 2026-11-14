@@ -24,6 +24,7 @@ from octop_harness.context_usage import CONTEXT_USAGE_KEY, message_content_text,
 from octop_harness.decision.config import DecisionConfig
 from octop_harness.middleware.model_refusal import RefusalPassthroughMiddleware
 from octop_harness.middleware.skill_filter import SkillFilterMiddleware
+from octop_harness.middleware.turn_note import is_turn_note
 
 
 class _Model(FakeMessagesListChatModel):
@@ -49,7 +50,15 @@ def _refusal() -> AIMessage:
 
 
 def _system_text(messages: list[BaseMessage]) -> str:
-    return "\n".join(message_content_text(m.content) for m in messages if isinstance(m, SystemMessage))
+    """Render the cached prefix: system messages excluding the per-turn note.
+
+    The turn note is a ``SystemMessage`` too, but it is appended after the user
+    message so the prefix before it stays cacheable. It carries the per-turn
+    catalogue and therefore must not count as part of that prefix.
+    """
+    return "\n".join(
+        message_content_text(m.content) for m in messages if isinstance(m, SystemMessage) and not is_turn_note(m)
+    )
 
 
 @pytest.mark.asyncio
@@ -154,6 +163,7 @@ async def test_decision_keeps_skill_catalog_out_of_the_cached_prefix(
     assert "alpha skill description" not in prompts[0]
     assert "beta skill description" not in prompts[0]
     for messages, selected, unselected in zip(model.seen[:2], ("alpha", "beta"), ("beta", "alpha"), strict=True):
+        assert isinstance(messages[-1], SystemMessage)
         note = message_content_text(messages[-1].content)
         assert note.startswith("[turn note]")
         assert f"{selected} skill description" in note

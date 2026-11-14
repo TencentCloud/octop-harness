@@ -1128,6 +1128,46 @@ def test_turn_notes_merge_into_one_message() -> None:
     assert isinstance(twice[2], AIMessage)
 
 
+class _TurnNoteModel:
+    """Stand-in for a routed model carrying the harness capability stamp."""
+
+    def __init__(self, mid_conversation_system: bool) -> None:
+        self._harness_mid_conversation_system_messages = mid_conversation_system
+
+
+def test_turn_note_role_follows_the_model_capability() -> None:
+    from octop_harness.middleware.turn_note import insert_turn_note, is_turn_note
+
+    base = [SystemMessage(content="base"), HumanMessage(content="hi")]
+    legacy = insert_turn_note(base, "[turn note]\nroster", model=_TurnNoteModel(False))
+    capable = insert_turn_note(base, "[turn note]\nroster", model=_TurnNoteModel(True))
+
+    assert isinstance(legacy[-1], HumanMessage)
+    assert isinstance(capable[-1], SystemMessage)
+    assert is_turn_note(legacy[-1]) and is_turn_note(capable[-1])
+    merged = insert_turn_note(capable, "[本轮说明]\n技能:\npdf", model=_TurnNoteModel(True))
+    notes = [msg for msg in merged if is_turn_note(msg)]
+    assert len(notes) == 1
+    assert isinstance(notes[0], SystemMessage)
+    assert "roster" in notes[0].content and "pdf" in notes[0].content
+
+
+def test_turn_note_without_a_user_message_is_not_a_trailing_system_message() -> None:
+    """With no user message to follow, a system note would be non-consecutive."""
+    from octop_harness.middleware.turn_note import insert_turn_note, is_turn_note
+
+    after_ai = insert_turn_note(
+        [SystemMessage(content="base"), AIMessage(content="hello")],
+        "[turn note]\nnote",
+        model=_TurnNoteModel(True),
+    )
+    assert isinstance(after_ai[-1], HumanMessage)
+    assert is_turn_note(after_ai[-1])
+
+    empty = insert_turn_note([], "[turn note]\nnote", model=_TurnNoteModel(True))
+    assert isinstance(empty[-1], SystemMessage)
+
+
 def test_user_message_prefixed_like_a_turn_note_is_still_scored() -> None:
     from octop_harness.middleware.turn_note import is_turn_note
 

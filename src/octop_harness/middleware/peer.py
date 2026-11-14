@@ -212,7 +212,9 @@ class PeerAgentMiddleware(AgentMiddleware[Any, Any]):
                 overrides["tools"] = tools
             if block is not None:
                 title = "[本轮说明]\n" if self._language != "en" else "[turn note]\n"
-                overrides["messages"] = insert_turn_note(list(request.messages or []), title + block)
+                overrides["messages"] = insert_turn_note(
+                    list(request.messages or []), title + block, model=request.model
+                )
         except Exception:  # prompt injection is best-effort; pylint: disable=broad-except
             logger.warning("PeerAgentMiddleware prompt injection failed", exc_info=True)
             return request
