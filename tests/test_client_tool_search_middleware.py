@@ -389,7 +389,11 @@ def _run_tool_call(middleware: ClientToolSearchMiddleware, name: str, tool: Any)
         state={"loaded_tool_names": []},
         runtime=cast(Any, _runtime()),
     )
-    return called, middleware.wrap_tool_call(request, handler)
+    # Run the call before reading `called`: tuple items evaluate left to right,
+    # so returning `called, middleware.wrap_tool_call(...)` captures the stale
+    # pre-call value and makes the execution assertion vacuous.
+    result = middleware.wrap_tool_call(request, handler)
+    return called, result
 
 
 def test_decision_relocated_real_tool_bypasses_catalog_gate() -> None:
