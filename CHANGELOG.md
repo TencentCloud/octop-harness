@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 修复决策模型开启时 `generate_image`、`generate_video` 等工具被误判为 `tool_not_authorized` 的问题：决策调度器把长尾工具移出模型请求后，该工具不会进入 ToolSearchMiddleware 的每线程目录；现在只要调用携带已解析的真实工具对象就放行，未解析的空 schema 延迟引用与无工具对象的调用仍按原样拒绝。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增
