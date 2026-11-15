@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage。上游在每个分片都带累计 usage 时，`input_tokens` 不再被乘以分片数（Octop#2007）。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增
