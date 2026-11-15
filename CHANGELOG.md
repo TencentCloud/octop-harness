@@ -11,9 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `configurable["api_key_override_provider"]`（可选）把按调用传入的 Key 限定到指定供应商：本轮路由到其他供应商时不再沿用该 Key，而是回退该供应商自己的静态 Key，避免个人密钥被发往别家端点。未设置该标签时保持原有「一把 Key 通用于所有供应商」的网关语义。
 
+## [1.0.10] - 2026-11-15
+
+### 新增
+
+- 每个 agent 可单独配置自动压缩的触发、保留和截断，也可关闭自动触发。`/compact` 和上下文溢出仍可摘要。
+- 配置 `managed_runner` 后，该 agent 把每一轮转发给指定 ACP runner，不再进入模型循环。
+
 ### 修复
 
-- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage。上游在每个分片都带累计 usage 时，`input_tokens` 不再被乘以分片数（Octop#2007）。
+- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage，避免累计 usage 被重复累加。
 
 ## [1.0.9] - 2026-11-10
 

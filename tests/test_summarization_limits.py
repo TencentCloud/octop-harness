@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from langchain_core.exceptions import ContextOverflowError
 
+from octop_harness.config import HarnessAgentConfig
 from octop_harness.middleware.summarization_limits import (
     SUMMARY_FALLBACK_TEXT,
     SUMMARY_INPUT_RETRY_TOKEN_LIMIT,
     SUMMARY_INPUT_TOKEN_LIMIT,
+    apply_summarization_policy,
     harden_summarization_middleware,
 )
 
@@ -234,3 +238,66 @@ def test_stale_index_with_missing_message_id_still_keeps_recent_messages(monkeyp
     result = mw._apply_event_to_messages(messages, event)
     assert len(result) == 21
     assert result[-1] is messages[-1]
+
+
+def _real_summarization_middleware() -> Any:
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.summarization import SummarizationMiddleware
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    model = FakeMessagesListChatModel(responses=[AIMessage(content="ok")])
+    model.profile = {"max_input_tokens": 100_000}
+    return SummarizationMiddleware(
+        model=model,
+        backend=StateBackend(),
+        trigger=("fraction", 0.85),
+        keep=("fraction", 0.10),
+        trim_tokens_to_summarize=SUMMARY_INPUT_TOKEN_LIMIT,
+        truncate_args_settings={"trigger": ("fraction", 0.85), "keep": ("fraction", 0.10)},
+    )
+
+
+def test_policy_overrides_trigger_keep_trim_and_argument_truncation(tmp_path: Path) -> None:
+    config = HarnessAgentConfig(
+        workspace_dir=tmp_path,
+        summarization_trigger=("fraction", 0.5),
+        summarization_keep=("fraction", 0.2),
+        summarization_trim_tokens=3000,
+    )
+    mw = _real_summarization_middleware()
+    apply_summarization_policy(mw, config)
+    assert mw._lc_helper.trigger == ("fraction", 0.5)
+    assert mw._lc_helper._trigger_clauses == [{"fraction": 0.5}]
+    assert mw._lc_helper.keep == ("fraction", 0.2)
+    assert mw._lc_helper.trim_tokens_to_summarize == 3000
+    assert mw._truncate_args_trigger == ("fraction", 0.5)
+    assert mw._truncate_args_keep == ("fraction", 0.2)
+
+
+def test_disabling_clears_the_auto_trigger_and_keeps_the_middleware(tmp_path: Path) -> None:
+    config = HarnessAgentConfig(workspace_dir=tmp_path, summarization_enabled=False)
+    mw = _real_summarization_middleware()
+    apply_summarization_policy(mw, config)
+    assert mw._lc_helper._trigger_clauses == []
+    assert mw._truncate_args_trigger is None
+    assert mw._lc_helper.keep == ("fraction", 0.10)
+
+
+def test_summarization_config_round_trip_and_rejects_keep_above_trigger(tmp_path: Path) -> None:
+    config = HarnessAgentConfig(
+        workspace_dir=tmp_path,
+        summarization_trigger=("fraction", 0.6),
+        summarization_keep=("messages", 4),
+        summarization_trim_tokens=2500,
+    )
+    loaded = HarnessAgentConfig.from_dict(config.to_dict())
+    assert loaded.summarization_trigger == ("fraction", 0.6)
+    assert loaded.summarization_keep == ("messages", 4)
+    assert loaded.summarization_trim_tokens == 2500
+    with pytest.raises(ValueError, match="less than"):
+        HarnessAgentConfig(
+            workspace_dir=tmp_path,
+            summarization_trigger=("fraction", 0.4),
+            summarization_keep=("fraction", 0.4),
+        )
