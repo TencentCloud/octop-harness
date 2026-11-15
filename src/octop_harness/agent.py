@@ -1544,7 +1544,7 @@ class HarnessAgent:
             }
         if self._structured_form_active():
             interrupt_on[STRUCTURED_FORM_TOOL_NAME] = {
-                "allowed_decisions": ["respond"],
+                "allowed_decisions": ["respond", "cancel"],
                 "description": "The agent is asking you to fill in a structured form.",
             }
         return interrupt_on

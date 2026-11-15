@@ -67,6 +67,12 @@ class StructuredFormRequestArgs(BaseModel):
         min_length=1,
         max_length=MAX_STRUCTURED_FORM_FIELDS,
     )
+    timeout_seconds: int | None = Field(
+        default=None,
+        ge=30,
+        le=3600,
+        description="Seconds before the form auto-expires; None means no timeout",
+    )
 
     @model_validator(mode="after")
     def _validate_unique_keys(self) -> StructuredFormRequestArgs:
