@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.10] - 2026-11-15
+
+### 新增
+
+- 每个 agent 可单独配置自动压缩的触发、保留和截断，也可关闭自动触发。`/compact` 和上下文溢出仍可摘要。
+- 配置 `managed_runner` 后，该 agent 把每一轮转发给指定 ACP runner，不再进入模型循环。
+
 ### 修复
 
-- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage。上游在每个分片都带累计 usage 时，`input_tokens` 不再被乘以分片数（Octop#2007）。
+- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage，避免累计 usage 被重复累加。
 
 ## [1.0.9] - 2026-11-10
 
