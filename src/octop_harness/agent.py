@@ -1503,11 +1503,16 @@ class HarnessAgent:
         """Assemble the middleware chain in declared execution order.
 
         Order: bootstrap (front-loaded) → router → model_settings → session_header →
-        skill_filter → mcp_tool_error → tool_guard → filesystem_guard (outside-root
-        soft-fail; deny rules when permissions + execution backend) → mcp_tools →
+        skill_filter → mcp_tool_error → tool_guard → mcp_tools →
         retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
-        conversation_mode → tools_filter → decision (only when enabled) → tool search →
+        conversation_mode → tools_filter → decision (only when enabled) →
+        filesystem_guard (outside-root soft-fail; deny rules when permissions +
+        execution backend) → tool search →
         task tool ordering → refusal passthrough → context_usage.
+
+        ``filesystem_guard`` runs *inside* ``decision``: the dispatcher forwards
+        ``call_deferred_tool`` by re-entering the chain at the next handler, so a
+        middleware outside it never sees the forwarded call.
 
         ``RefusalPassthroughMiddleware`` replaces deepagents' tail
         ``ModelRefusalMiddleware`` by name, so it runs innermost regardless of
@@ -1539,25 +1544,6 @@ class HarnessAgent:
                     rules_dir=cfg.tool_guard_rules_dir,
                 )
             )
-
-        # Filesystem tool boundary: always soften outside-root ValueError; apply
-        # deny rules only when permissions are set on an execution backend.
-        from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
-
-        fs_permissions = list(cfg.permissions) if cfg.permissions and spec_supports_execution(cfg.backend) else []
-        root_dir, _virtual = self._peek_backend_mount()
-        chain.append(
-            FilesystemGuardMiddleware(
-                fs_permissions,
-                root_dir=root_dir,
-                workspace_dir=cfg.workspace_dir,
-                workspace=self._workspace,
-                protect_user_memory=manual_documents_locked(
-                    memory_enabled=cfg.memory_enabled,
-                    policy=cfg.manual_document_policy,
-                ),
-            )
-        )
 
         if cfg.mcp_server_configs:
             chain.append(
@@ -1644,6 +1630,33 @@ class HarnessAgent:
                     skills_rendered_late=True,
                 )
             )
+
+        # Filesystem tool boundary: always soften outside-root ValueError; apply
+        # deny rules only when permissions are set on an execution backend.
+        #
+        # After ``DecisionMiddleware`` on purpose. The decision dispatcher
+        # re-enters the chain at the next handler for a forwarded
+        # ``call_deferred_tool``, so any middleware outside it is skipped for
+        # that call. Sitting inside means the guard still sees the forwarded
+        # tool: deny rules apply, and the harness-only ``base_dir`` / ``cwd``
+        # fields the request copy advertises are consumed before deepagents'
+        # tool functions run (they reject those arguments with ``TypeError``).
+        from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
+
+        fs_permissions = list(cfg.permissions) if cfg.permissions and spec_supports_execution(cfg.backend) else []
+        root_dir, _virtual = self._peek_backend_mount()
+        chain.append(
+            FilesystemGuardMiddleware(
+                fs_permissions,
+                root_dir=root_dir,
+                workspace_dir=cfg.workspace_dir,
+                workspace=self._workspace,
+                protect_user_memory=manual_documents_locked(
+                    memory_enabled=cfg.memory_enabled,
+                    policy=cfg.manual_document_policy,
+                ),
+            )
+        )
 
         # Search only the final model-visible tool set. In particular, this
         # must run after MCP and user filtering so hidden tools cannot leak

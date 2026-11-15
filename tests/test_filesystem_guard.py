@@ -260,6 +260,16 @@ def test_execute_cwd_uses_the_sandbox_shell_path() -> None:
     }
 
 
+class _AlwaysYes:
+    """Decision scorer that keeps every candidate."""
+
+    def score(self, *, state: str, statements: list[tuple[str, str]]) -> dict[str, float]:
+        return {}
+
+    async def score_async(self, *, state: str, statements: list[tuple[str, str]]) -> dict[str, float]:
+        return {}
+
+
 def _schema_tool(name: str, schema: type, func: object) -> StructuredTool:
     return StructuredTool.from_function(
         name=name,
@@ -412,3 +422,122 @@ def test_blocks_ls_on_macos_private_etc_alias() -> None:
     )
     assert reason is not None
     assert "permission denied" in reason
+
+
+async def test_deferred_tool_dispatch_runs_inside_the_filesystem_guard(tmp_path: Path) -> None:
+    """``call_deferred_tool`` must be forwarded *through* the guard.
+
+    ``DecisionMiddleware`` re-enters the chain at the next handler for the
+    forwarded tool, so it has to sit outside ``FilesystemGuardMiddleware``. When
+    it sat inside, the guard never saw the forwarded call: deny rules were
+    skipped, and the ``base_dir`` / ``cwd`` fields the request copy advertises
+    reached deepagents' tool functions, which reject them with ``TypeError`` and
+    abort the turn.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from deepagents.middleware.filesystem import GrepSchema
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from octop_harness.agent import HarnessAgent
+    from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
+    from octop_harness.decision.config import DecisionConfig
+    from octop_harness.middleware.decision import DecisionMiddleware
+
+    cfg = HarnessAgentConfig(
+        name="test-agent",
+        workspace_dir=tmp_path,
+        backend={"type": "filesystem", "root_dir": str(tmp_path), "virtual_mode": False},
+        providers=[
+            ProviderConfig(
+                id="p",
+                base_url="https://x",
+                api_key="k",
+                models=[ModelConfig(id="text", input=["text"])],
+            )
+        ],
+        default_model="p/text",
+        memory_enabled=False,
+        checkpointer=False,
+        decision=DecisionConfig(
+            enabled=True,
+            endpoint="http://127.0.0.1:9/v1/decisions",
+            skills=False,
+            tools=True,
+            team=False,
+            tool_min_count=1,
+        ),
+    )
+    with (
+        patch("langchain_openai.ChatOpenAI", return_value=MagicMock()),
+        patch("deepagents.create_deep_agent", return_value=MagicMock(name="fake-graph")),
+    ):
+        agent = HarnessAgent(cfg)
+    chain = agent._build_middleware()
+    names = [type(mw).__name__ for mw in chain]
+    assert "DecisionMiddleware" in names
+    assert "FilesystemGuardMiddleware" in names
+    assert names.index("DecisionMiddleware") < names.index("FilesystemGuardMiddleware")
+
+    async def grep(pattern: str, path: str | None = None) -> str:
+        return f"{pattern}@{path}"
+
+    live = StructuredTool.from_function(coroutine=grep, name="grep", args_schema=GrepSchema, description="grep")
+
+    async def widget(query: str) -> str:
+        return query
+
+    long_tail = StructuredTool.from_function(coroutine=widget, name="widget_search", description="widget")
+    guard = FilesystemGuardMiddleware(workspace_dir=str(tmp_path))
+    decision = DecisionMiddleware(config=cfg.decision, scorer=_AlwaysYes())
+    request = ModelRequest(
+        model=MagicMock(),
+        messages=[HumanMessage(content="用 grep 搜 Octop")],
+        system_message=SystemMessage(content="base"),
+        tool_choice=None,
+        tools=[live, long_tail],
+        response_format=None,
+        state={},
+        runtime=MagicMock(),
+        model_settings={},
+    )
+
+    seen: dict[str, object] = {}
+
+    async def model_handler(item: ModelRequest) -> ModelResponse:
+        seen["model_tools"] = list(item.tools or [])
+        return ModelResponse(result=[])
+
+    await decision.awrap_model_call(request, lambda item: guard.awrap_model_call(item, model_handler))
+    model_tools = seen["model_tools"]
+    assert any(
+        "base_dir" in _json_schema(tool).get("properties", {})
+        for tool in model_tools
+        if isinstance(tool, StructuredTool)
+    )
+
+    async def tool_handler(item: ToolCallRequest) -> ToolMessage:
+        seen["name"] = item.tool_call["name"]
+        seen["args"] = item.tool_call["args"]
+        seen["schema"] = _json_schema(item.tool) if isinstance(item.tool, StructuredTool) else {}
+        return ToolMessage(content="ok", name=str(item.tool_call["name"]), tool_call_id="c1")
+
+    await decision.awrap_tool_call(
+        ToolCallRequest(
+            tool_call={
+                "name": "call_deferred_tool",
+                "args": {
+                    "name": "grep",
+                    "arguments": {"pattern": "Octop", "path": "docs", "base_dir": "/tmp/base"},
+                },
+                "id": "c1",
+            },
+            tool=None,
+            state={},
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        lambda item: guard.awrap_tool_call(item, tool_handler),
+    )
+    assert seen["name"] == "grep"
+    assert seen["args"] == {"pattern": "Octop", "path": "/tmp/base/docs"}
+    assert "base_dir" not in seen["schema"].get("properties", {})
