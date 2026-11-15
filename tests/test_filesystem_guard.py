@@ -412,3 +412,47 @@ def test_blocks_ls_on_macos_private_etc_alias() -> None:
     )
     assert reason is not None
     assert "permission denied" in reason
+
+
+def _tool_call(name: str, args: dict[str, object]) -> ToolCallRequest:
+    return ToolCallRequest(
+        tool_call={"name": name, "args": args, "id": "call-1"},
+        tool=None,
+        state={},
+        runtime=None,  # type: ignore[arg-type]
+    )
+
+
+def test_missing_path_result_names_the_working_tools() -> None:
+    def handler(_request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(content="Path '/workspace': path_not_found", tool_call_id="call-1", status="error")
+
+    result = FilesystemGuardMiddleware().wrap_tool_call(_tool_call("ls", {"path": "/workspace"}), handler)
+    content = str(result.content)
+    assert "path_not_found" in content
+    assert "ls '.'" in content and "glob '*.py'" in content and "read_file 'SOUL.md'" in content
+
+
+def test_unknown_shell_command_points_at_filesystem_tools() -> None:
+    def handler(_request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(
+            content="'find' 不是内部或外部命令，也不是可运行的程序或批处理文件。",  # noqa: RUF001
+            tool_call_id="call-1",
+            status="success",
+        )
+
+    result = FilesystemGuardMiddleware().wrap_tool_call(
+        _tool_call("execute", {"command": "find . -name '*.py'"}),
+        handler,
+    )
+    content = str(result.content)
+    assert "不是内部或外部命令" in content
+    assert "ls, glob, and grep" in content
+
+
+def test_plain_tool_output_is_left_alone() -> None:
+    def handler(_request: ToolCallRequest) -> ToolMessage:
+        return ToolMessage(content="README.md", tool_call_id="call-1", status="success")
+
+    result = FilesystemGuardMiddleware().wrap_tool_call(_tool_call("ls", {"path": "."}), handler)
+    assert str(result.content) == "README.md"

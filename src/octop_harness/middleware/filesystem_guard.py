@@ -78,6 +78,23 @@ _OUTSIDE_ROOT_REMEDIATION = (
     "(on Windows, set an explicit drive path such as D:/octop-data)."
 )
 
+_PATH_NOT_FOUND_RE = re.compile(
+    r"\b(?:path|file)_not_found\b|FileNotFoundError|No such file or directory",
+    re.IGNORECASE,
+)
+_UNKNOWN_COMMAND_RE = re.compile(
+    r"不是内部或外部命令|is not recognized as an internal or external command|command not found",
+    re.IGNORECASE,
+)
+_PATH_REMEDIATION = (
+    "The path does not exist. Use workspace-relative paths ('.' is the workspace root, "
+    "e.g. ls '.', glob '*.py', read_file 'SOUL.md') and run ls '.' first to see the layout."
+)
+_COMMAND_REMEDIATION = (
+    "That command is not available in this environment. Use the ls, glob, and grep tools "
+    "to list, find, and search files instead of retrying shell commands."
+)
+
 _WINDOWS_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 
 
@@ -489,6 +506,34 @@ def _tool_call_meta(request: ToolCallRequest) -> tuple[str, str]:
     return str(tool_call.get("name") or ""), str(tool_call.get("id") or "")
 
 
+def tool_error_remediation(tool_name: str, content: Any) -> str | None:
+    """Actionable hint for a tool failure a small model would otherwise give up on.
+
+    A missing path and an unknown shell command both read as a dead end: the
+    model asks the user instead of switching tools. Name the tool that works.
+    """
+    text = content if isinstance(content, str) else ""
+    if not text:
+        return None
+    if _PATH_NOT_FOUND_RE.search(text):
+        return _PATH_REMEDIATION
+    if _UNKNOWN_COMMAND_RE.search(text):
+        return _COMMAND_REMEDIATION
+    return None
+
+
+def _with_tool_remediation(
+    request: ToolCallRequest,
+    result: ToolMessage | Command[Any],
+) -> ToolMessage | Command[Any]:
+    if not isinstance(result, ToolMessage) or not isinstance(result.content, str):
+        return result
+    hint = tool_error_remediation(str(request.tool_call.get("name") or ""), result.content)
+    if hint is None or hint in result.content:
+        return result
+    return result.model_copy(update={"content": f"{result.content}\n\n{hint}"})
+
+
 class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
     """Filesystem tool boundary: user-owned memory, denies and soft failures.
 
@@ -777,7 +822,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         if blocked is not None:
             return blocked
         try:
-            return await handler(request)
+            return _with_tool_remediation(request, await handler(request))
         except ValueError as exc:
             softened = self._soften_outside_root(request, exc)
             if softened is not None:
@@ -797,7 +842,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         if blocked is not None:
             return blocked
         try:
-            return handler(request)
+            return _with_tool_remediation(request, handler(request))
         except ValueError as exc:
             softened = self._soften_outside_root(request, exc)
             if softened is not None:
@@ -812,5 +857,6 @@ __all__ = [
     "is_windows_absolute_path",
     "path_outside_root_tool_message",
     "rewrite_legacy_windows_fs_path",
+    "tool_error_remediation",
     "unbounded_glob_block_reason",
 ]
