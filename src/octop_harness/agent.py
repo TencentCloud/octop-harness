@@ -1036,6 +1036,25 @@ class HarnessAgent:
         )
         return True
 
+    def _close_acp_sessions(self) -> None:
+        """Stop ACP child processes bound to this workspace."""
+        workspace = getattr(self, "_workspace_path", None)
+        if workspace is None:
+            return
+        from octop_harness.acp.service import close_acp_service
+
+        close_acp_service(str(workspace))
+
+    async def _aclose_acp_sessions(self) -> None:
+        workspace = getattr(self, "_workspace_path", None)
+        if workspace is None:
+            return
+        from octop_harness.acp.service import pop_acp_service
+
+        service = pop_acp_service(str(workspace))
+        if service is not None:
+            await service.close_all_sessions()
+
     def close(self) -> None:
         """Release long-lived resources (idempotent, sync).
 
@@ -1056,6 +1075,7 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        self._close_acp_sessions()
         if self._owns_model_factory:
             self._model_factory.close()
         self._memory_runtime.close()
@@ -1074,6 +1094,7 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        await self._aclose_acp_sessions()
         if self._owns_model_factory:
             await self._model_factory.aclose()
         self._memory_runtime.close()
@@ -1271,6 +1292,9 @@ class HarnessAgent:
         if cfg.providers:
             return ChatModelFactory(cfg.providers, agent_config=cfg)
 
+        if (cfg.managed_runner or "").strip():
+            return ChatModelFactory([], agent_config=cfg)
+
         from octop_harness.config.env import detect_providers_from_env
 
         detected_providers, detected_default = detect_providers_from_env()
@@ -1302,6 +1326,21 @@ class HarnessAgent:
 
     def _init_graph(self) -> None:
         """Compile the deep-agent graph and snapshot the seed model ref."""
+        managed_runner = (self._config.managed_runner or "").strip()
+        if managed_runner:
+            from octop_harness.acp.managed import build_managed_graph
+            from octop_harness.acp.models import ACPConfig
+
+            self._seed_model_ref = None
+            self._base_graph = build_managed_graph(
+                runner=managed_runner,
+                acp_config=ACPConfig(runners=dict(self._config.acp_runners)),
+                cwd=str(self._workspace_path),
+                checkpointer=self._resolve_checkpointer(),
+            )
+            self._graph = self._wrap_graph(self._base_graph)
+            self._sync_protocol_graph()
+            return
         # Promote empty-tuple (bootstrap suppression) to None once bootstrap completes,
         # so the unified loader includes the standard workspace context files.
         memory_override = None if self._config.memory == () and self.is_bootstrapped() else self._config.memory
@@ -1880,20 +1919,12 @@ class HarnessAgent:
 
         captured: list[Any] = []
 
-        def _capture_summarization_middleware(*args: Any, **kwargs: Any) -> Any:
-            from octop_harness.middleware.memory_recall import count_tokens_with_recall
+        def _capture_summarization_middleware(*args: Any, **factory_kwargs: Any) -> Any:
             from octop_harness.middleware.summarization_limits import (
-                SUMMARY_INPUT_TOKEN_LIMIT,
-                harden_summarization_middleware,
+                build_configured_summarization_middleware,
             )
 
-            # Summarization wraps the memory middleware and sees clean state
-            # messages. Include their recall snapshots in its budget/keep math.
-            kwargs.setdefault("token_counter", count_tokens_with_recall)
-            # deepagents' factory leaves this unset, so compaction resends the
-            # whole evicted history. Cap it before the summary model sees it.
-            kwargs.setdefault("trim_tokens_to_summarize", SUMMARY_INPUT_TOKEN_LIMIT)
-            mw = harden_summarization_middleware(orig_factory(*args, **kwargs))
+            mw = build_configured_summarization_middleware(orig_factory, args, factory_kwargs, self._config)
             captured.append(mw)
             return mw
 

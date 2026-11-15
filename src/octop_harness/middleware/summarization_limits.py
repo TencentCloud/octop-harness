@@ -205,6 +205,67 @@ def _use_smaller_window(helper: Any) -> bool:
     return not isinstance(current, int) or current > SUMMARY_INPUT_RETRY_TOKEN_LIMIT
 
 
+def build_configured_summarization_middleware(
+    factory: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    config: Any,
+) -> Any:
+    """Build one summarization middleware and apply host compaction settings."""
+    from octop_harness.middleware.memory_recall import count_tokens_with_recall
+
+    kwargs.setdefault("token_counter", count_tokens_with_recall)
+    trim = getattr(config, "summarization_trim_tokens", None)
+    if isinstance(trim, int) and not isinstance(trim, bool):
+        kwargs["trim_tokens_to_summarize"] = trim
+    else:
+        kwargs.setdefault("trim_tokens_to_summarize", SUMMARY_INPUT_TOKEN_LIMIT)
+    middleware = harden_summarization_middleware(factory(*args, **kwargs))
+    apply_summarization_policy(middleware, config)
+    return middleware
+
+
+def apply_summarization_policy(middleware: Any, config: Any) -> None:
+    """Retune one deepagents summarization middleware from ``HarnessAgentConfig``.
+
+    deepagents' factory ignores caller trigger/keep and bakes in
+    ``compute_summarization_defaults``. Apply the host overrides after that
+    factory returns, including the tool-argument truncation thresholds.
+
+    Disabling clears the auto trigger. The middleware stays in the stack so a
+    stored summary is still applied, and ``/compact`` can reuse this instance.
+    """
+    helper = getattr(middleware, "_lc_helper", None)
+    if helper is None:
+        return
+    if getattr(config, "summarization_enabled", True) is False:
+        _install_trigger(helper, None)
+        if hasattr(middleware, "_truncate_args_trigger"):
+            middleware._truncate_args_trigger = None
+        return
+
+    trigger = getattr(config, "summarization_trigger", None)
+    keep = getattr(config, "summarization_keep", None)
+    if trigger is not None:
+        _install_trigger(helper, trigger)
+        if hasattr(middleware, "_truncate_args_trigger"):
+            middleware._truncate_args_trigger = trigger
+    if keep is not None:
+        helper.keep = helper._validate_context_size(keep, "keep")
+        if hasattr(middleware, "_truncate_args_keep"):
+            middleware._truncate_args_keep = keep
+    trim = getattr(config, "summarization_trim_tokens", None)
+    if isinstance(trim, int) and not isinstance(trim, bool):
+        helper.trim_tokens_to_summarize = trim
+
+
+def _install_trigger(helper: Any, trigger: Any) -> None:
+    copied = helper._copy_trigger(trigger)
+    helper.trigger = copied
+    helper._trigger_clauses = helper._normalize_trigger(copied)
+    helper._trigger_conditions = helper._legacy_trigger_conditions(copied)
+
+
 def _is_context_overflow(exc: Exception) -> bool:
     """Match provider context-limit errors without treating ordinary 429s as data loss."""
     if isinstance(exc, ContextOverflowError):
