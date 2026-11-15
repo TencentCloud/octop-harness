@@ -182,3 +182,37 @@ async def test_context_usage_counts_the_rendered_skill_catalog(
     assert usage["segments"].get("skills", 0) == expected["skills"]
     assert usage["segments"].get("rules", 0) == expected["rules"]
     assert usage["input_tokens"] == sum(usage["segments"].values())
+
+
+def test_summarization_policy_reaches_every_factory_call(
+    sample_config: HarnessAgentConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Main agent and subagents share the factory wrapper, so one policy covers both."""
+    from octop_harness.middleware.summarization_limits import apply_summarization_policy
+
+    model = _Model(responses=[AIMessage(content="ok")])
+    monkeypatch.setattr("octop_harness.llm.factory.ChatModelFactory.get_chat_model", lambda *args, **kwargs: model)
+    seen: list[Any] = []
+    real = apply_summarization_policy
+
+    def _spy(middleware: Any, config: Any) -> None:
+        seen.append(middleware)
+        real(middleware, config)
+
+    monkeypatch.setattr("octop_harness.middleware.summarization_limits.apply_summarization_policy", _spy)
+    HarnessAgent(
+        replace(
+            sample_config,
+            summarization_trigger=("fraction", 0.5),
+            summarization_keep=("fraction", 0.2),
+            summarization_trim_tokens=3000,
+            bootstrap_enabled=False,
+        )
+    )
+    assert len(seen) >= 2
+    for middleware in seen:
+        assert middleware._lc_helper.trigger == ("fraction", 0.5)
+        assert middleware._lc_helper.keep == ("fraction", 0.2)
+        assert middleware._lc_helper.trim_tokens_to_summarize == 3000
+        assert middleware._truncate_args_trigger == ("fraction", 0.5)
+        assert middleware._truncate_args_keep == ("fraction", 0.2)

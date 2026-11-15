@@ -25,6 +25,7 @@ class ACPHostedClient:
         self._permission_adapter = ACPPermissionAdapter(cwd=cwd)
         self._on_message: MessageHandler | None = None
         self._assistant_text = ""
+        self._thought_text = ""
         self._pending_permission: SuspendedPermission | None = None
         self._permission_future: asyncio.Future[Any] | None = None
         self._permission_requested = asyncio.Event()
@@ -39,6 +40,7 @@ class ACPHostedClient:
     def start_prompt(self, on_message: MessageHandler) -> None:
         self._on_message = on_message
         self._assistant_text = ""
+        self._thought_text = ""
         self._pending_permission = None
         self._permission_requested.clear()
 
@@ -115,10 +117,15 @@ class ACPHostedClient:
 
         _session_id = session_id
         if isinstance(update, AgentMessageChunk):
-            await self._accumulate_assistant_content(update.content)
+            delta = self._take_delta("_assistant_text", update.content)
+            if delta:
+                await self._emit_message({"type": "text_delta", "text": delta}, False)
             return
 
         if isinstance(update, AgentThoughtChunk):
+            delta = self._take_delta("_thought_text", update.content)
+            if delta:
+                await self._emit_message({"type": "reasoning_delta", "text": delta}, False)
             return
 
         if isinstance(update, ToolCallStart | ToolCallProgress):
@@ -156,21 +163,22 @@ class ACPHostedClient:
             return
         await self._on_message(payload, is_last)
 
-    async def _accumulate_assistant_content(self, content: Any) -> None:
+    def _take_delta(self, attr: str, content: Any) -> str:
+        """Append one ACP content block and return only the new text."""
         text = self._extract_text_from_content(content)
-        if text:
-            self._merge_assistant_text(text)
-
-    def _merge_assistant_text(self, text: str) -> None:
-        if not text or text == self._assistant_text:
-            return
-        if not self._assistant_text:
-            self._assistant_text = text
-            return
-        if text.startswith(self._assistant_text):
-            self._assistant_text = text
-            return
-        self._assistant_text = self._assistant_text + text
+        if not text:
+            return ""
+        current = str(getattr(self, attr) or "")
+        if text == current:
+            return ""
+        if not current:
+            setattr(self, attr, text)
+            return text
+        if text.startswith(current):
+            setattr(self, attr, text)
+            return text[len(current) :]
+        setattr(self, attr, current + text)
+        return text
 
     def _extract_text_from_content(self, content: Any) -> str:
         if hasattr(content, "text") and isinstance(getattr(content, "text", None), str):
@@ -196,4 +204,34 @@ class ACPHostedClient:
             "title": title,
             "kind": kind,
             "detail": title,
+            "status": str(getattr(update, "status", None) or ""),
+            "output": _tool_output_text(update),
         }
+
+
+def _tool_output_text(update: Any) -> str:
+    """Text the tool already produced, short enough to show in the chat card."""
+    parts: list[str] = []
+    content = getattr(update, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, str) and block.strip():
+                parts.append(block.strip())
+                continue
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("content")
+            else:
+                text = getattr(block, "text", None)
+                if not isinstance(text, str):
+                    inner = getattr(block, "content", None)
+                    text = inner if isinstance(inner, str) else getattr(inner, "text", None)
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    if not parts:
+        raw = getattr(update, "raw_output", None)
+        if isinstance(raw, str) and raw.strip():
+            parts.append(raw.strip())
+    text = "\n".join(parts).strip()
+    if len(text) > 4000:
+        return text[:4000]
+    return text
