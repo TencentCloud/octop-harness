@@ -640,7 +640,7 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         )
         if parts:
             self._publish(empty=False, parts=parts)
-        return self._commit(request, work.turn_key, turn)
+        return self._commit(request, work.turn_key, turn, work.text)
 
     def _apply_result(
         self,
@@ -672,20 +672,29 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         )
         return part, True, hint
 
-    def _commit(self, request: ModelRequest, key: str, turn: _TurnFilter) -> ModelRequest:
-        pinned = self._pin_prefix(request, turn)
+    def _commit(
+        self,
+        request: ModelRequest,
+        key: str,
+        turn: _TurnFilter,
+        text: str = "",
+    ) -> ModelRequest:
+        pinned = self._pin_prefix(request, turn, text)
         self._remember_turn(key, pinned)
         return self._present(request, pinned)
 
-    def _pin_prefix(self, request: ModelRequest, turn: _TurnFilter) -> _TurnFilter:
+    def _pin_prefix(self, request: ModelRequest, turn: _TurnFilter, text: str = "") -> _TurnFilter:
         """Keep one system prompt and one core tool list whether or not this turn scored."""
         rewrite = turn.rewrite_skills
         skills = turn.skills
         tools = turn.tools
         if not rewrite and self._has_skill_catalog(request):
-            # Stub the prompt, but do not paste the unscored catalog into the note.
+            # Skills went unscored: `cfg.skills` is off, or the service returned
+            # nothing usable. Stub the prompt and keyword-shortlist the catalog
+            # instead of pasting every blurb. ``None`` means no overlap, which
+            # keeps the full catalog rather than truncating it arbitrarily.
             rewrite = True
-            skills = set()
+            skills = self._shortlist_skills(request, text)
         if self._config.tools and tools is None:
             incoming = list(request.tools or [])
             named = [name for tool in incoming if (name := _tool_name(tool))]
@@ -901,10 +910,12 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         return self._config.model or self._config.provider
 
     def _has_skill_catalog(self, request: ModelRequest) -> bool:
-        return (
-            self._config.skills
-            and _metadata_skill_count(request) >= 2
-            and (self._skills_rendered_late or _request_has_skill_region(request))
+        # Deliberately independent of `cfg.skills`: that flag only decides
+        # whether the model scores skills. With scoring off the catalog still
+        # gets stubbed and keyword-shortlisted, so the model keeps a readable
+        # list instead of either every blurb or none at all.
+        return _metadata_skill_count(request) >= 2 and (
+            self._skills_rendered_late or _request_has_skill_region(request)
         )
 
     def _kept_catalog(self, request: ModelRequest, text: str) -> _TurnFilter:

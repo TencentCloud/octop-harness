@@ -848,6 +848,54 @@ async def test_failed_decision_request_shortlists_the_catalog() -> None:
     assert [tool.name for tool in seen[0].tools] == ["read_file", "call_deferred_tool"]
 
 
+@pytest.mark.asyncio
+async def test_unscored_skills_fall_back_to_the_keyword_shortlist() -> None:
+    """`skills=false` must still leave the model a readable skill list.
+
+    The service answered, but with no skill scores (scoring is off). Pasting the
+    whole catalog would put every blurb in the note; an empty set would hide the
+    skills entirely. The keyword shortlist is the middle ground.
+    """
+    rows = [{"name": f"misc-{index}", "description": "无关技能"} for index in range(20)]
+    rows.append({"name": "pdf", "description": "读取 pdf"})
+    tools = [_tool("read_file", "读取文件")]
+    tools.extend(_tool(f"misc-tool-{index}", "无关工具") for index in range(10))
+    tools.append(_tool("read_pdf", "读取 pdf"))
+    mw = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({"tool:read_pdf": 0.9}),
+    )
+    seen: list[ModelRequest] = []
+
+    async def reply(request: ModelRequest) -> ModelResponse:
+        seen.append(request)
+        return ModelResponse(result=[AIMessage(content="好")])
+
+    await mw.awrap_model_call(_catalog_request(text="帮我读 pdf", rows=rows, tools=tools), reply)
+    assert "skill:pdf" not in {item_id for item_id, _text in mw._scorer.statements}  # type: ignore[attr-defined]
+    note = _note(seen[0])
+    assert "pdf" in note
+    assert "misc-0" not in note
+    assert [row["name"] for row in seen[0].state["skills_metadata"]] == ["pdf"]
+
+
+@pytest.mark.asyncio
+async def test_unscored_skills_keep_the_full_catalog_when_nothing_overlaps() -> None:
+    rows = [{"name": f"misc-{index}", "description": "无关技能"} for index in range(20)]
+    mw = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({}),
+    )
+    seen: list[ModelRequest] = []
+
+    async def reply(request: ModelRequest) -> ModelResponse:
+        seen.append(request)
+        return ModelResponse(result=[AIMessage(content="好")])
+
+    await mw.awrap_model_call(_catalog_request(text="zzqqxx vvwwyy", rows=rows, tools=[]), reply)
+    assert [row["name"] for row in seen[0].state["skills_metadata"]] == [row["name"] for row in rows]
+
+
 def test_provider_native_tools_stay_callable_and_are_not_scored() -> None:
     native = {"type": "function", "function": {"name": "web_search", "description": "搜索网页", "parameters": {}}}
     tools: list[Any] = [_tool(f"misc_{index}", "unrelated") for index in range(8)]
@@ -1149,7 +1197,9 @@ def test_unscored_turn_keeps_the_same_cached_prefix() -> None:
             "call_deferred_tool",
         ]
     )
-    assert _note(missed) == ""
+    # "你好" overlaps nothing, so the unscored fallback keeps the full catalog
+    # rather than truncating it behind an arbitrary slice.
+    assert "- **skill-0**:" in _note(missed)
     assert "skill-0" not in _note(matched) and "misc-0" not in _note(matched)
     assert "pdf" in _note(matched) and "read_pdf" in _note(matched)
     assert scorer.calls == 1
