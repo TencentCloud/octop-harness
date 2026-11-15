@@ -6,6 +6,14 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 from octop_harness._version import __version__
+from octop_harness.api_key_scope import (
+    api_key_override_from,
+    api_key_override_provider_from,
+    api_key_override_scope,
+    bind_api_key_override,
+    current_api_key_override,
+    current_api_key_override_provider,
+)
 from octop_harness.config import (
     HarnessAgentConfig,
     MediaGenerationConfig,
@@ -76,6 +84,12 @@ __all__ = [
     "ProviderPreset",
     "SecurityPolicy",
     "__version__",
+    "api_key_override_from",
+    "api_key_override_provider_from",
+    "api_key_override_scope",
+    "bind_api_key_override",
+    "current_api_key_override",
+    "current_api_key_override_provider",
     "current_log_file",
     "default_log_dir",
     "init_workspace",
