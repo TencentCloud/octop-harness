@@ -67,6 +67,18 @@ class TestDoesNotMatchBenignText:
     def test_plain_prose_is_ignored(self) -> None:
         assert detect_pii("the quick brown fox jumps over the lazy dog") == []
 
+    def test_hyphenated_word_spanning_sk_is_ignored(self) -> None:
+        """``task-decomposition-and-execution`` contains ``sk-`` across a word
+        boundary and used to trip the OpenAI pattern on every file listing."""
+        path = "/Users/me/.octop/skills/dev-expert/references/task-decomposition-and-execution.md"
+        assert detect_pii(path) == []
+        assert detect_pii(f"see {path} for details") == []
+
+    def test_key_after_separator_is_still_detected(self) -> None:
+        matches = detect_pii("key=sk-4b829b7b-b0aa-4064-8d53-18b0025594f2")
+        assert matches and matches[0]["type"] == "openai"
+        assert matches[0]["start"] == 4
+
 
 class TestMatchOrdering:
     def test_matches_returned_left_to_right(self) -> None:

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- PII 检测的 OpenAI key 正则增加 `(?<![A-Za-z0-9])` 前导断言。`sk-` 前面是字母时会跨词边界误命中，例如技能路径 `.octop/skills/dev-expert/references/task-decomposition-and-execution.md` 中的 `task-decomposition-and-execution`；在 `pii.strategy="block"` 下这会让一次正常的文件检索直接以 `Detected 2 instance(s) of openai in text content` 终止回合。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增

@@ -92,12 +92,15 @@ _PERSONAL_LABELS = frozenset({"cn_mobile_phone", "cn_resident_id"})
 # they win when a personal number sits inside the same span.
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # OpenAI project keys: ``sk-proj-XXXX...``
-    ("openai_project", re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}")),
+    ("openai_project", re.compile(r"(?<![A-Za-z0-9])sk-proj-[A-Za-z0-9_-]{20,}")),
     # Anthropic: ``sk-ant-XXXX...``
-    ("anthropic", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
+    ("anthropic", re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}")),
     # OpenAI / OpenAI-compatible: ``sk-XXXX...`` (catches HAI Hub etc.).
-    # Excludes ``sk-proj-`` / ``sk-ant-`` thanks to negative lookahead.
-    ("openai", re.compile(r"sk-(?!proj-|ant-)[A-Za-z0-9_-]{20,}")),
+    # Excludes ``sk-proj-`` / ``sk-ant-`` thanks to negative lookahead, and
+    # requires a non-alphanumeric before ``sk-`` so hyphenated words such as
+    # ``task-decomposition-and-execution`` do not match on the ``sk-`` that
+    # spans the word boundary.
+    ("openai", re.compile(r"(?<![A-Za-z0-9])sk-(?!proj-|ant-)[A-Za-z0-9_-]{20,}")),
     # AWS access key id: AKIA / ASIA + 16 uppercase alnum, exactly 20 chars total.
     ("aws_access_key_id", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     # Google Cloud / Gemini: AIza + 35 chars.
