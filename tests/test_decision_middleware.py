@@ -805,6 +805,49 @@ async def test_failed_decision_request_keeps_catalog_and_reports_the_error(
     assert stamped["detail"] == "ConnectError"
 
 
+def _catalog_request(
+    *,
+    text: str,
+    rows: list[dict[str, str]],
+    tools: list[Any],
+) -> ModelRequest:
+    bullets = "\n".join(f"- **{row['name']}**: {row['description']}" for row in rows)
+    prompt = f"**Available Skills:**\n\n{bullets}\n\n**How to Use Skills (Progressive Disclosure):**\ntail\n"
+    return ModelRequest(
+        model=MagicMock(),
+        messages=[HumanMessage(content=text)],
+        system_message=SystemMessage(content=prompt),
+        tool_choice=None,
+        tools=list(tools),
+        response_format=None,
+        state={"skills_metadata": [dict(row) for row in rows]},
+        runtime=MagicMock(),
+        model_settings={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_decision_request_shortlists_the_catalog() -> None:
+    rows = [{"name": f"misc-{index}", "description": "无关技能"} for index in range(20)]
+    rows.append({"name": "pdf", "description": "读取 pdf"})
+    tools = [_tool("read_file", "读取文件")]
+    tools.extend(_tool(f"misc-tool-{index}", "无关工具") for index in range(20))
+    tools.append(_tool("read_pdf", "读取 pdf"))
+    mw = DecisionMiddleware(config=_config(team=False, tool_min_count=2), scorer=_FailingScorer())
+    seen: list[ModelRequest] = []
+
+    async def reply(request: ModelRequest) -> ModelResponse:
+        seen.append(request)
+        return ModelResponse(result=[AIMessage(content="好")])
+
+    await mw.awrap_model_call(_catalog_request(text="帮我读 pdf", rows=rows, tools=tools), reply)
+    note = _note(seen[0])
+    assert "pdf" in note and "read_pdf" in note
+    assert "misc-0" not in note and "misc-tool-0" not in note
+    assert [row["name"] for row in seen[0].state["skills_metadata"]] == ["pdf"]
+    assert [tool.name for tool in seen[0].tools] == ["read_file", "call_deferred_tool"]
+
+
 def test_provider_native_tools_stay_callable_and_are_not_scored() -> None:
     native = {"type": "function", "function": {"name": "web_search", "description": "搜索网页", "parameters": {}}}
     tools: list[Any] = [_tool(f"misc_{index}", "unrelated") for index in range(8)]

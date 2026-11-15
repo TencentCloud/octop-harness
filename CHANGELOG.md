@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - OpenAI 兼容流式调用只保留最后一个 chunk 的 usage。上游在每个分片都带累计 usage 时，`input_tokens` 不再被乘以分片数（Octop#2007）。
+- 决策服务不可达时不再把完整技能/工具目录塞进本轮说明（24 个技能的 agent 实测 17.8 KB），改为按本轮文本做关键词短名单，只保留命中的条目；本轮没有任何命中时仍保留完整目录，不任意截断。
 
 ## [1.0.9] - 2026-11-10
 
