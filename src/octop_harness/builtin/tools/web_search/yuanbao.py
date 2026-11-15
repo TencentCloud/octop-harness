@@ -9,11 +9,12 @@ https://cloud.tencent.com/document/product/1806/130615
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import httpx
 from langchain_core.tools import tool
+
+from octop_harness.tool_env_scope import current_tool_env
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_ENDPOINT = "https://api.wsa.cloud.tencent.com/SearchPro"
@@ -155,9 +156,12 @@ async def yuanbao_search(query: str, max_results: int = 10) -> str:
         A JSON array of results, ``"No results found."``, or a plain-text
         error when the key is missing or the upstream call fails.
     """
-    api_key = os.getenv("TENCENTCLOUD_WSA_APIKEY", "").strip()
+    api_key = current_tool_env("TENCENTCLOUD_WSA_APIKEY").strip()
     if not api_key:
-        return "Error: TENCENTCLOUD_WSA_APIKEY environment variable is not set."
+        return (
+            "Error: TENCENTCLOUD_WSA_APIKEY is not set. Configure a personal search key "
+            "in the host application or ask the administrator to set the global key."
+        )
     prepared = _prepare(query, max_results)
     if isinstance(prepared, str):
         return prepared

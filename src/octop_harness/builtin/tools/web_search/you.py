@@ -15,6 +15,8 @@ from typing import Any
 import httpx
 from langchain_core.tools import tool
 
+from octop_harness.tool_env_scope import current_tool_env
+
 DEFAULT_TIMEOUT = float(os.environ.get("YOU_SEARCH_TIMEOUT", "30"))
 FREE_ENDPOINT = "https://api.you.com/v1/agents/search"
 KEYED_ENDPOINT = "https://ydc-index.io/v1/search"
@@ -66,7 +68,7 @@ async def you_search(query: str, max_results: int = 5) -> str:
         the upstream is unreachable or returns non-2xx.
     """
     count = max(1, min(int(max_results), 20))
-    api_key = os.getenv("YDC_API_KEY", "").strip()
+    api_key = current_tool_env("YDC_API_KEY").strip()
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 工具可按调用注入凭据：`ChatRequest.configurable["tool_env"]` 传入 `str -> str` 映射，`to_runnable_config()` 会将其从 `RunnableConfig` 中弹出，`HarnessAgent` 在每次入口绑定到任务级 scope；值不会写入 checkpoint 元数据，HITL 暂停/恢复期间保持。
+- 内置搜索工具支持 `DEEPSEEK_SEARCH_ENDPOINT`（全局 Endpoint），未设置时仍用默认地址。
+- `HarnessAgentConfig.web_search_require_env`（默认 `True`）。设为 `False` 时，显式 `web_search_tools` 列表不检查 env 即可挂载；新增 `ToolAvailabilityMiddleware` 在每次模型调用前隐藏本轮既无调用级值、也无全局 env 的搜索工具（排在 `ToolsFilterMiddleware` 之后、tool search 之前）。
+
+### 变更
+
+- 内置搜索工具统一通过 `current_tool_env(...)` 读取 Key（调用级 scope > 进程 env），缺失 Key 的错误提示改为引导用户配置个人搜索密钥或由管理员配置全局 Key。
+
 ## [1.0.10] - 2026-11-15
 
 ### 新增

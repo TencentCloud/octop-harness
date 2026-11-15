@@ -277,7 +277,7 @@ class TestCloseDeferredWhileBusy:
                 yield {"type": "token", "content": "b"}
 
         proto = _BlockingProtocol()
-        with patch.object(agent, "_prepare_call", return_value=([], {}, proto)):
+        with patch.object(agent, "_prepare_call", return_value=([], {}, proto, {})):
             chunks: list[dict[str, str]] = []
 
             async def consume() -> None:

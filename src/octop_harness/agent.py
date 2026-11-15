@@ -30,6 +30,7 @@ from octop_harness.builtin.tools.env_file import build_env_file_tools
 from octop_harness.builtin.tools.media_generation import build_media_generation_tools
 from octop_harness.builtin.tools.send_file import build_send_file_to_user_tool
 from octop_harness.builtin.tools.web_search import load_web_search_tools
+from octop_harness.builtin.tools.web_search._registry import web_search_tool_requirements
 from octop_harness.config import HarnessAgentConfig
 from octop_harness.init import InitResult
 from octop_harness.llm.factory import ChatModelFactory
@@ -59,6 +60,7 @@ from octop_harness.middleware.tool_search import ToolSearchMiddleware
 from octop_harness.middleware.tools_filter import ToolsFilterMiddleware
 from octop_harness.protocols import resolve_protocol
 from octop_harness.request import ChatRequest
+from octop_harness.tool_env_scope import bind_tool_env, tool_env_from, tool_env_scope
 
 # ``langgraph-checkpoint-sqlite`` is a declared dependency, but we still guard
 # the import so missing wheels surface as a single warning at construction
@@ -213,6 +215,9 @@ class HarnessAgent:
         self._langfuse_callbacks: list[Any] | None = None
         self._protocols: dict[str, ChatProtocol] = {}
         self._hitl_resume_configs: dict[str, dict[str, Any]] = {}
+        # Per-call tool env for paused threads; rides alongside
+        # ``_hitl_resume_configs`` (which carries the key-free run config).
+        self._hitl_resume_tool_env: dict[str, dict[str, str]] = {}
         # Optional hook called once immediately after bootstrap completes.
         # Set by the caller (e.g. Orca) to trigger a full config reload.
         self.on_bootstrap_complete: Callable[[], None] | None = None
@@ -497,7 +502,7 @@ class HarnessAgent:
         ctx = build_runtime_ctx(self, req)
 
         async def _call(prepared: ChatRequest) -> dict[str, Any]:
-            messages, config, proto = self._prepare_call(prepared, protocol)
+            messages, config, proto, _tool_env = self._prepare_call(prepared, protocol)
             with session_header_scope(prepared.thread_id):
                 if durability is not None:
                     return await proto.call(messages, config, durability=durability)
@@ -529,12 +534,13 @@ class HarnessAgent:
         ctx = build_runtime_ctx(self, req)
 
         async def _stream(prepared: ChatRequest) -> AsyncGenerator[Any, None]:
-            messages, config, proto = self._prepare_call(prepared, protocol)
+            messages, config, proto, tool_env = self._prepare_call(prepared, protocol)
             thread_id = prepared.thread_id or ""
             cancel_event = asyncio.Event()
             if thread_id:
                 self._cancel_events[thread_id] = cancel_event
                 self._hitl_resume_configs.pop(thread_id, None)
+                self._hitl_resume_tool_env.pop(thread_id, None)
             try:
                 with session_header_scope(prepared.thread_id):
                     async with contextlib.aclosing(
@@ -549,6 +555,7 @@ class HarnessAgent:
                                     **config,
                                     "configurable": deepcopy(config["configurable"]),
                                 }
+                                self._hitl_resume_tool_env[thread_id] = tool_env
                             yield chunk
             finally:
                 if thread_id:
@@ -597,7 +604,7 @@ class HarnessAgent:
         paused = False
         options = {"durability": durability} if durability is not None else {}
         async with self._invocation():
-            with session_header_scope(thread_id):
+            with session_header_scope(thread_id), tool_env_scope(self._hitl_resume_tool_env.get(thread_id)):
                 async with contextlib.aclosing(resume_stream(thread_id, decisions, config, **options)) as chunks:
                     async for chunk in chunks:
                         if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
@@ -605,6 +612,7 @@ class HarnessAgent:
                         yield chunk
         if not paused:
             self._hitl_resume_configs.pop(thread_id, None)
+            self._hitl_resume_tool_env.pop(thread_id, None)
 
     async def stream_events(
         self,
@@ -626,7 +634,7 @@ class HarnessAgent:
         ``/reset``) are **not** intercepted.  Callers that need slash handling
         should use ``stream`` instead, or pre-process the input themselves.
         """
-        messages, config, proto = self._prepare_call(request, protocol)
+        messages, config, proto, _tool_env = self._prepare_call(request, protocol)
         return await proto.stream_events(messages, config, **kwargs)
 
     async def aget_history(
@@ -1075,6 +1083,7 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        self._hitl_resume_tool_env.clear()
         self._close_acp_sessions()
         if self._owns_model_factory:
             self._model_factory.close()
@@ -1094,6 +1103,7 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        self._hitl_resume_tool_env.clear()
         await self._aclose_acp_sessions()
         if self._owns_model_factory:
             await self._model_factory.aclose()
@@ -1468,7 +1478,9 @@ class HarnessAgent:
             build_send_file_to_user_tool(self._workspace),
             *build_env_file_tools(self._workspace),
         ]
-        tools.extend(load_web_search_tools(cfg.web_search_tools))
+        tools.extend(
+            load_web_search_tools(cfg.web_search_tools, require_env=cfg.web_search_require_env),
+        )
         if self._ask_user_active():
             tools.append(ask_user_question)
         if cfg.media_generation is not None and cfg.media_generation.has_api_key():
@@ -1545,7 +1557,8 @@ class HarnessAgent:
         skill_filter → mcp_tool_error → tool_guard → filesystem_guard (outside-root
         soft-fail; deny rules when permissions + execution backend) → mcp_tools →
         retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
-        conversation_mode → tools_filter → decision (only when enabled) → tool search →
+        conversation_mode → tools_filter → tool_availability (only with per-call
+        env) → decision (only when enabled) → tool search →
         task tool ordering → refusal passthrough → context_usage.
 
         ``RefusalPassthroughMiddleware`` replaces deepagents' tail
@@ -1669,6 +1682,12 @@ class HarnessAgent:
         chain.append(ConversationModeMiddleware())
         chain.append(ToolsFilterMiddleware(config=cfg))
 
+        # With ``web_search_require_env=False`` every named provider is
+        # mounted so per-call keys can light them up; hide the ones that have
+        # neither a per-call value nor a global env var before the model sees
+        # them (and before tool search builds its catalog).
+        chain.extend(self._build_tool_availability_middleware())
+
         from octop_harness.decision import decision_active
 
         decision = cfg.decision
@@ -1710,6 +1729,14 @@ class HarnessAgent:
             chain.insert(0, bootstrap)
 
         return chain
+
+    def _build_tool_availability_middleware(self) -> list[Any]:
+        """Return the per-turn search-tool availability filter, when enabled."""
+        if self._config.web_search_require_env:
+            return []
+        from octop_harness.middleware.tool_availability import ToolAvailabilityMiddleware
+
+        return [ToolAvailabilityMiddleware(required_env=web_search_tool_requirements())]
 
     def _build_tool_search_middleware(self) -> Any | None:
         cfg = self._config
@@ -2033,13 +2060,20 @@ class HarnessAgent:
         self,
         request: ChatRequest | str | dict[str, Any],
         protocol: str | None,
-    ) -> tuple[Any, Any, ChatProtocol]:
-        """Normalize a request into ``(messages, config, protocol)``.
+    ) -> tuple[Any, Any, ChatProtocol, dict[str, str]]:
+        """Normalize a request into ``(messages, config, protocol, tool_env)``.
 
-        Shared by ``call`` / ``stream`` / ``stream_events``.
+        Shared by ``call`` / ``stream`` / ``stream_events``. The normalized
+        ``tool_env`` is returned so HITL pause can store it without re-parsing
+        the request.
         """
         req = ChatRequest.coerce(request)
-        return req.normalize_messages(), req.to_runnable_config(), self._get_protocol(protocol)
+        # Tool credentials live outside ``RunnableConfig``; rebind on every
+        # entry (including an empty mapping) so one task cannot reuse a stale
+        # key from an earlier invocation.
+        tool_env = tool_env_from(req.configurable)
+        bind_tool_env(tool_env)
+        return req.normalize_messages(), req.to_runnable_config(), self._get_protocol(protocol), tool_env
 
     def _get_protocol(self, name: str | None) -> ChatProtocol:
         """Resolve a protocol by name (cached). ``None`` → config default."""

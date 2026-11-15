@@ -165,6 +165,12 @@ Ordinary memory runtime shutdown stops accepting background work immediately and
 - Built-in tools: browser (octop-browser), web search, files, ``ask_user_question`` for
   respond-only human decisions, optional provider-neutral image/video generation, sub-agents,
   and MCP tools. Set ``ask_user_enabled=False`` for unattended agents.
+- Per-call search credentials: put a ``str -> str`` mapping in
+  ``ChatRequest.configurable["tool_env"]``. It is popped from ``RunnableConfig`` and bound to a
+  task-local scope, so values never reach checkpoint metadata and survive HITL resume. Pair it
+  with ``HarnessAgentConfig(web_search_tools=[...], web_search_require_env=False)`` to mount
+  providers without global env; ``ToolAvailabilityMiddleware`` hides tools that have no usable
+  credential for the current turn.
 - Skills come from the deepagents skills middleware; manage them per agent via the CLI.
 - Optional ``system_files_path`` (e.g. ``.octop``) keeps skills, sessions, ``.env``,
   and sqlite under a workspace subdir while persona markdown stays at the root.

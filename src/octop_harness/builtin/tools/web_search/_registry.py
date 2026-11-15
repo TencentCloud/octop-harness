@@ -27,6 +27,11 @@ Policies accepted by ``HarnessAgentConfig.web_search_tools``:
   raise ``ValueError``; missing env vars raise ``RuntimeError`` so
   misconfiguration surfaces at agent construction time, not at first
   tool call.
+
+``load_web_search_tools(..., require_env=False)`` skips the env check for an
+explicit list: hosts that inject per-call credentials can mount every provider
+and let ``ToolAvailabilityMiddleware`` hide the ones that are unusable for the
+current turn.
 """
 
 from __future__ import annotations
@@ -120,12 +125,49 @@ def _missing_env(env_vars: tuple[str, ...]) -> list[str]:
     return [name for name in env_vars if not os.getenv(name)]
 
 
+# ``provider name → LangChain tool name`` used by
+# :func:`web_search_tool_requirements` so availability filtering does not have
+# to import every provider module.
+_TOOL_NAMES: dict[WebSearchToolName, str] = {
+    "tavily": "tavily_search",
+    "brave": "brave_search",
+    "deepseek": "deepseek_search",
+    "google": "google_search",
+    "kimi": "kimi_search",
+    "yuanbao": "yuanbao_search",
+    "searchfree": "searchfree_search",
+    "you": "you_search",
+}
+
+
+def web_search_tool_requirements() -> dict[str, tuple[str, ...]]:
+    """Map mounted tool names to the env vars they cannot run without.
+
+    Raises:
+        RuntimeError: a provider has no entry in :data:`_TOOL_NAMES`; the
+            availability filter would otherwise silently stop covering it.
+    """
+    requirements: dict[str, tuple[str, ...]] = {}
+    for name, (env_vars, _loader) in WEB_SEARCH_PROVIDERS.items():
+        tool_name = _TOOL_NAMES.get(name)
+        if tool_name is None:  # pragma: no cover - guarded by test_requirements_cover_every_provider
+            raise RuntimeError(
+                f"Web-search provider {name!r} has no tool-name mapping; update _TOOL_NAMES in _registry.py.",
+            )
+        requirements[tool_name] = env_vars
+    return requirements
+
+
 def load_web_search_tools(
     policy: bool | Literal["auto", "all"] | Iterable[str] = False,
+    *,
+    require_env: bool = True,
 ) -> list[Any]:
     """Resolve a web-search policy into a list of LangChain tools.
 
-    See the module docstring for the full list of accepted policies.
+    See the module docstring for the full list of accepted policies. When
+    *require_env* is ``False``, explicit lists skip the env-var check; ``auto``
+    still uses the env so its meaning is unchanged.
     """
     if policy is False:
         return []
@@ -151,13 +193,14 @@ def load_web_search_tools(
         # mypy can't narrow ``str`` → ``WebSearchToolName`` without help.
         name = cast("WebSearchToolName", raw_name)
         env_vars, loader = WEB_SEARCH_PROVIDERS[name]
-        missing = _missing_env(env_vars)
-        if missing:
-            raise RuntimeError(
-                f"Web-search provider {name!r} requested but env var(s) "
-                f"missing: {missing}. Either set them or remove "
-                f"{name!r} from web_search_tools.",
-            )
+        if require_env:
+            missing = _missing_env(env_vars)
+            if missing:
+                raise RuntimeError(
+                    f"Web-search provider {name!r} requested but env var(s) "
+                    f"missing: {missing}. Either set them or remove "
+                    f"{name!r} from web_search_tools.",
+                )
         out.append(loader())
     return out
 
@@ -166,4 +209,5 @@ __all__ = [
     "WEB_SEARCH_PROVIDERS",
     "WebSearchToolName",
     "load_web_search_tools",
+    "web_search_tool_requirements",
 ]

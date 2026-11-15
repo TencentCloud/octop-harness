@@ -26,6 +26,7 @@ from octop_harness.middleware.bootstrap import BOOTSTRAP_FILENAME, BOOTSTRAPPED_
 from octop_harness.middleware.skill_filter import render_slash_skill_prompt
 from octop_harness.observability.logging import _HANDLER_NAME, _log_agent_id
 from octop_harness.request import ChatRequest
+from octop_harness.tool_env_scope import current_tool_env
 
 
 def _package_log_dir() -> Path:
@@ -1781,6 +1782,106 @@ async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
     finally:
         await agent.aclose()
     assert agent._hitl_resume_configs == {}
+
+
+def test_tool_availability_middleware_only_when_env_checks_disabled(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], Any],
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_create(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+
+    with mock_model_factory(), patch("deepagents.create_deep_agent", side_effect=fake_create):
+        HarnessAgent(
+            replace(
+                cfg,
+                web_search_tools=["deepseek"],
+                web_search_require_env=False,
+                deferred_tools=frozenset({"read_file"}),
+            )
+        )
+    names = [type(item).__name__ for item in captured["middleware"]]
+    assert "ToolAvailabilityMiddleware" in names
+    assert names.index("ToolAvailabilityMiddleware") > names.index("ToolsFilterMiddleware")
+    # Hidden tools must not leak into the deferred search catalog.
+    assert names.index("ToolAvailabilityMiddleware") < names.index("ToolSearchMiddleware")
+
+    captured.clear()
+    with mock_model_factory(), patch("deepagents.create_deep_agent", side_effect=fake_create):
+        HarnessAgent(replace(cfg, web_search_tools="auto"))
+    assert "ToolAvailabilityMiddleware" not in [type(item).__name__ for item in captured["middleware"]]
+
+
+@pytest.mark.asyncio
+async def test_hitl_resume_preserves_tool_env(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], Any],
+    stub_create_deep_agent: Any,
+) -> None:
+    from types import SimpleNamespace
+
+    seen: list[str] = []
+
+    async def stream(messages: Any, config: dict[str, Any], **kwargs: Any) -> Any:
+        assert "tool_env" not in config["configurable"]
+        yield {"type": "hitl_required", "request": {"action_requests": [{"name": "ask_user_question"}]}}
+
+    async def resume(thread_id: str, decisions: Any, config: dict[str, Any]) -> Any:
+        seen.append(current_tool_env("DEEPSEEK_API_KEY"))
+        yield {"type": "token", "content": "done"}
+
+    with mock_model_factory(), stub_create_deep_agent:
+        agent = HarnessAgent(cfg)
+    agent._protocols["langgraph"] = SimpleNamespace(stream=stream, resume_stream=resume)  # type: ignore[assignment]
+    request = ChatRequest(
+        messages="search",
+        thread_id="tool-env-thread",
+        configurable={"tool_env": {"DEEPSEEK_API_KEY": "sk-personal"}},
+    )
+    try:
+        _ = [chunk async for chunk in agent.stream(request)]
+        _ = [chunk async for chunk in agent.resume_hitl("tool-env-thread", [{"type": "approve"}])]
+    finally:
+        await agent.aclose()
+    assert seen == ["sk-personal"]
+    assert agent._hitl_resume_tool_env == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_streams_do_not_share_tool_env(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], Any],
+    stub_create_deep_agent: Any,
+) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    seen: dict[str, str] = {}
+
+    async def stream(messages: Any, config: dict[str, Any], **kwargs: Any) -> Any:
+        await asyncio.sleep(0)
+        seen[str(config["configurable"]["thread_id"])] = current_tool_env("DEEPSEEK_API_KEY")
+        yield {"type": "token", "content": "ok"}
+
+    with mock_model_factory(), stub_create_deep_agent:
+        agent = HarnessAgent(cfg)
+    agent._protocols["langgraph"] = SimpleNamespace(stream=stream, resume_stream=None)  # type: ignore[assignment]
+
+    async def consume(thread_id: str, key: str) -> None:
+        request = ChatRequest(
+            messages="x",
+            thread_id=thread_id,
+            configurable={"tool_env": {"DEEPSEEK_API_KEY": key}},
+        )
+        _ = [chunk async for chunk in agent.stream(request)]
+
+    try:
+        await asyncio.gather(consume("t-a", "key-a"), consume("t-b", "key-b"))
+    finally:
+        await agent.aclose()
+    assert seen == {"t-a": "key-a", "t-b": "key-b"}
 
 
 def test_summarization_factory_patch_is_exclusive() -> None:
