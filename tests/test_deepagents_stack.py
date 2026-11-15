@@ -52,9 +52,9 @@ def _refusal() -> AIMessage:
 def _system_text(messages: list[BaseMessage]) -> str:
     """Render the cached prefix: system messages excluding the per-turn note.
 
-    The turn note is a ``SystemMessage`` too, but it is appended after the user
-    message so the prefix before it stays cacheable. It carries the per-turn
-    catalogue and therefore must not count as part of that prefix.
+    The turn note is a ``SystemMessage`` too, but it sits before the user
+    message so the prefix before the request stays cacheable. It carries the
+    per-turn catalogue and therefore must not count as part of that prefix.
     """
     return "\n".join(
         message_content_text(m.content) for m in messages if isinstance(m, SystemMessage) and not is_turn_note(m)
@@ -163,11 +163,12 @@ async def test_decision_keeps_skill_catalog_out_of_the_cached_prefix(
     assert "alpha skill description" not in prompts[0]
     assert "beta skill description" not in prompts[0]
     for messages, selected, unselected in zip(model.seen[:2], ("alpha", "beta"), ("beta", "alpha"), strict=True):
-        assert isinstance(messages[-1], SystemMessage)
-        note = message_content_text(messages[-1].content)
-        assert note.startswith("[turn note]")
-        assert f"{selected} skill description" in note
-        assert f"{unselected} skill description" not in note
+        note = next(m for m in messages if isinstance(m, SystemMessage) and is_turn_note(m))
+        assert note is not messages[-1]
+        text = message_content_text(note.content)
+        assert text.startswith("[turn note]")
+        assert f"{selected} skill description" in text
+        assert f"{unselected} skill description" not in text
 
 
 @pytest.mark.asyncio

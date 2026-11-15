@@ -16,7 +16,13 @@ from octop_harness.middleware.peer import (
     has_agent_at_mention,
     render_peer_prompt,
 )
+from octop_harness.middleware.turn_note import is_turn_note
 from octop_harness.teams.tools import AskAgentAsyncInput, AskAgentSyncInput
+
+
+def _note(messages: list[Any]) -> Any:
+    """The per-turn note, which leads the user message rather than trailing it."""
+    return next(msg for msg in messages if is_turn_note(msg))
 
 
 def _config(tmp_path: Path, name: str) -> HarnessAgentConfig:
@@ -103,10 +109,10 @@ def test_user_text_that_looks_like_a_turn_note_still_injects_roster(tmp_path: Pa
         mw.wrap_model_call(_request(user=user), handler)
 
     applied = captured["request"]
-    assert applied.messages[0].content == user
-    assert not is_turn_note(applied.messages[0])
-    assert is_turn_note(applied.messages[1])
-    assert "data-analyst" in str(applied.messages[1].content)
+    assert applied.messages[1].content == user
+    assert not is_turn_note(applied.messages[1])
+    assert is_turn_note(applied.messages[0])
+    assert "data-analyst" in str(applied.messages[0].content)
 
 
 def test_wrap_model_call_skips_without_at_mention(tmp_path: Path) -> None:
@@ -154,7 +160,7 @@ def test_wrap_model_call_injects_roster_and_at_hint(tmp_path: Path) -> None:
 
     applied = captured["request"]
     assert applied.system_prompt == "base"
-    prompt = str(applied.messages[-1].content)
+    prompt = str(_note(applied.messages).content)
     assert prompt.startswith("[turn note]\n")
     assert prompt.strip().splitlines()[-1] == ("Use ask_agent with mode=sync and wait for the peer's answer.")
     assert "charts" in prompt
@@ -179,7 +185,7 @@ def test_wrap_model_call_zh_mentions_at_usage(tmp_path: Path) -> None:
         mw.wrap_model_call(_request(), handler)
 
     assert captured["request"].system_prompt == "base"
-    prompt = str(captured["request"].messages[-1].content)
+    prompt = str(_note(captured["request"].messages).content)
     assert "ask_agent" in prompt
     assert "@" in prompt
     assert "data-analyst" in prompt
@@ -248,7 +254,7 @@ def test_wrap_model_call_appends_without_flattening_blocks(tmp_path: Path) -> No
     blocks = captured["request"].system_message.content_blocks
     texts = [str(b.get("text", "")) for b in blocks if isinstance(b, dict)]
     assert texts == ["base", "skills block"]
-    note = str(captured["request"].messages[-1].content)
+    note = str(_note(captured["request"].messages).content)
     assert note.startswith("[turn note]\n")
     assert "data-analyst" in note
 
@@ -272,7 +278,7 @@ def test_wrap_model_call_uses_enriched_peer_cards(tmp_path: Path) -> None:
         mw.wrap_model_call(_request(), handler)
 
     assert captured["request"].system_prompt == "base"
-    prompt = str(captured["request"].messages[-1].content)
+    prompt = str(_note(captured["request"].messages).content)
     assert prompt.startswith("[turn note]\n")
     assert "Hot card" in prompt
     assert "Plot a trend" not in prompt
@@ -374,6 +380,6 @@ def test_middleware_request_team_peers_intersects_roster(tmp_path: Path) -> None
         mw.wrap_model_call(_request(), handler)
 
     assert captured["request"].system_prompt == "base"
-    prompt = str(captured["request"].messages[-1].content)
+    prompt = str(_note(captured["request"].messages).content)
     assert "researcher" in prompt
     assert "data-analyst" not in prompt

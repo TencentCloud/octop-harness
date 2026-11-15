@@ -1,15 +1,22 @@
-"""Request-only note placed after the user message for this turn.
+"""Request-only note placed just before this turn's user message.
 
 The note is not stored in graph state. Each model call writes it at the same
 index. Later injections append to that one message, so the system prompt and
 the earlier messages stay a cacheable prefix.
 
+The note sits *before* the user message so the request stays the last thing the
+model reads. A small local model (qwen3:8b) answers a trailing note instead of
+the user's request — with the skill catalog in the note it enumerates tools or
+runs ``execute`` regardless of what was asked. Measured on the same captured
+request: note after the user → 0/5 correct answers, note before the user →
+5/5. The prefix gained by moving it is the same either way, because the note is
+stable across the turn's model calls and the user message is the tail.
+
 The note role follows the model: ``system`` where the transport accepts a
 non-leading system message in place, ``user`` where it does not. Anthropic
 rejects a second non-consecutive system message unless the model profile opts
-in, and several local models drop the tool call when the note arrives as a
-second user message. A model without the capability stamp is assumed to accept
-an in-place system message, which is what the OpenAI protocol needs.
+in. A model without the capability stamp is assumed to accept an in-place
+system message, which is what the OpenAI protocol needs.
 """
 
 from __future__ import annotations
@@ -62,7 +69,7 @@ def _append_note(messages: list[Any], index: int, content: str) -> list[Any]:
 
 
 def insert_turn_note(messages: Sequence[Any], content: str, *, model: Any = None) -> list[Any]:
-    """Place ``content`` in the single note after this turn's user message.
+    """Place ``content`` in the single note just before this turn's user message.
 
     ``model`` only selects the note role; omit it to keep the default ``system``.
     """
@@ -82,8 +89,8 @@ def insert_turn_note(messages: Sequence[Any], content: str, *, model: Any = None
         role = None if not out else HumanMessage
         out.append(_turn_note_message(content, model, role=role))
         return out
-    insert_at = user_at + 1
-    if insert_at < len(out) and is_turn_note(out[insert_at]):
-        return _append_note(out, insert_at, content)
+    insert_at = user_at
+    if insert_at > 0 and is_turn_note(out[insert_at - 1]):
+        return _append_note(out, insert_at - 1, content)
     out.insert(insert_at, _turn_note_message(content, model))
     return out
