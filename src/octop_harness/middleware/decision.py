@@ -324,6 +324,7 @@ class _Work:
     member_keys: dict[str, frozenset[str]] = field(default_factory=dict)
     thread_key: str = ""
     turn_key: str = ""
+    text: str = ""
     asked_skills: list[str] = field(default_factory=list)
     asked_tools: list[str] = field(default_factory=list)
     asked_members: list[str] = field(default_factory=list)
@@ -461,11 +462,11 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
         self._pins.pop(thread_key, None)
         if not text:
             return None
-        work = _Work(thread_key=thread_key, turn_key=_turn_key(request))
-        cfg = self._config
         catalog_text = _followup_task(request) if _is_followup(request) else _user_history_text(request)
         if not catalog_text:
             catalog_text = _earlier_user_text(request) if _is_followup(request) else text
+        work = _Work(thread_key=thread_key, turn_key=_turn_key(request), text=catalog_text)
+        cfg = self._config
         if cfg.skills:
             self._collect_skills(request, catalog_text, work)
         if cfg.tools:
@@ -906,22 +907,68 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
             and (self._skills_rendered_late or _request_has_skill_region(request))
         )
 
-    def _kept_catalog(self, request: ModelRequest) -> _TurnFilter:
-        """Full catalog in the note when the decision service cannot be reached."""
+    def _kept_catalog(self, request: ModelRequest, text: str) -> _TurnFilter:
+        """Keyword-shortlist the catalog when the decision service is down.
+
+        Keeping every skill and tool puts the whole catalog in the turn note
+        (17.8 KB measured on a 24-skill agent), which crowds out the message the
+        chat model should act on. A lexical shortlist keeps the items this turn's
+        words overlap; no overlap leaves the catalog alone rather than hiding it
+        behind an arbitrary slice.
+        """
         rewrite = self._has_skill_catalog(request)
+        skills: set[str] | None = None
+        if rewrite:
+            skills = self._shortlist_skills(request, text)
         tools: set[str] | None = None
         if self._config.tools:
-            incoming = list(request.tools or [])
-            named = [name for tool in incoming if (name := _tool_name(tool))]
-            tail = _long_tail_names(incoming)
-            if len(named) > self._config.tool_min_count and tail:
-                tools = tail
-        return _TurnFilter(tools=tools, skills=None, rewrite_skills=rewrite)
+            tools = self._shortlist_tools(request, text)
+        return _TurnFilter(tools=tools, skills=skills, rewrite_skills=rewrite)
+
+    def _shortlist_skills(self, request: ModelRequest, text: str) -> set[str] | None:
+        raw = request.state.get("skills_metadata")
+        rows = [row for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
+        candidates = [
+            Candidate(
+                id=name,
+                label=name,
+                description=_clip(str(row.get("description") or ""), _BLURB_LIMIT),
+            )
+            for row in rows
+            if (name := str(row.get("name") or "").strip())
+        ]
+        if len(candidates) < 2:
+            return None
+        chosen = lexical_shortlist(candidates, text, limit=_CATALOG_LIMIT)
+        if chosen is None:
+            return None
+        return {item.id for item in chosen}
+
+    def _shortlist_tools(self, request: ModelRequest, text: str) -> set[str] | None:
+        incoming = list(request.tools or [])
+        named = [name for tool in incoming if (name := _tool_name(tool))]
+        tail = _long_tail_names(incoming)
+        if len(named) <= self._config.tool_min_count or not tail:
+            return None
+        candidates = [
+            Candidate(id=name, label=name, description=_clip(_tool_description(tool), _BLURB_LIMIT))
+            for tool in incoming
+            if (name := _tool_name(tool))
+            and _deferrable(tool)
+            and name not in _TOOLS_ALWAYS_KEPT
+            and name != _DEFERRED_TOOL_NAME
+        ]
+        if not candidates:
+            return tail
+        chosen = lexical_shortlist(candidates, text, limit=_CATALOG_LIMIT)
+        if chosen is None:
+            return tail
+        return {item.id for item in chosen}
 
     def _unavailable(self, request: ModelRequest, work: _Work, error: DecisionRequestError) -> ModelRequest:
         """Keep the catalog when the decision service cannot be reached."""
         self._publish(empty=True, parts=[], error="request_failed", detail=error.detail)
-        return self._commit(request, work.turn_key, self._kept_catalog(request))
+        return self._commit(request, work.turn_key, self._kept_catalog(request, work.text))
 
     def _publish(
         self,
