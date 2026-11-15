@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from octop_harness.messages import is_turn_note
 from octop_harness.usage import normalize_usage_metadata
 
 logger = logging.getLogger(__name__)
@@ -163,7 +164,9 @@ def conversation_tokens_from_messages(messages: list[Any]) -> int:
                 total += estimate_json_tokens(json.dumps(tool_calls, ensure_ascii=False, default=str))
             continue
         role = str(getattr(msg, "type", "") or "")
-        if role == "system":
+        # The per-turn note rides in as a system message but is conversation
+        # content, not the cached system prompt — count it.
+        if role == "system" and not is_turn_note(msg):
             continue
         total += content_tokens(getattr(msg, "content", "")) + _MESSAGE_FRAMING_TOKENS
         tool_calls = getattr(msg, "tool_calls", None)

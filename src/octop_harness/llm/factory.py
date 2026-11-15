@@ -932,6 +932,20 @@ def _stamp_native_tool_search_capability(
         object.__setattr__(instance, "_harness_tool_search_provider", provider)
 
 
+def _stamp_mid_conversation_system(instance: BaseChatModel) -> None:
+    """Record whether a non-leading system message is sent in place.
+
+    Anthropic only accepts one when the model profile opts in. Otherwise
+    langchain-anthropic hoists it into the top-level ``system`` field, and a
+    second system message raises ``Received multiple non-consecutive system
+    messages``. The per-turn note checks this before choosing its role.
+    """
+    profile = getattr(instance, "profile", None)
+    supported = bool(isinstance(profile, dict) and profile.get("mid_conversation_system_messages"))
+    with contextlib.suppress(AttributeError, TypeError):
+        object.__setattr__(instance, "_harness_mid_conversation_system_messages", supported)
+
+
 def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
     try:
         from langchain_anthropic import ChatAnthropic
@@ -960,6 +974,7 @@ def _build_anthropic(provider: ProviderConfig, model: ModelConfig, *, max_retrie
     if provider.session_header:
         bind_anthropic_session_header(instance_a, provider.session_header)
     _stamp_native_tool_search_capability(instance_a, provider.protocol, model.native_tool_search)
+    _stamp_mid_conversation_system(instance_a)
     _inject_model_token_limits(instance_a, model)
     return instance_a
 
@@ -988,6 +1003,9 @@ def _build_bedrock(provider: ProviderConfig, model: ModelConfig, *, max_retries:
         config_kwargs["retries"] = {"total_max_attempts": max_retries + 1}
     kwargs["config"] = Config(**config_kwargs)
     instance_b: BaseChatModel = ChatBedrockConverse(**kwargs)
+    # Converse has no in-place system message: every SystemMessage is folded
+    # into the top-level ``system`` field, so the note stays a user message.
+    _stamp_mid_conversation_system(instance_b)
     _inject_model_token_limits(instance_b, model)
     return instance_b
 

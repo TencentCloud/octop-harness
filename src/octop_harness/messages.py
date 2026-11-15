@@ -15,6 +15,11 @@ CHECKPOINT_TS_KEY = "checkpoint_ts"
 # Inbox jobs treat this as a failed peer task so the source agent sees the error.
 MODEL_RETRY_FAILURE_MARK = "[model_call_failed]"
 
+# Flag in ``additional_kwargs`` marking the per-turn note injected after the
+# user message (see :mod:`octop_harness.middleware.turn_note`). The visible
+# ``[turn note]`` prefix is display text only — identity lives here.
+TURN_NOTE_KEY = "_octop_turn_note"
+
 
 def message_role(msg: Any) -> str:  # noqa: PLR0911
     if isinstance(msg, dict):
@@ -67,11 +72,19 @@ def is_model_retry_failure_text(text: str | None) -> bool:
     return text is not None and MODEL_RETRY_FAILURE_MARK in text
 
 
+def is_turn_note(message: Any) -> bool:
+    """True for the per-turn note, whatever role it was sent under."""
+    kwargs = getattr(message, "additional_kwargs", None)
+    return isinstance(kwargs, dict) and kwargs.get(TURN_NOTE_KEY) is True
+
+
 __all__ = [
     "CHECKPOINT_TS_KEY",
     "MODEL_RETRY_FAILURE_MARK",
+    "TURN_NOTE_KEY",
     "extract_call_response",
     "is_model_retry_failure_text",
+    "is_turn_note",
     "message_content",
     "message_role",
 ]

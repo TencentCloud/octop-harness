@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 本轮说明（决策、对话模式、peer 注入的回合级提示）改用 `system` 角色发送，并移到用户消息**之前**。两个改动缺一不可：qwen3:8b 在说明作为第二条 user 消息出现时会丢弃工具调用；改用 system 后工具调用恢复，但说明仍留在用户消息之后时模型转而回答说明本身（技能清单会让它枚举工具或反复调用 `execute`），用户请求被忽略。同一份抓包请求实测：说明在用户消息之后 → 答对用户请求 0/5；说明在用户消息之前 → 5/5。移到之前同样保持可缓存前缀，因为说明在本轮各次模型调用间不变、用户消息始终是末条。不支持回合中 system 消息的 Anthropic 模型（profile 未开启 `mid_conversation_system_messages`，如 `claude-sonnet-4-5`）仍用 user 角色，避免 langchain-anthropic 抛出 `Received multiple non-consecutive system messages`。
+
 ## [1.0.9] - 2026-11-10
 
 ### 新增

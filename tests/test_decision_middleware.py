@@ -1128,6 +1128,49 @@ def test_turn_notes_merge_into_one_message() -> None:
     assert isinstance(twice[2], AIMessage)
 
 
+class _TurnNoteModel:
+    """Stand-in for a routed model carrying the harness capability stamp."""
+
+    def __init__(self, mid_conversation_system: bool) -> None:
+        self._harness_mid_conversation_system_messages = mid_conversation_system
+
+
+def test_turn_note_role_follows_the_model_capability() -> None:
+    from octop_harness.middleware.turn_note import insert_turn_note, is_turn_note
+
+    base = [SystemMessage(content="base"), HumanMessage(content="hi")]
+    legacy = insert_turn_note(base, "[turn note]\nroster", model=_TurnNoteModel(False))
+    capable = insert_turn_note(base, "[turn note]\nroster", model=_TurnNoteModel(True))
+
+    legacy_note = next(msg for msg in legacy if is_turn_note(msg))
+    capable_note = next(msg for msg in capable if is_turn_note(msg))
+    assert isinstance(legacy_note, HumanMessage)
+    assert isinstance(capable_note, SystemMessage)
+    # The note leads the user message so the request stays last.
+    assert legacy[-1].content == "hi" and capable[-1].content == "hi"
+    merged = insert_turn_note(capable, "[本轮说明]\n技能:\npdf", model=_TurnNoteModel(True))
+    notes = [msg for msg in merged if is_turn_note(msg)]
+    assert len(notes) == 1
+    assert isinstance(notes[0], SystemMessage)
+    assert "roster" in notes[0].content and "pdf" in notes[0].content
+
+
+def test_turn_note_without_a_user_message_is_not_a_trailing_system_message() -> None:
+    """With no user message to follow, a system note would be non-consecutive."""
+    from octop_harness.middleware.turn_note import insert_turn_note, is_turn_note
+
+    after_ai = insert_turn_note(
+        [SystemMessage(content="base"), AIMessage(content="hello")],
+        "[turn note]\nnote",
+        model=_TurnNoteModel(True),
+    )
+    assert isinstance(after_ai[-1], HumanMessage)
+    assert is_turn_note(after_ai[-1])
+
+    empty = insert_turn_note([], "[turn note]\nnote", model=_TurnNoteModel(True))
+    assert isinstance(empty[-1], SystemMessage)
+
+
 def test_user_message_prefixed_like_a_turn_note_is_still_scored() -> None:
     from octop_harness.middleware.turn_note import is_turn_note
 
@@ -1137,14 +1180,14 @@ def test_user_message_prefixed_like_a_turn_note_is_still_scored() -> None:
     mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
     user = HumanMessage(content="[turn note]\n读取 pdf")
     out = mw.wrap_model_call(_request(tools=tools, messages=[user]), lambda item: item)
-    assert out.messages[0] is user
-    assert not is_turn_note(out.messages[0])
-    assert is_turn_note(out.messages[1])
-    assert "read_pdf" in str(out.messages[1].content)
+    assert out.messages[1] is user
+    assert not is_turn_note(out.messages[1])
+    assert is_turn_note(out.messages[0])
+    assert "read_pdf" in str(out.messages[0].content)
     assert scorer.calls == 1
 
 
-def test_turn_note_stays_after_the_user_message() -> None:
+def test_turn_note_precedes_the_user_message() -> None:
     tools = [_tool("read_file", "读取文件"), *(_tool(f"misc_{index}", "unrelated") for index in range(8))]
     tools.append(_tool("read_pdf", "读取 pdf"))
     scorer = _Scorer({"tool:read_pdf": 0.95})
@@ -1162,12 +1205,36 @@ def test_turn_note_stays_after_the_user_message() -> None:
         ),
         lambda item: item,
     )
-    assert first.messages[0].content == "读取 pdf"
-    assert first.messages[1].content == second.messages[1].content
-    assert "read_pdf" in second.messages[1].content
+    assert first.messages[1].content == "读取 pdf"
+    assert first.messages[0].content == second.messages[0].content
+    assert "read_pdf" in second.messages[0].content
+    assert isinstance(second.messages[1], HumanMessage)
     assert isinstance(second.messages[2], AIMessage)
     assert isinstance(second.messages[3], ToolMessage)
     assert scorer.calls == 1
+
+
+def test_turn_note_never_trailing_the_user_message() -> None:
+    """The request must be the last thing the model reads.
+
+    qwen3:8b answers a trailing note instead of the user's request, so every
+    injection path has to keep the user message at the tail.
+    """
+    from octop_harness.middleware.turn_note import insert_turn_note, is_turn_note
+
+    user = HumanMessage(content="读取 pdf")
+    history = [SystemMessage(content="base"), user]
+    for content in ("[turn note]\nroster", "[本轮说明]\n技能:\npdf", "[turn note]\nmode"):
+        history = insert_turn_note(history, content)
+    assert history[-1] is user
+    notes = [msg for msg in history if is_turn_note(msg)]
+    assert len(notes) == 1
+    assert notes[0] is history[1]
+    assert "roster" in notes[0].content and "pdf" in notes[0].content and "mode" in notes[0].content
+
+    # A later assistant turn must not push the note back past the request.
+    replied = [*history, AIMessage(content="先看一下")]
+    assert insert_turn_note(replied, "[turn note]\nmore")[-1].content == "先看一下"
 
 
 def test_deferred_tool_call_forwards_to_the_selected_tool() -> None:

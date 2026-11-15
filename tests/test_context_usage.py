@@ -437,3 +437,13 @@ def test_conversation_tokens_include_message_framing() -> None:
     two = conversation_tokens_from_messages([HumanMessage(content="hi"), HumanMessage(content="hi")])
     assert two - one == one  # same per-message cost, framing included
     assert one > estimate_tokens("hi")
+
+
+def test_conversation_tokens_count_a_system_role_turn_note() -> None:
+    """The note is conversation content even when it rides in as a system message."""
+    from octop_harness.middleware.turn_note import insert_turn_note
+
+    plain = [SystemMessage(content="base"), HumanMessage(content="hi")]
+    noted = insert_turn_note(plain, "[turn note]\n" + "note " * 200)
+    baseline = conversation_tokens_from_messages(plain)
+    assert conversation_tokens_from_messages(noted) > baseline
