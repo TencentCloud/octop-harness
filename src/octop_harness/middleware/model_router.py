@@ -13,6 +13,7 @@ Priority chain (per design doc §3.4), highest first:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -22,7 +23,12 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 
-from octop_harness.api_key_scope import current_api_key_override
+from octop_harness.api_key_scope import (
+    API_KEY_OVERRIDE_PROVIDER_KEY,
+    current_api_key_override,
+    current_api_key_override_provider,
+    normalize_api_key_override_provider,
+)
 from octop_harness.config import HarnessAgentConfig, ModelSelector
 from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.middleware.runtime import runtime_config
@@ -31,6 +37,8 @@ from octop_harness.middleware.turn_model import (
     latest_human_needs_multimodal,
     resolve_turn_model_ref,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ModelRouterMiddleware(AgentMiddleware[Any, Any]):
@@ -67,13 +75,13 @@ class ModelRouterMiddleware(AgentMiddleware[Any, Any]):
 
     def _select_model(self, request: ModelRequest) -> Any:
         ref = self._select_ref(request)
-        api_key_override = self._api_key_override(request)
+        api_key_override = self._api_key_override(request, ref)
         if self._get_protocol is not None:
             return self._factory.get(ref, get_protocol=self._get_protocol, api_key_override=api_key_override).chat_model
         return self._factory.get_chat_model(ref, api_key_override=api_key_override)
 
     @staticmethod
-    def _api_key_override(request: ModelRequest) -> str | None:
+    def _api_key_override(request: ModelRequest, ref: str) -> str | None:
         """Per-call credential override (e.g. a per-user gateway key).
 
         A literal ``configurable["api_key_override"]`` wins when present
@@ -81,13 +89,18 @@ class ModelRouterMiddleware(AgentMiddleware[Any, Any]):
         read from the :mod:`octop_harness.api_key_scope` binding — the
         ``ChatRequest`` path keeps keys out of ``configurable`` because
         langgraph copies those values into checkpoint metadata.
+
+        A provider tag scopes the key to one provider: when the selected ref
+        belongs to another provider the override is dropped (the factory falls
+        back to that provider's static key), so a host's per-provider key is
+        never sent to a different endpoint.
         """
         configurable = runtime_config(request).get("configurable")
         if isinstance(configurable, dict):
             value = configurable.get("api_key_override")
             if isinstance(value, str) and value:
-                return value
-        return current_api_key_override()
+                return _scoped_override(value, configurable.get(API_KEY_OVERRIDE_PROVIDER_KEY), ref)
+        return _scoped_override(current_api_key_override(), current_api_key_override_provider(), ref)
 
     def _select_ref(self, request: ModelRequest) -> str:
         runtime_config_value = runtime_config(request)
@@ -109,6 +122,17 @@ class ModelRouterMiddleware(AgentMiddleware[Any, Any]):
         if ref:
             configurable["model"] = ref
         return ref
+
+
+def _scoped_override(key: str | None, provider: object, ref: str) -> str | None:
+    """Return *key* unless it is scoped to a provider other than *ref*'s."""
+    if not key:
+        return None
+    scope = normalize_api_key_override_provider(provider)
+    if scope is not None and ref.partition("/")[0] != scope:
+        logger.warning("Ignoring api_key_override scoped to provider %r for model ref %r", scope, ref)
+        return None
+    return key
 
 
 def _request_needs_multimodal(request: ModelRequest) -> bool:

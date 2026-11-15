@@ -12,11 +12,15 @@ from typing_extensions import TypedDict
 
 from octop_harness.api_key_scope import (
     api_key_override_from,
+    api_key_override_provider_from,
     api_key_override_scope,
     bind_api_key_override,
     current_api_key_override,
+    current_api_key_override_provider,
     normalize_api_key_override,
+    normalize_api_key_override_provider,
     take_api_key_override,
+    take_api_key_override_provider,
 )
 from octop_harness.request import ChatRequest
 
@@ -43,6 +47,14 @@ class TestNormalize:
         assert normalize_api_key_override(None) is None
         assert normalize_api_key_override(42) is None
 
+    def test_provider_is_stripped_and_blank_rejected(self) -> None:
+        assert normalize_api_key_override_provider("deepseek") == "deepseek"
+        assert normalize_api_key_override_provider("  deepseek ") == "deepseek"
+        assert normalize_api_key_override_provider("   ") is None
+        assert normalize_api_key_override_provider("") is None
+        assert normalize_api_key_override_provider(None) is None
+        assert normalize_api_key_override_provider(42) is None
+
 
 class TestConfigurableHelpers:
     def test_from_reads_without_mutation(self) -> None:
@@ -59,6 +71,17 @@ class TestConfigurableHelpers:
         assert take_api_key_override({"api_key_override": ""}) is None
         assert take_api_key_override({}) is None
 
+    def test_provider_from_reads_without_mutation(self) -> None:
+        cfg = {"api_key_override_provider": "p", "thread_id": "t"}
+        assert api_key_override_provider_from(cfg) == "p"
+        assert cfg == {"api_key_override_provider": "p", "thread_id": "t"}
+
+    def test_take_provider_pops_the_tag(self) -> None:
+        cfg = {"api_key_override_provider": " p ", "thread_id": "t"}
+        assert take_api_key_override_provider(cfg) == "p"
+        assert cfg == {"thread_id": "t"}
+        assert take_api_key_override_provider({}) is None
+
 
 class TestScopeBinding:
     def test_scope_sets_and_resets(self) -> None:
@@ -74,18 +97,39 @@ class TestScopeBinding:
             bind_api_key_override(None)
             assert current_api_key_override() is None
 
+    def test_scope_carries_and_restores_provider(self) -> None:
+        with api_key_override_scope("sk-scope", provider="p"):
+            assert current_api_key_override() == "sk-scope"
+            assert current_api_key_override_provider() == "p"
+        assert current_api_key_override() is None
+        assert current_api_key_override_provider() is None
+
+    def test_rebind_clears_a_stale_provider(self) -> None:
+        with api_key_override_scope(None):
+            bind_api_key_override("sk-sticky", provider="p")
+            assert current_api_key_override_provider() == "p"
+            bind_api_key_override(None)
+            assert current_api_key_override() is None
+            assert current_api_key_override_provider() is None
+
 
 class TestRunnableConfigNeverCarriesTheKey:
     def test_configurable_key_is_stripped(self) -> None:
         req = ChatRequest(
             messages="hi",
             thread_id="t1",
-            configurable={"api_key_override": CANARY, "locale": "zh"},
+            configurable={
+                "api_key_override": CANARY,
+                "api_key_override_provider": "p",
+                "locale": "zh",
+            },
         )
         config = req.to_runnable_config()
         assert "api_key_override" not in config["configurable"]
+        assert "api_key_override_provider" not in config["configurable"]
         # The seam stays readable on the request itself for scope binding.
         assert api_key_override_from(req.configurable) == CANARY
+        assert api_key_override_provider_from(req.configurable) == "p"
         assert config["configurable"]["locale"] == "zh"
 
 

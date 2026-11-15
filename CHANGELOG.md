@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 新增
 
 - MiniMax（国内站 / 国际站）供应商预设加入 MiniMax-M3 和 MiniMax-M3.1-Flash，上下文 1M，原生多模态。
+- `configurable["api_key_override_provider"]`（可选）把按调用传入的 Key 限定到指定供应商：本轮路由到其他供应商时不再沿用该 Key，而是回退该供应商自己的静态 Key，避免个人密钥被发往别家端点。未设置该标签时保持原有「一把 Key 通用于所有供应商」的网关语义。
 
 ### 变更
 

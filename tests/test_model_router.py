@@ -341,3 +341,86 @@ class TestApiKeyOverride:
         ):
             mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
         mock_get.assert_called_once_with("p/text", api_key_override="sk-explicit")
+
+    def test_scoped_override_applies_to_matching_provider(
+        self,
+        cfg: HarnessAgentConfig,
+        factory_with_sentinels: tuple[ChatModelFactory, dict[str, object]],
+    ) -> None:
+        factory, sentinels = factory_with_sentinels
+        mw = ModelRouterMiddleware(cfg, factory)
+        req = FakeModelRequest(
+            messages=[HumanMessage(content="hi")],
+            runtime=FakeRuntime(config={"configurable": {"model": "p/text"}}),
+        )
+        with (
+            api_key_override_scope("sk-scoped", provider="p"),
+            patch.object(factory, "get_chat_model", return_value=sentinels["p/text"]) as mock_get,
+        ):
+            mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
+        mock_get.assert_called_once_with("p/text", api_key_override="sk-scoped")
+
+    def test_scoped_override_dropped_for_another_provider(
+        self,
+        cfg: HarnessAgentConfig,
+        factory_with_sentinels: tuple[ChatModelFactory, dict[str, object]],
+    ) -> None:
+        """A key scoped to another provider must not reach the selected endpoint."""
+        factory, sentinels = factory_with_sentinels
+        mw = ModelRouterMiddleware(cfg, factory)
+        req = FakeModelRequest(
+            messages=[HumanMessage(content="hi")],
+            runtime=FakeRuntime(config={"configurable": {"model": "p/text"}}),
+        )
+        with (
+            api_key_override_scope("sk-scoped", provider="q"),
+            patch.object(factory, "get_chat_model", return_value=sentinels["p/text"]) as mock_get,
+        ):
+            mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
+        mock_get.assert_called_once_with("p/text", api_key_override=None)
+
+    def test_configurable_provider_tag_enforced(
+        self,
+        cfg: HarnessAgentConfig,
+        factory_with_sentinels: tuple[ChatModelFactory, dict[str, object]],
+    ) -> None:
+        factory, sentinels = factory_with_sentinels
+        mw = ModelRouterMiddleware(cfg, factory)
+        req = FakeModelRequest(
+            messages=[HumanMessage(content="hi")],
+            runtime=FakeRuntime(
+                config={
+                    "configurable": {
+                        "model": "p/text",
+                        "api_key_override": "sk-explicit",
+                        "api_key_override_provider": "q",
+                    }
+                }
+            ),
+        )
+        with patch.object(factory, "get_chat_model", return_value=sentinels["p/text"]) as mock_get:
+            mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
+        mock_get.assert_called_once_with("p/text", api_key_override=None)
+
+    def test_configurable_provider_tag_matches(
+        self,
+        cfg: HarnessAgentConfig,
+        factory_with_sentinels: tuple[ChatModelFactory, dict[str, object]],
+    ) -> None:
+        factory, sentinels = factory_with_sentinels
+        mw = ModelRouterMiddleware(cfg, factory)
+        req = FakeModelRequest(
+            messages=[HumanMessage(content="hi")],
+            runtime=FakeRuntime(
+                config={
+                    "configurable": {
+                        "model": "p/text",
+                        "api_key_override": "sk-explicit",
+                        "api_key_override_provider": " p ",
+                    }
+                }
+            ),
+        )
+        with patch.object(factory, "get_chat_model", return_value=sentinels["p/text"]) as mock_get:
+            mw.wrap_model_call(req, _identity_handler)  # type: ignore[arg-type]
+        mock_get.assert_called_once_with("p/text", api_key_override="sk-explicit")

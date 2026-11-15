@@ -21,6 +21,7 @@ from langchain.agents.middleware import PIIMiddleware
 
 from octop_harness.api_key_scope import (
     api_key_override_from,
+    api_key_override_provider_from,
     api_key_override_scope,
     bind_api_key_override,
 )
@@ -219,6 +220,8 @@ class HarnessAgent:
         # Per-call API key for paused threads; rides alongside
         # ``_hitl_resume_configs`` (which carries the key-free run config).
         self._hitl_resume_api_keys: dict[str, str | None] = {}
+        # Provider the paused key is scoped to, if the host tagged it.
+        self._hitl_resume_api_key_providers: dict[str, str | None] = {}
         # Optional hook called once immediately after bootstrap completes.
         # Set by the caller (e.g. Orca) to trigger a full config reload.
         self.on_bootstrap_complete: Callable[[], None] | None = None
@@ -539,6 +542,7 @@ class HarnessAgent:
                 self._cancel_events[thread_id] = cancel_event
                 self._hitl_resume_configs.pop(thread_id, None)
                 self._hitl_resume_api_keys.pop(thread_id, None)
+                self._hitl_resume_api_key_providers.pop(thread_id, None)
             try:
                 with session_header_scope(prepared.thread_id):
                     async with contextlib.aclosing(
@@ -554,6 +558,9 @@ class HarnessAgent:
                                     "configurable": deepcopy(config["configurable"]),
                                 }
                                 self._hitl_resume_api_keys[thread_id] = api_key_override_from(prepared.configurable)
+                                self._hitl_resume_api_key_providers[thread_id] = api_key_override_provider_from(
+                                    prepared.configurable
+                                )
                             yield chunk
             finally:
                 if thread_id:
@@ -599,7 +606,13 @@ class HarnessAgent:
         config["configurable"] = deepcopy(config["configurable"])
         paused = False
         async with self._invocation():
-            with session_header_scope(thread_id), api_key_override_scope(self._hitl_resume_api_keys.get(thread_id)):
+            with (
+                session_header_scope(thread_id),
+                api_key_override_scope(
+                    self._hitl_resume_api_keys.get(thread_id),
+                    provider=self._hitl_resume_api_key_providers.get(thread_id),
+                ),
+            ):
                 async with contextlib.aclosing(resume_stream(thread_id, decisions, config)) as chunks:
                     async for chunk in chunks:
                         if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
@@ -608,6 +621,7 @@ class HarnessAgent:
         if not paused:
             self._hitl_resume_configs.pop(thread_id, None)
             self._hitl_resume_api_keys.pop(thread_id, None)
+            self._hitl_resume_api_key_providers.pop(thread_id, None)
 
     async def stream_events(
         self,
@@ -1060,6 +1074,7 @@ class HarnessAgent:
             return
         self._hitl_resume_configs.clear()
         self._hitl_resume_api_keys.clear()
+        self._hitl_resume_api_key_providers.clear()
         if self._owns_model_factory:
             self._model_factory.close()
         self._memory_runtime.close()
@@ -1079,6 +1094,7 @@ class HarnessAgent:
             return
         self._hitl_resume_configs.clear()
         self._hitl_resume_api_keys.clear()
+        self._hitl_resume_api_key_providers.clear()
         if self._owns_model_factory:
             await self._model_factory.aclose()
         self._memory_runtime.close()
@@ -2004,12 +2020,15 @@ class HarnessAgent:
         """Normalize a request into ``(messages, config, protocol)``.
 
         Shared by ``call`` / ``stream`` / ``stream_events``. Also binds the
-        request's per-call API key to the task scope (see
-        :mod:`octop_harness.api_key_scope`) so it never has to ride in the
-        graph config.
+        request's per-call API key (and its optional provider scope) to the
+        task scope (see :mod:`octop_harness.api_key_scope`) so it never has to
+        ride in the graph config.
         """
         req = ChatRequest.coerce(request)
-        bind_api_key_override(api_key_override_from(req.configurable))
+        bind_api_key_override(
+            api_key_override_from(req.configurable),
+            provider=api_key_override_provider_from(req.configurable),
+        )
         return req.normalize_messages(), req.to_runnable_config(), self._get_protocol(protocol)
 
     def _get_protocol(self, name: str | None) -> ChatProtocol:
