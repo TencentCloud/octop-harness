@@ -491,6 +491,81 @@ def _mark_api_fallback_chunk(chunk: Any) -> Any:
     return chunk
 
 
+def _chunk_without_usage(chunk: Any) -> Any:
+    """Drop token usage from a non-final stream chunk.
+
+    OpenAI-compatible streams report a cumulative total, and only the final
+    chunk is supposed to carry it. Gateways that repeat that total on every
+    chunk make ``AIMessageChunk`` addition multiply ``input_tokens`` by the
+    chunk count, and ``response_metadata`` merges sum nested usage integers
+    the same way. Intermediate chunks keep their text and tool calls.
+    """
+    message = getattr(chunk, "message", None)
+    if message is None:
+        return chunk
+    usage = getattr(message, "usage_metadata", None)
+    response_metadata = getattr(message, "response_metadata", None)
+    wire = response_metadata if isinstance(response_metadata, dict) else {}
+    has_wire = bool(wire.get("token_usage") or wire.get("usage"))
+    if not usage and not has_wire:
+        return chunk
+    updates: dict[str, Any] = {}
+    if usage:
+        updates["usage_metadata"] = None
+    if has_wire:
+        cleaned = dict(wire)
+        cleaned.pop("token_usage", None)
+        cleaned.pop("usage", None)
+        updates["response_metadata"] = cleaned
+    if not updates or not hasattr(message, "model_copy"):
+        return chunk
+    new_message = message.model_copy(update=updates)
+    if hasattr(chunk, "model_copy"):
+        return chunk.model_copy(update={"message": new_message})
+    return chunk
+
+
+def _iter_final_chunk_usage(chunks: Iterator[Any]) -> Iterator[Any]:
+    """Yield stream chunks with usage retained only on the last one.
+
+    On a mid-stream error the buffered chunk is flushed with its usage so
+    already-received text is not dropped. That usage is the last cumulative
+    total seen before the failure.
+    """
+    pending: Any | None = None
+    try:
+        for chunk in chunks:
+            if pending is not None:
+                yield _chunk_without_usage(pending)
+            pending = chunk
+        if pending is not None:
+            final = pending
+            pending = None
+            yield final
+    except Exception:
+        if pending is not None:
+            yield pending
+        raise
+
+
+async def _aiter_final_chunk_usage(chunks: AsyncIterator[Any]) -> AsyncIterator[Any]:
+    """Async form of :func:`_iter_final_chunk_usage`."""
+    pending: Any | None = None
+    try:
+        async for chunk in chunks:
+            if pending is not None:
+                yield _chunk_without_usage(pending)
+            pending = chunk
+        if pending is not None:
+            final = pending
+            pending = None
+            yield final
+    except Exception:
+        if pending is not None:
+            yield pending
+        raise
+
+
 def _fallback_model_for(instance: Any, exc: BaseException, kwargs: Mapping[str, Any]) -> Any | None:
     fallback = getattr(instance, "_harness_api_fallback_model", None)
     if fallback is None or not _request_allows_chat_completions_fallback(kwargs):
@@ -648,6 +723,10 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 
     No module-level helpers are mutated, so the subclass is safe under
     concurrent use.
+
+    Streaming keeps usage on the final chunk only. Official streams already
+    look like that; gateways that attach a cumulative total to every chunk
+    otherwise inflate token counts when the chunks are added together.
     """
     cached = _REASONING_AWARE_CHAT_OPENAI.get(id(base_cls))
     if cached is not None:
@@ -677,20 +756,22 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
         def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
             yielded = False
             try:
-                for chunk in super()._stream(*args, **kwargs):
+                for chunk in _iter_final_chunk_usage(super()._stream(*args, **kwargs)):
                     yielded = True
                     yield chunk
             except Exception as exc:
                 fallback = None if yielded else _fallback_model_for(self, exc, kwargs)
                 if fallback is None:
                     raise
+                # Fallback is the same subclass, so its own ``_stream`` keeps
+                # usage on the final chunk as well.
                 for chunk in fallback._stream(*args, **kwargs):
                     yield _mark_api_fallback_chunk(chunk)
 
         async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
             yielded = False
             try:
-                async for chunk in super()._astream(*args, **kwargs):
+                async for chunk in _aiter_final_chunk_usage(super()._astream(*args, **kwargs)):
                     yielded = True
                     yield chunk
             except Exception as exc:

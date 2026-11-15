@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import BaseMessage
+
+if TYPE_CHECKING:
+    from langgraph.types import Durability
 
 
 class ChatProtocol(ABC):
@@ -26,7 +29,9 @@ class ChatProtocol(ABC):
         ...
 
     @abstractmethod
-    async def call(self, messages: list[BaseMessage], config: dict[str, Any]) -> dict[str, Any]:
+    async def call(
+        self, messages: list[BaseMessage], config: dict[str, Any], *, durability: Durability | None = None
+    ) -> dict[str, Any]:
         """Execute a single non-streaming call through the graph."""
         ...
 

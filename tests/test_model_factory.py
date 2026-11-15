@@ -933,3 +933,174 @@ class TestChatModelFactoryApiKeyOverride:
         assert instance is not None
         # Non-empty placeholder — never "" (SDK env fallback) and never a real key.
         assert mock_init.call_args.kwargs["api_key"] == "no-api-key"
+
+
+class TestRetainFinalStreamUsage:
+    """Cumulative usage on every chunk must survive as the final total only."""
+
+    def _build(self) -> Any:
+        return build_chat_model(
+            ProviderConfig(
+                id="example",
+                base_url="https://api.example.com/v1",
+                api_key="sk-test",
+                protocol="openai",
+            ),
+            ModelConfig(id="demo"),
+        )
+
+    def test_intermediate_chunks_lose_usage_final_keeps_it(self) -> None:
+        from langchain_core.messages import AIMessageChunk, HumanMessage
+        from langchain_core.outputs import ChatGenerationChunk
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+
+        def fake_stream(model: Any, *_args: Any, **_kwargs: Any) -> Any:
+            del model
+            for text, out_tokens in (("Hel", 1), ("lo", 2), ("!", 3)):
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=text,
+                        usage_metadata={
+                            "input_tokens": 10,
+                            "output_tokens": out_tokens,
+                            "total_tokens": 10 + out_tokens,
+                        },
+                        response_metadata={
+                            "token_usage": {"prompt_tokens": 10, "completion_tokens": out_tokens},
+                            "model_name": "demo",
+                        },
+                    )
+                )
+
+        with patch.object(ChatOpenAI, "_stream", new=fake_stream):
+            chunks = list(instance._stream([HumanMessage(content="ping")]))
+
+        assert len(chunks) == 3
+        assert chunks[0].message.usage_metadata is None
+        assert "token_usage" not in chunks[0].message.response_metadata
+        assert chunks[0].message.response_metadata["model_name"] == "demo"
+        assert chunks[1].message.usage_metadata is None
+        assert chunks[2].message.usage_metadata == {
+            "input_tokens": 10,
+            "output_tokens": 3,
+            "total_tokens": 13,
+        }
+        assert chunks[2].message.response_metadata["token_usage"] == {
+            "prompt_tokens": 10,
+            "completion_tokens": 3,
+        }
+        merged = chunks[0].message + chunks[1].message + chunks[2].message
+        assert merged.usage_metadata == {
+            "input_tokens": 10,
+            "output_tokens": 3,
+            "total_tokens": 13,
+        }
+        assert merged.response_metadata["token_usage"] == {
+            "prompt_tokens": 10,
+            "completion_tokens": 3,
+        }
+        assert merged.content == "Hello!"
+
+    @pytest.mark.asyncio
+    async def test_async_stream_retains_final_usage(self) -> None:
+        from langchain_core.messages import AIMessageChunk, HumanMessage
+        from langchain_core.outputs import ChatGenerationChunk
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+
+        async def fake_astream(model: Any, *_args: Any, **_kwargs: Any) -> Any:
+            del model
+            for text, out_tokens in (("a", 1), ("b", 2)):
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=text,
+                        usage_metadata={
+                            "input_tokens": 7,
+                            "output_tokens": out_tokens,
+                            "total_tokens": 7 + out_tokens,
+                        },
+                    )
+                )
+
+        with patch.object(ChatOpenAI, "_astream", new=fake_astream):
+            chunks = [chunk async for chunk in instance._astream([HumanMessage(content="ping")])]
+
+        assert chunks[0].message.usage_metadata is None
+        assert chunks[1].message.usage_metadata == {
+            "input_tokens": 7,
+            "output_tokens": 2,
+            "total_tokens": 9,
+        }
+        merged = chunks[0].message + chunks[1].message
+        assert merged.usage_metadata["input_tokens"] == 7
+        assert merged.content == "ab"
+
+    def test_single_chunk_keeps_usage(self) -> None:
+        from langchain_core.messages import AIMessageChunk, HumanMessage
+        from langchain_core.outputs import ChatGenerationChunk
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+        usage = {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5}
+
+        def fake_stream(model: Any, *_args: Any, **_kwargs: Any) -> Any:
+            del model
+            yield ChatGenerationChunk(message=AIMessageChunk(content="ok", usage_metadata=usage))
+
+        with patch.object(ChatOpenAI, "_stream", new=fake_stream):
+            chunks = list(instance._stream([HumanMessage(content="ping")]))
+
+        assert len(chunks) == 1
+        assert chunks[0].message.usage_metadata == usage
+
+    def test_stream_error_flushes_buffered_chunk(self) -> None:
+        from langchain_core.messages import AIMessageChunk, HumanMessage
+        from langchain_core.outputs import ChatGenerationChunk
+        from langchain_openai import ChatOpenAI
+
+        instance = self._build()
+
+        def fake_stream(model: Any, *_args: Any, **_kwargs: Any) -> Any:
+            del model
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="partial",
+                    usage_metadata={"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+                )
+            )
+            raise RuntimeError("boom")
+
+        seen: list[Any] = []
+        with (
+            patch.object(ChatOpenAI, "_stream", new=fake_stream),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            for chunk in instance._stream([HumanMessage(content="ping")]):
+                seen.append(chunk)
+
+        assert len(seen) == 1
+        assert seen[0].message.content == "partial"
+        assert seen[0].message.usage_metadata["input_tokens"] == 3
+
+    def test_chunk_without_usage_strips_wire_usage(self) -> None:
+        from langchain_core.messages import AIMessageChunk
+        from langchain_core.outputs import ChatGenerationChunk
+
+        from octop_harness.llm.factory import _chunk_without_usage
+
+        chunk = ChatGenerationChunk(
+            message=AIMessageChunk(
+                content="x",
+                usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                response_metadata={"token_usage": {"prompt_tokens": 1}, "model_name": "demo"},
+            )
+        )
+        cleaned = _chunk_without_usage(chunk)
+        assert cleaned.message.usage_metadata is None
+        assert "token_usage" not in cleaned.message.response_metadata
+        assert cleaned.message.response_metadata["model_name"] == "demo"
+        assert cleaned.message.content == "x"
+        assert chunk.message.usage_metadata is not None

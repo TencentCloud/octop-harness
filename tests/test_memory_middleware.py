@@ -609,6 +609,91 @@ class TestIdleMaintenance:
         monkeypatch.delenv("OCTOP_CHECKPOINT_KEEP_DAYS", raising=False)
         assert _checkpoint_retention_from_env() == (20, None)
 
+    def test_maintenance_prunes_completed_sqlite_threads_on_timer(
+        self, service: _SpyService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from langgraph.checkpoint.base import create_checkpoint, empty_checkpoint
+        from octop_memory import Memory
+        from octop_memory.pipeline import lifecycle
+
+        for suffix in ("RETENTION", "KEEP_LAST", "KEEP_DAYS", "BACKUP_BEFORE_PRUNE", "VACUUM"):
+            monkeypatch.delenv(f"OCTOP_CHECKPOINT_{suffix}", raising=False)
+        path = tmp_path / "memory.sqlite"
+        memory = Memory("test", backend_config={"db_path": str(path)})
+        service.memory = memory  # type: ignore[attr-defined]
+        for thread in ("completed", "pending", "interrupted"):
+            config: dict[str, Any] = {"configurable": {"thread_id": thread, "checkpoint_ns": ""}}
+            for step in range(25):
+                config = memory.put(config, create_checkpoint(empty_checkpoint(), None, step), {}, {})
+            if thread == "pending":
+                memory.put_writes(config, [("messages", ["waiting to commit"])], "task")
+            elif thread == "interrupted":
+                memory.put_writes(config, [("__interrupt__", [])], "task")
+        completed = threading.Event()
+        nudge_vacuum = lifecycle.nudge_vacuum
+
+        def _nudge(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return nudge_vacuum(*args, **kwargs)
+            finally:
+                completed.set()
+
+        monkeypatch.setattr(lifecycle, "nudge_vacuum", _nudge)
+        mw = MemoryMiddleware(
+            service=service,  # type: ignore[arg-type]
+            jsonl_enabled=False,
+            maintenance_interval_seconds=3600,
+            maintenance_initial_delay_seconds=0.01,
+        )
+        try:
+            assert completed.wait(5), "maintenance timer never completed"
+            for thread, expected in (("completed", 20), ("pending", 25), ("interrupted", 25)):
+                assert len(list(memory.list({"configurable": {"thread_id": thread}}))) == expected
+            assert path.with_name("memory.sqlite.pre-prune.bak").is_file()
+        finally:
+            mw.shutdown()
+            with mw.pause_background():
+                memory._checkpointer.conn.close()
+                memory.backend.close()
+
+    def test_checkpoint_retention_uses_keep_days_and_skips_backup_when_nothing_to_delete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from langgraph.checkpoint.base import empty_checkpoint
+        from octop_memory import Memory
+        from octop_memory.pipeline.lifecycle.checkpoint_gc import _cutoff_checkpoint_id
+
+        from octop_harness.middleware.memory import _prune_checkpoints_if_configured
+
+        path = tmp_path / "memory.sqlite"
+        memory = Memory("test", backend_config={"db_path": str(path)})
+        backup = path.with_name("memory.sqlite.pre-prune.bak")
+        monkeypatch.setenv("OCTOP_CHECKPOINT_RETENTION", "1")
+        monkeypatch.setenv("OCTOP_CHECKPOINT_KEEP_LAST", "0")
+        monkeypatch.setenv("OCTOP_CHECKPOINT_KEEP_DAYS", "7")
+        monkeypatch.setenv("OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE", "1")
+        monkeypatch.setenv("OCTOP_CHECKPOINT_VACUUM", "0")
+        now = datetime.now(UTC)
+        config: dict[str, Any] = {"configurable": {"thread_id": "thread", "checkpoint_ns": ""}}
+        try:
+            for days in (10, 2, 1):
+                checkpoint = empty_checkpoint()
+                checkpoint["id"] = _cutoff_checkpoint_id(now - timedelta(days=days))
+                config = memory.put(config, checkpoint, {}, {})
+
+            _prune_checkpoints_if_configured(memory)
+            assert len(list(memory.list({"configurable": {"thread_id": "thread"}}))) == 2
+            assert backup.is_file()
+            backup.unlink()
+
+            _prune_checkpoints_if_configured(memory)
+            assert not backup.exists()
+        finally:
+            memory._checkpointer.conn.close()
+            memory.backend.close()
+
     def test_maintenance_prunes_checkpoints_when_retention_is_configured(
         self, service: _SpyService, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -648,8 +733,8 @@ class TestIdleMaintenance:
         mw = MemoryMiddleware(service=service, jsonl_enabled=False)  # type: ignore[arg-type]
         try:
             mw._run_maintenance_tick(service)
-            assert calls[0] == {"keep_last": 20, "keep_days": None, "dry_run": True}
-            assert calls[1] == {"keep_last": 20, "keep_days": None}
+            assert calls[0] == {"keep_last": 20, "keep_days": None, "skip_pending": True, "dry_run": True}
+            assert calls[1] == {"keep_last": 20, "keep_days": None, "skip_pending": True}
         finally:
             mw.shutdown()
 
