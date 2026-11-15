@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - OpenAI 兼容流式调用只保留最后一个 chunk 的 usage。上游在每个分片都带累计 usage 时，`input_tokens` 不再被乘以分片数（Octop#2007）。
+- 文件工具报错可行动化：`path_not_found` 补上工作区根目录用法和 `ls`/`glob`/`read_file` 示例；`execute` 遇到环境里不存在的命令时，提示改用内置的 `ls`/`glob`/`grep`，不再把失败当成终点。
 
 ## [1.0.9] - 2026-11-10
 
