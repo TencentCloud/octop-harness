@@ -87,6 +87,23 @@ def _serialize_hitl_request(value: Any) -> dict[str, Any]:
     return {"raw": str(value)}
 
 
+def _managed_checkpoint_copy(message: Any) -> bool:
+    """A managed turn already streamed this message and is only storing it."""
+    if isinstance(message, dict):
+        extra = message.get("additional_kwargs")
+    else:
+        extra = getattr(message, "additional_kwargs", None)
+    return isinstance(extra, dict) and bool(extra.get("octop_managed_streamed"))
+
+
+def _live_tool_message(message: Any) -> bool:
+    if _managed_checkpoint_copy(message):
+        return False
+    if isinstance(message, dict):
+        return message.get("role") == "tool" or message.get("type") == "tool"
+    return getattr(message, "type", None) == "tool"
+
+
 def _channel_messages(raw: Any) -> list[Any]:
     """Normalize a channel update to a message list.
 
@@ -249,6 +266,24 @@ class LangGraphProtocol(ChatProtocol):
         msg_type = getattr(msg_chunk, "type", "")
         if msg_type in ("tool", "human", "system"):
             return out
+        # Managed ACP turns stream deltas as chunks, then store the full
+        # message for the checkpoint. Skip that copy so the channel does not
+        # print the reply twice.
+        extra = getattr(msg_chunk, "additional_kwargs", None)
+        if isinstance(extra, dict):
+            tool_result = extra.get("octop_tool_result")
+            if isinstance(tool_result, dict):
+                out.append(
+                    {
+                        "type": AgentEventType.TOOL_RESULT,
+                        "node": node,
+                        "messages": [tool_result],
+                    }
+                )
+                return out
+        if msg_type == "ai" and isinstance(extra, dict) and extra.get("octop_managed_streamed"):
+            usage_event = _usage_event(msg_chunk, metadata, node)
+            return [usage_event] if usage_event is not None else []
         reasoning = getattr(msg_chunk, "additional_kwargs", {}).get("reasoning_content")
         if reasoning:
             out.append({"type": AgentEventType.REASONING, "content": reasoning, "node": node})
@@ -291,10 +326,7 @@ class LangGraphProtocol(ChatProtocol):
             if node_name == "__interrupt__":
                 continue
             node_messages = _channel_messages(node_data.get("messages")) if isinstance(node_data, dict) else []
-            is_tool_result = any(
-                getattr(m, "type", None) == "tool" or (isinstance(m, dict) and m.get("role") == "tool")
-                for m in node_messages
-            )
+            is_tool_result = any(_live_tool_message(m) for m in node_messages)
             if is_tool_result:
                 out.append({"type": AgentEventType.TOOL_RESULT, "node": node_name, "messages": node_messages})
             else:
