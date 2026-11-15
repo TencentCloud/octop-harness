@@ -296,6 +296,24 @@ async for chunk in agent.stream(request):
     print(chunk.delta, end="")
 ```
 
+Per-call credentials ride on the request, not in a `RunnableConfig`: `HarnessAgent`
+binds them to a task-local scope, so they never reach the checkpoint database.
+
+```python
+request = ChatRequest(
+    message="hi",
+    configurable={
+        "api_key_override": "sk-user",          # replaces the provider's static key for this call
+        "api_key_override_provider": "openai",  # optional: apply it only to this provider
+    },
+)
+```
+
+Without `api_key_override_provider` the key is applied to whatever model the turn
+routes to (useful for one gateway key fronting several providers). With it, the
+key is only used for that provider's models; if routing selects another provider,
+that provider uses its own configured key instead.
+
 ### Progressive tool loading
 
 Large, low-frequency tool sets can be hidden until the model needs them. The

@@ -103,11 +103,15 @@ class TestProviderConfig:
         with pytest.raises(ValueError, match="Unsupported provider protocol"):
             ProviderConfig(id="p", base_url="https://x", api_key="k", protocol="cohere")  # type: ignore[arg-type]
 
-    def test_missing_credentials_rejected(self) -> None:
+    def test_missing_base_url_rejected(self) -> None:
         with pytest.raises(ValueError):
             ProviderConfig(id="p", base_url="", api_key="k")
-        with pytest.raises(ValueError):
-            ProviderConfig(id="p", base_url="https://x", api_key="")
+
+    def test_empty_api_key_allowed_for_per_call_overrides(self) -> None:
+        # BYOK providers register without a static key; api_key_override
+        # supplies the credential at build time (see llm/factory._effective_api_key).
+        p = ProviderConfig(id="p", base_url="https://x", api_key="")
+        assert p.api_key == ""
 
 
 class TestProviderConfigId:
