@@ -16,6 +16,7 @@ from octop_harness.middleware.model_settings import (
 from octop_harness.middleware.native_tool_search import NativeToolSearchMiddleware
 from octop_harness.middleware.peer import PeerAgentMiddleware
 from octop_harness.middleware.pii import detect_pii
+from octop_harness.middleware.tool_args import ToolArgsMiddleware
 from octop_harness.middleware.tool_search import ToolSearchMiddleware
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "ModelSettingsMiddleware",
     "NativeToolSearchMiddleware",
     "PeerAgentMiddleware",
+    "ToolArgsMiddleware",
     "ToolSearchMiddleware",
     "detect_pii",
 ]

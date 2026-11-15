@@ -1503,11 +1503,12 @@ class HarnessAgent:
         """Assemble the middleware chain in declared execution order.
 
         Order: bootstrap (front-loaded) → router → model_settings → session_header →
-        skill_filter → mcp_tool_error → tool_guard → filesystem_guard (outside-root
-        soft-fail; deny rules when permissions + execution backend) → mcp_tools →
-        retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
-        conversation_mode → tools_filter → decision (only when enabled) → tool search →
-        task tool ordering → refusal passthrough → context_usage.
+        skill_filter → mcp_tool_error → tool_guard → tool_args → filesystem_guard
+        (outside-root soft-fail; deny rules when permissions + execution backend) →
+        mcp_tools → retry → pii → media_offload → checkpoint_ts → memory → user
+        middleware → team → conversation_mode → tools_filter → decision (only when
+        enabled) → tool search → task tool ordering → refusal passthrough →
+        context_usage.
 
         ``RefusalPassthroughMiddleware`` replaces deepagents' tail
         ``ModelRefusalMiddleware`` by name, so it runs innermost regardless of
@@ -1539,6 +1540,10 @@ class HarnessAgent:
                     rules_dir=cfg.tool_guard_rules_dir,
                 )
             )
+
+        from octop_harness.middleware.tool_args import ToolArgsMiddleware
+
+        chain.append(ToolArgsMiddleware(language=cfg.language))
 
         # Filesystem tool boundary: always soften outside-root ValueError; apply
         # deny rules only when permissions are set on an execution backend.
