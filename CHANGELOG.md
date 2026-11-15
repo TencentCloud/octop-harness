@@ -7,16 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage。上游在每个分片都带累计 usage 时，`input_tokens` 不再被乘以分片数（Octop#2007）。
+
+## [1.0.9] - 2026-11-10
+
 ### 新增
 
 - MiniMax（国内站 / 国际站）供应商预设加入 MiniMax-M3 和 MiniMax-M3.1-Flash，上下文 1M，原生多模态。
 
 ### 修复
 
+- `/compact` 写入的摘要事件带上 `cutoff_message_id` 和 `created_at_index`，与 deepagents 自动摘要一致：压缩后保留的消息不再带着已被摘要掉的对话所绑定的 Claude 推理块；截止点优先按消息 id 定位，仅在 id 找不到时才回退为「摘要 + 最新消息」。
+- 已禁用的 skill 不再出现在系统提示词中；请求级 `skills` 过滤（包括 Ask/Plan 模式的 `skills=[]`）也作用于提示词。此前只拦截文件工具访问，模型仍能看到这些 skill。
 - 存储的摘要截止点超出当前消息列表时，回退为「摘要 + 最新消息」，模型不再只看到旧摘要；切片不会从裸工具结果开始。
-- 空闲维护时清理旧的 LangGraph checkpoint，删除前先备份 SQLite 文件。
+- 空闲维护时清理旧的 LangGraph checkpoint，默认保留每个线程最近 20 个及恢复依赖，跳过有待处理工作的线程。保留窗口、裁剪前备份及 VACUUM 仍可配置。
 - 助手回复不再携带 `name` 字段：agent 构建原先把 `HarnessAgentConfig.name`（记忆命名空间）兼作 langgraph 图名，`chat_agent_executor` 会把它盖到每条助手回复上；旧版 NInfer 等部分拒绝 name 字段的大模型服务会拒绝带 name 的消息，多轮对话从第二轮起报 400（回放历史里的带名回复触发拒绝）。图现在保持未命名，出站助手消息不再有 `name`；记忆命名空间职责不变（`memory_namespace` 仍回落到 `name`）。工具消息的工具名保留（携带工具身份）。
 - `memory_save(content, topic, kind)` 支持 Fact、Preference、Decision、Task；中英文运行时规则引导当前对话模型直接选择类别，不额外调用分类模型。旧调用默认 Fact；连接不支持 kind 的旧 memory 库时，非 Fact 保存明确提示升级，不静默降级。需先合入并安装 memory 对应 API；保存 Task 不创建提醒，历史事实不变。
+
+### 变更
+
+- 要求 `deepagents>=0.7.35`，随之需要 langchain 1.4.9+、langchain-core 1.7.6+、langgraph 1.2.12+。主 agent 的模型拒答仍作为普通回复返回，不中断本轮；子 agent 拒答时，`task` 结果会说明拒答原因，不再是空字符串。系统提示词中 skill 段落的位置有变化，升级后第一轮提示词缓存会失效一次。
+- SQLite checkpoint 裁剪默认只在首次清理前尝试备份，备份保留 7 天。空间不足或备份失败时继续裁剪，标记会阻止重复尝试。`always` 要求每次备份成功后才裁剪，`off` 关闭备份。
+- LangGraph checkpoint 默认在调用退出时保存（`OCTOP_CHECKPOINT_DURABILITY=exit`），减少中间步骤的写入。若进程在一轮进行中被强制终止，该轮尚未落盘的消息、工具结果和执行进度会丢失，已产生的外部工具副作用可能仍在。设 `OCTOP_CHECKPOINT_DURABILITY=async` 可恢复按步骤异步保存，也可设为 `sync` 按步骤同步保存。
 
 ## [1.0.8] - 2026-11-05
 

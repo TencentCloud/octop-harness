@@ -47,6 +47,7 @@ from octop_harness.middleware.context_usage import ContextUsageMiddleware
 from octop_harness.middleware.mcp_tool_error import McpToolErrorMiddleware
 from octop_harness.middleware.mcp_tools import MCPToolMiddleware
 from octop_harness.middleware.media_offload import MediaOffloadMiddleware
+from octop_harness.middleware.model_refusal import RefusalPassthroughMiddleware
 from octop_harness.middleware.model_retry import ModelRetryMiddleware
 from octop_harness.middleware.model_router import ModelRouterMiddleware
 from octop_harness.middleware.model_settings import ModelSettingsMiddleware
@@ -75,6 +76,7 @@ except ImportError:  # pragma: no cover - dependency is listed; defensive
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
     from langchain_core.messages import BaseMessage
+    from langgraph.types import Durability
 
     from octop_harness.context_usage import ContextUsage
     from octop_harness.protocols.base import ChatProtocol
@@ -486,8 +488,9 @@ class HarnessAgent:
         request: ChatRequest | str | dict[str, Any],
         *,
         protocol: str | None = None,
+        durability: Durability | None = None,
     ) -> dict[str, Any]:
-        """Non-streaming invocation. Output format determined by protocol."""
+        """Non-streaming invocation with an optional checkpoint durability override."""
         from octop_harness.slash.runtime import build_runtime_ctx, call_with_runtime_slash
 
         req = ChatRequest.coerce(request)
@@ -496,6 +499,8 @@ class HarnessAgent:
         async def _call(prepared: ChatRequest) -> dict[str, Any]:
             messages, config, proto = self._prepare_call(prepared, protocol)
             with session_header_scope(prepared.thread_id):
+                if durability is not None:
+                    return await proto.call(messages, config, durability=durability)
                 return await proto.call(messages, config)
 
         from octop_harness.observability.logging import logging_scope
@@ -573,12 +578,14 @@ class HarnessAgent:
         decisions: list[dict[str, Any]],
         *,
         protocol: str | None = None,
+        durability: Durability | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Resume a paused interrupt, retaining its process-local request scope.
 
         The host must authorize the caller before resuming. User identity, tool
         selections and other config belong to the paused request, not a different
         thread's most recent invocation. A new stream replaces that thread's scope.
+        Pass ``durability`` to override the default for this resume.
         """
         proto = self._get_protocol(protocol)
         resume_stream = getattr(proto, "resume_stream", None)
@@ -588,9 +595,10 @@ class HarnessAgent:
         config = dict(self._hitl_resume_configs.get(thread_id, {"configurable": {"thread_id": thread_id}}))
         config["configurable"] = deepcopy(config["configurable"])
         paused = False
+        options = {"durability": durability} if durability is not None else {}
         async with self._invocation():
             with session_header_scope(thread_id):
-                async with contextlib.aclosing(resume_stream(thread_id, decisions, config)) as chunks:
+                async with contextlib.aclosing(resume_stream(thread_id, decisions, config, **options)) as chunks:
                     async for chunk in chunks:
                         if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
                             paused = True
@@ -1499,7 +1507,11 @@ class HarnessAgent:
         soft-fail; deny rules when permissions + execution backend) → mcp_tools →
         retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
         conversation_mode → tools_filter → decision (only when enabled) → tool search →
-        task tool ordering → context_usage.
+        task tool ordering → refusal passthrough → context_usage.
+
+        ``RefusalPassthroughMiddleware`` replaces deepagents' tail
+        ``ModelRefusalMiddleware`` by name, so it runs innermost regardless of
+        its position here.
 
         ``MediaOffloadMiddleware`` runs **after** PII (so PII still sees plain
         text) and **before** ``MemoryMiddleware`` so session logs store the
@@ -1629,6 +1641,7 @@ class HarnessAgent:
                     config=decision,
                     team=self._team_manager,
                     language=cfg.language,
+                    skills_rendered_late=True,
                 )
             )
 
@@ -1644,7 +1657,9 @@ class HarnessAgent:
         if cfg.task_tool_last:
             chain.append(TaskToolLastMiddleware())
 
-        # After tool-order normalization so the snapshot matches the final request.
+        chain.append(RefusalPassthroughMiddleware())
+
+        # The refusal slot forwards the fully assembled outbound request for capture.
         self._context_usage_mw = ContextUsageMiddleware(
             mcp_tool_names=self._mcp_tool_name_set,
             max_tokens=self._default_max_input_tokens(),

@@ -88,6 +88,11 @@ def _install_cutoff_fallback(mw: Any) -> None:
     after compaction rewrites the message list, and every later turn then sees
     the same summary. ``cutoff_index == len(messages)`` still means the whole
     list was summarized and is left unchanged.
+
+    Events written by deepagents 0.7.35+ and ``/compact`` also carry
+    ``cutoff_message_id``. When that message is still in the list, deepagents
+    locates the cutoff by id and returns the exact slice, so the index-based
+    approximation below is skipped.
     """
     original = getattr(mw, "_apply_event_to_messages", None)
     if not callable(original) or getattr(mw, "_octop_cutoff_fallback", False):
@@ -109,6 +114,9 @@ def _apply_with_cutoff_fallback(original: Callable[..., list[Any]], messages: An
     except (KeyError, TypeError):
         return original(messages, event)
     message_list = list(messages)
+    cutoff_id = event.get("cutoff_message_id")
+    if cutoff_id and any(getattr(message, "id", None) == cutoff_id for message in message_list):
+        return original(messages, event)
     if isinstance(cutoff_idx, int) and not isinstance(cutoff_idx, bool) and cutoff_idx > len(message_list):
         kept = _recent_messages(message_list, summary_fallback_keep())
         logger.warning(
