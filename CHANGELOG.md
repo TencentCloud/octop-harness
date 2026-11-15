@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - OpenAI 兼容流式调用只保留最后一个 chunk 的 usage。上游在每个分片都带累计 usage 时，`input_tokens` 不再被乘以分片数（Octop#2007）。
+- 工具参数占位值校验：必填字符串参数的值与字段名相同（如 `grep` 的 `pattern` 传了 `"pattern"`）时不再执行工具，直接返回可行动的报错，避免模型照抄 schema 字段名。
 
 ## [1.0.9] - 2026-11-10
 
