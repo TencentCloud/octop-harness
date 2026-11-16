@@ -13,8 +13,9 @@ from typing import Any
 
 from octop_harness.acp.client import ACPHostedClient
 from octop_harness.acp.models import ACPConfig, ACPConfigurationError, ACPRunnerConfig, ACPSessionError
+from octop_harness.acp.session_index import AcpSessionIndex, resume_or_create_session, session_index_path
 from octop_harness.backends.utils import ASYNC_DEFENSIVE_OP_ERRORS
-from octop_harness.runtime_env import load_dotenv_path, overlay_env
+from octop_harness.runtime_env import load_dotenv_path, overlay_env, prepend_user_cli_path
 
 MessageHandler = Callable[[dict[str, Any], bool], Awaitable[None]]
 
@@ -67,7 +68,7 @@ class ACPService:
         require_existing: bool = False,
     ) -> dict[str, Any]:
         if restart:
-            await self.close_thread_session(thread_id=thread_id, runner=runner)
+            await self.close_thread_session(thread_id=thread_id, runner=runner, cwd=cwd, forget=True)
 
         conversation = await self._get_or_create_session(
             thread_id=thread_id,
@@ -116,11 +117,24 @@ class ACPService:
             conversation.client.resolve_permission(option_id)
             return await self._wait_for_prompt_outcome(conversation=conversation)
 
-    async def close_thread_session(self, *, thread_id: str, runner: str) -> None:
+    async def close_thread_session(
+        self,
+        *,
+        thread_id: str,
+        runner: str,
+        cwd: str | None = None,
+        forget: bool = False,
+    ) -> None:
         async with self._lock:
             conversation = self._sessions.pop((thread_id, runner), None)
-        if conversation is not None:
-            await self._close_conversation(conversation)
+        try:
+            if forget:
+                store_cwd = cwd or (conversation.cwd if conversation is not None else None)
+                if store_cwd:
+                    AcpSessionIndex(session_index_path(store_cwd)).forget(thread_id, runner)
+        finally:
+            if conversation is not None:
+                await self._close_conversation(conversation)
 
     async def close_all_sessions(self) -> None:
         async with self._lock:
@@ -223,6 +237,7 @@ class ACPService:
         exit_stack = AsyncExitStack()
         spawn_env = overlay_env(os.environ, load_dotenv_path(os.path.join(cwd, ".env")), protect=True)
         spawn_env = overlay_env(spawn_env, runner_config.env, protect=False)
+        spawn_env = prepend_user_cli_path(spawn_env)
         try:
             conn, process = await exit_stack.enter_async_context(
                 spawn_agent_process(
@@ -241,11 +256,20 @@ class ACPService:
             )
             if initialized.protocol_version != PROTOCOL_VERSION:
                 raise ACPSessionError(f"Protocol mismatch: {initialized.protocol_version}")
-            new_session = await conn.new_session(cwd=cwd)
+            capabilities = getattr(initialized, "agent_capabilities", None)
+            load_supported = bool(getattr(capabilities, "load_session", False))
+            index = AcpSessionIndex(session_index_path(cwd))
+            session_id = await resume_or_create_session(
+                conn,
+                cwd=cwd,
+                session_id=index.get(thread_id, runner),
+                load_supported=load_supported,
+            )
+            index.put(thread_id, runner, session_id)
             return _Conversation(
                 thread_id=thread_id,
                 runner=runner,
-                acp_session_id=new_session.session_id,
+                acp_session_id=session_id,
                 cwd=cwd,
                 conn=conn,
                 process=process,
@@ -345,8 +369,13 @@ def init_acp_service(service_key: str, config: ACPConfig) -> ACPService:
     return _services[service_key]
 
 
+def pop_acp_service(service_key: str) -> ACPService | None:
+    """Detach the service for ``service_key`` without closing it yet."""
+    return _services.pop(service_key, None)
+
+
 def close_acp_service(service_key: str) -> None:
-    previous = _services.pop(service_key, None)
+    previous = pop_acp_service(service_key)
     if previous is not None:
         _schedule_close(previous)
 

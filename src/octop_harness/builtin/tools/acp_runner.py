@@ -79,7 +79,12 @@ def build_acp_runner_tool(*, service_key: str, config: ACPConfig, workspace_dir:
                 return f"Error: {exc}"
             service = _get_service(service_key, config)
             existing = await service.get_session(thread_id, runner_name)
-            await service.close_thread_session(thread_id=thread_id, runner=runner_name)
+            await service.close_thread_session(
+                thread_id=thread_id,
+                runner=runner_name,
+                cwd=str(execution_cwd),
+                forget=True,
+            )
             return format_close_response(
                 runner_name=runner_name,
                 closed=existing is not None,

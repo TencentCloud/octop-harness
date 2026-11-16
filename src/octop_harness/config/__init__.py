@@ -741,6 +741,17 @@ class HarnessAgentConfig:
     media_offload_min_bytes: int = 4 * 1024  # skip blocks below this size
     media_offload_dir: str = ".media-cache"  # root-relative fragment or complete storage path
 
+    # Automatic conversation compaction. ``None`` keeps deepagents' defaults
+    # (85% of the context window to trigger, 10% kept, when the model profile
+    # exposes ``max_input_tokens``). ``summarization_enabled=False`` turns off
+    # that trigger and tool-argument truncation. The middleware stays installed
+    # so ``/compact`` and a real context-window overflow can still summarize,
+    # and an earlier summary stays applied on later turns.
+    summarization_enabled: bool = True
+    summarization_trigger: tuple[str, int | float] | None = None
+    summarization_keep: tuple[str, int | float] | None = None
+    summarization_trim_tokens: int | None = None
+
     # —— Optional image/video generation tools ——
     # When configured, registers provider-neutral ``generate_image`` and
     # ``generate_video`` tools backed by the selected media provider.
@@ -788,6 +799,9 @@ class HarnessAgentConfig:
     # —— ACP external agent runners (Agent Client Protocol) ——
     acp_runners: dict[str, ACPRunnerConfig] = field(default_factory=default_acp_runners)
     acp_delegate_enabled: bool = False
+    # When set, this agent is a managed ACP peer: the compiled graph forwards
+    # each turn to this runner instead of calling ``create_deep_agent``.
+    managed_runner: str | None = None
 
     # —— Memory ——
     memory_enabled: bool = True
@@ -930,6 +944,7 @@ class HarnessAgentConfig:
         _validate_extract_max_tokens(self.memory_extract_max_tokens)
         _validate_aux_timeout("memory_aux_light_timeout_s", self.memory_aux_light_timeout_s)
         _validate_aux_timeout("memory_aux_heavy_timeout_s", self.memory_aux_heavy_timeout_s)
+        _validate_summarization_settings(self)
 
         # Workspace must be an absolute directory: it doubles as the backend's
         # on-disk root for local backends and as the parent for all
@@ -1107,12 +1122,19 @@ class HarnessAgentConfig:
             "media_offload_enabled": self.media_offload_enabled,
             "media_offload_min_bytes": self.media_offload_min_bytes,
             "media_offload_dir": self.media_offload_dir,
+            "summarization_enabled": self.summarization_enabled,
+            "summarization_trigger": (
+                list(self.summarization_trigger) if self.summarization_trigger is not None else None
+            ),
+            "summarization_keep": list(self.summarization_keep) if self.summarization_keep is not None else None,
+            "summarization_trim_tokens": self.summarization_trim_tokens,
             "media_generation": self.media_generation.to_dict() if self.media_generation is not None else None,
             "web_search_tools": _web_search_tools_to_jsonable(self.web_search_tools),
             "mcp_server_configs": dict(self.mcp_server_configs),
             "mcp_default_servers": list(self.mcp_default_servers) if self.mcp_default_servers else None,
             "acp_runners": _acp_runners_to_jsonable(self.acp_runners),
             "acp_delegate_enabled": self.acp_delegate_enabled,
+            "managed_runner": self.managed_runner,
             "bootstrap_enabled": self.bootstrap_enabled,
             "bootstrap_file": _path_to_str(self.bootstrap_file) if self.bootstrap_file else None,
             "bootstrap_marker": _path_to_str(self.bootstrap_marker) if self.bootstrap_marker else None,
@@ -1302,6 +1324,53 @@ def _coerce_config_field(
     else:
         coerced = value
     return coerced
+
+
+def _validate_summarization_settings(config: HarnessAgentConfig) -> None:
+    config.summarization_trigger = _validate_summarization_size("summarization_trigger", config.summarization_trigger)
+    config.summarization_keep = _validate_summarization_size("summarization_keep", config.summarization_keep)
+    _validate_summarization_pair(config.summarization_trigger, config.summarization_keep)
+    _validate_summarization_trim(config.summarization_trim_tokens)
+    if not isinstance(config.summarization_enabled, bool):
+        raise ValueError("summarization_enabled must be a bool")
+
+
+def _validate_summarization_size(name: str, value: Any) -> tuple[str, int | float] | None:
+    """Accept a deepagents context-size pair, including a JSON list."""
+    if value is None:
+        return None
+    pair = tuple(value) if isinstance(value, list) else value
+    if not isinstance(pair, tuple) or len(pair) != 2 or not isinstance(pair[0], str):
+        raise ValueError(f"{name} must be a ('fraction'|'tokens'|'messages', number) pair, or None")
+    kind, amount = pair
+    if kind == "fraction":
+        if isinstance(amount, bool) or not isinstance(amount, int | float) or not 0 < float(amount) <= 1:
+            raise ValueError(f"{name} fraction must be greater than 0 and at most 1")
+        return (kind, float(amount))
+    if kind in {"tokens", "messages"}:
+        if isinstance(amount, bool) or not isinstance(amount, int | float) or float(amount) <= 0:
+            raise ValueError(f"{name} {kind} threshold must be greater than 0")
+        if isinstance(amount, float) and not amount.is_integer():
+            raise ValueError(f"{name} {kind} threshold must be an integer")
+        return (kind, int(amount))
+    raise ValueError(f"{name} kind must be 'fraction', 'tokens', or 'messages'")
+
+
+def _validate_summarization_pair(
+    trigger: tuple[str, int | float] | None,
+    keep: tuple[str, int | float] | None,
+) -> None:
+    if trigger is None or keep is None or trigger[0] != "fraction" or keep[0] != "fraction":
+        return
+    if keep[1] >= trigger[1]:
+        raise ValueError("summarization_keep fraction must be less than summarization_trigger fraction")
+
+
+def _validate_summarization_trim(value: int | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("summarization_trim_tokens must be a positive int, or None")
 
 
 def _validate_extract_max_tokens(value: int | None) -> None:

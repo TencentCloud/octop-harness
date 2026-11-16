@@ -137,6 +137,15 @@ are retried. SDK retries are disabled on separate cached model instances, so
 main-chat retry settings are unaffected. `ChatModelFactory.get_chat_model(ref,
 max_retries=0)` exposes that isolated construction path.
 
+Automatic context compaction follows deepagents' defaults (trigger at 85% of
+the context window and keep 10% when the model profile exposes
+`max_input_tokens`). Override it on `HarnessAgentConfig` with
+`summarization_trigger`, `summarization_keep`, and `summarization_trim_tokens`.
+`summarization_enabled=False` turns off that automatic trigger and tool-argument
+truncation. The middleware stays installed, so `/compact` and a real
+context-window overflow can still summarize, and an earlier summary stays
+applied on later turns. `/compact` keeps its own recent-message tail.
+
 `memory_aux_thinking="auto"` or `"off"` disables thinking for known Qwen3/QwQ
 chat-template models; unsupported models keep their defaults. `"on"` keeps the
 model default. `memory_aux_extra_body` can supply vendor-specific settings such
@@ -224,7 +233,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 ## How to Use
 
-Current release: **1.0.9**. See the [release notes](CHANGELOG.md).
+Current release: **1.0.10**. See the [release notes](CHANGELOG.md).
 
 ### Prerequisites
 - **Python 3.12+**
