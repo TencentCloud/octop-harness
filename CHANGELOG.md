@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
-- 本地挂载后端的 `BackendWorkspace` 相对读取与写入统一使用 `workspace_dir`，不再优先读取 `root_dir` 下的同名文件，也不在工作区文件缺失时回退到其他工作区的文件。依赖旧回退行为的产物路径需改为显式虚拟绝对路径。
+- For locally mounted backends, `BackendWorkspace` resolves relative reads and writes against `workspace_dir`. Relative reads no longer prefer same-named files under `root_dir` or fall back to files in other workspaces when a workspace file is missing. Callers relying on the old fallback must use explicit virtual absolute paths for those artifacts.
 
 ## [1.0.9] - 2026-11-10
 

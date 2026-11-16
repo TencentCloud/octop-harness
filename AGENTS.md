@@ -239,7 +239,7 @@ deepagents filesystem tools then map `/foo` to `{root_dir}/foo` (implementation 
 - `root_dir` prefixes in execute output are restored to agent-facing `/…`.
 - Reading artifacts uses **multi-layer failback** on the `BackendWorkspace` read side:
   - **Absolute paths:** try the `{root_dir}` mapping (`backend._resolve_path`) first; if missing, the original host path.
-  - **相对路径：** 仅从 `{workspace_dir}/{rel}` 读取，与相对写入保持一致。需要读取后端根目录下的产物时，显式使用虚拟绝对路径。
+  - **Relative paths:** read only from `{workspace_dir}/{rel}`, matching relative writes. Use an explicit virtual absolute path for artifacts under the backend root.
 - Bound `materialize_local` / `exists` / `aexists` / `read_text` / `aread_text` / `download_bytes` / `send_file` all use this failback.
 
 ```text
@@ -285,7 +285,7 @@ agent.init_workspace()
 - **mypy for optional packages such as `mss`:** add `ignore_missing_imports = true` under `[[tool.mypy.overrides]]`. Do **not** use `# type: ignore[import-not-found]` (it becomes `unused-ignore` once the extra is installed).
 - **deepagents skills / memory paths:** `skill_paths()` / `memory_paths()` go to deepagents via `_backend_storage_key` (`virtual_mode` → virtual `/…` key; do not concatenate host `root_dir`). `resolve_path` is only for host I/O / materialize (see [§7](#agent-workspace-and-backendworkspace)).
 - **L1 agent storage:** agent-visible / agent-used workspace content goes through `agent.workspace` (`BackendWorkspace`); memory DB, logs, JSONL transcripts, and checkpoint SQLite are local runtime persistence and use local FS / DB drivers directly. Do not treat `root_dir` as a second workspace.
-- **shell / virtual_mode:** non-host-root + `virtual_mode` + Linux + bwrap → factory picks `BubbledLocalShellBackend` to jail `execute`; otherwise `HarnessLocalShellBackend` conservatively maps trusted virtual command/env paths and uses the workspace as cwd. Reads still have `BackendWorkspace` root→original / root→workspace failback (see [§7](#agent-workspace-and-backendworkspace)).
+- **shell / virtual_mode:** non-host-root + `virtual_mode` + Linux + bwrap → factory picks `BubbledLocalShellBackend` to jail `execute`; otherwise `HarnessLocalShellBackend` conservatively maps trusted virtual command/env paths and uses the workspace as cwd. `BackendWorkspace` reads use root→original failback for absolute paths and only the workspace for relative paths (see [§7](#agent-workspace-and-backendworkspace)).
 - **Do not import `mss` at module top level:** import inside the function, or `import octop_harness.builtin.tools` breaks for `pip install octop-harness` without `[desktop]`.
 - **`init.py` must not `from octop_harness import __version__`:** that causes a circular import. Use `from octop_harness._version import __version__` (the single source of the version is `[project].version` in `pyproject.toml`).
 - **`HarnessAgentManager` is the recommended entry:** `manager.create_agent(config)` eagerly builds and caches `HarnessAgent`; `manager.stream(agent_id, request)` reuses the cached instance. Direct `HarnessAgent(config)` is still supported for backend-only work (`agent.backend`, `agent.init_workspace()`), but **all LLM chat goes through the manager**.

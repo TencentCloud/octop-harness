@@ -137,7 +137,7 @@ class TestSendFileToUser:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """相对路径仅从工作区读取。后端根目录和进程当前目录的同名文件不参与回退。"""
+        """Read relative paths only from the workspace, ignoring mount and process-cwd decoys."""
         from deepagents.backends import FilesystemBackend
 
         from octop_harness.builtin.tools.send_file import build_send_file_to_user_tool

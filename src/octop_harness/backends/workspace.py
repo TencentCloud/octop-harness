@@ -20,10 +20,11 @@ Path rules for :meth:`resolve_path`:
 ``~/…`` is expanded to a host path (still absolute). ``..`` in relative
 fragments raises ``PermissionError`` if it escapes ``workspace_dir``.
 
-本地挂载的 :meth:`materialize_local` 和读取方法遵循以下路径规则。
+:meth:`materialize_local` and read helpers follow these rules for local mounts:
 
-* 绝对路径在 ``virtual_mode`` 下先映射到 ``root_dir``。缺失时再尝试原始主机路径。
-* 相对路径仅以 ``workspace_dir`` 为基准。读取与写入规则一致。
+* absolute: under ``virtual_mode``, map to ``root_dir``, then try the original
+  host path if missing
+* relative: resolve only against ``workspace_dir``, matching relative writes
 
 Shell alignment is separate: when Linux + ``virtual_mode`` + non-host
 ``root_dir`` + ``bwrap`` are available, ``execute`` runs in a directory jail.
@@ -640,7 +641,8 @@ class BackendWorkspace:
           1. virtual map under backend ``root_dir`` when ``virtual_mode``
           2. original host path
 
-        相对路径仅使用 ``{workspace_dir}/{rel}``。不隐式探测后端根目录。
+        Relative paths use only ``{workspace_dir}/{rel}``, with no implicit
+        lookup under the backend root.
 
         When the backend has no local mount (e.g. S3/COS), only workspace-only
         paths (no backend key) use local candidates; otherwise reads go through
@@ -1098,7 +1100,8 @@ class BackendWorkspace:
     def materialize_local(self, path: str, *, map_system_paths: bool = True) -> Path | None:
         """Return a local filesystem path for *path* when bytes are available.
 
-        本地挂载的相对路径仅在 ``workspace_dir`` 下查找。绝对路径保留虚拟映射回退。
+        Local mounts resolve relative paths only under ``workspace_dir``.
+        Absolute paths retain the virtual-map-to-host fallback.
         Sandbox / remote backends (no host mount): download
         into ``{workspace_dir}/.harness-materialize/`` for channel adapters
         (``send_file_to_user``); this cache is delivery-only, not the workspace.

@@ -642,7 +642,7 @@ class TestBackendWorkspaceVirtualMode:
         else:
             assert result == (workspace / ws.system_rel(fragment)).resolve()
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX 主机路径没有 Windows 盘符")
+    @pytest.mark.skipif(os.name == "nt", reason="Requires a POSIX host path without a Windows drive letter")
     def test_materialize_relative_does_not_remap_missing_host_path(self, tmp_path: Path) -> None:
         from deepagents.backends import FilesystemBackend
 
@@ -669,7 +669,7 @@ class TestBackendWorkspaceVirtualMode:
         try:
             (workspace / "alias").symlink_to(foreign, target_is_directory=True)
         except OSError:
-            pytest.skip("当前环境不支持创建目录符号链接")
+            pytest.skip("Directory symlinks are unavailable in this environment")
         backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
         ws = BackendWorkspace(backend, workspace)
 
