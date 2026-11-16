@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 显式选择的技能在模型首个请求前读取 `SKILL.md` 正文。正文仅用于当前请求，同一线程下一轮取消选择后不再携带旧技能正文；已禁用的技能仍无法加载。
+
 ## [1.0.10] - 2026-11-15
 
 ### 新增

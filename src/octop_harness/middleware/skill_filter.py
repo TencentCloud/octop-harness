@@ -9,7 +9,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 
-from deepagents.middleware.skills import SkillMetadata
+from deepagents.backends.protocol import BackendProtocol
+from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import ToolMessage
@@ -223,26 +224,58 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
 
     System-prompt rendering is fully delegated to the downstream
     ``SkillsMiddleware`` added by :func:`deepagents.create_deep_agent`.
-    This middleware exclusively updates state so that ``SkillsMiddleware``
-    builds one correct, filtered section — avoiding duplicate sections.
+    显式选择的技能在过滤后通过原生 ``pinned_skills`` 读取正文。
+    固定消息仅附加到当前模型请求。正文不写入 checkpoint。
+    后轮取消选择后不再携带旧技能正文。未选择时仍使用渐进披露。
     """
 
-    def __init__(self, *, config: HarnessAgentConfig) -> None:
+    def __init__(self, *, config: HarnessAgentConfig, backend: BackendProtocol | None = None) -> None:
         self._config = config
+        self._skill_pinner = SkillsMiddleware(backend=backend, sources=[], system_prompt=None) if backend else None
 
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        return handler(self._apply_filter(request))
+        request = self._apply_filter(request)
+        state = self._selected_skill_state(request)
+        if state is not None and self._skill_pinner is not None:
+            update = self._skill_pinner.before_model(state, request.runtime)
+            request = self._with_pinned_skills(request, state, update)
+        return handler(request)
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        return await handler(self._apply_filter(request))
+        request = self._apply_filter(request)
+        state = self._selected_skill_state(request)
+        if state is not None and self._skill_pinner is not None:
+            update = await self._skill_pinner.abefore_model(state, request.runtime)
+            request = self._with_pinned_skills(request, state, update)
+        return await handler(request)
+
+    def _selected_skill_state(self, request: ModelRequest) -> SkillsState | None:
+        allowed = (runtime_config(request).get("configurable") or {}).get("skills")
+        raw_metadata = request.state.get("skills_metadata")
+        metadata: list[SkillMetadata] = list(raw_metadata) if isinstance(raw_metadata, list) else []
+        if not isinstance(allowed, list) or not allowed or not metadata:
+            return None
+        # 元数据已经过禁用与本轮选择过滤。路径来自原生目录而非用户参数。
+        return {
+            "messages": request.messages,
+            "skills_metadata": metadata,
+            "pinned_skills": [skill["name"] for skill in metadata],
+        }
+
+    @staticmethod
+    def _with_pinned_skills(request: ModelRequest, state: SkillsState, update: dict[str, Any] | None) -> ModelRequest:
+        messages = update.get("messages", []) if update else []
+        if len(messages) != len(state["pinned_skills"]):
+            raise ValueError("无法完整读取本轮选中技能的 SKILL.md。已停止模型请求")
+        return request.override(messages=[*request.messages, *messages])
 
     def _blocked_tool_message(self, request: ToolCallRequest, reason: str) -> ToolMessage:
         tool_call = request.tool_call
