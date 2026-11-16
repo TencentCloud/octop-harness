@@ -483,3 +483,9 @@ async with ManagedMCPClient({"transport": "stdio", "command": "my-mcp", "args": 
 Explicit `await client.aclose()` is also supported. Closed or disconnected clients
 must be replaced; writes are never retried automatically. Default MCP tool loading
 remains stateless.
+
+## Inbound plugin admission
+
+Hook plugins can register host-neutral pre-agent handlers and optionally use host decision scoring. See [contracts and lifecycle](docs/inbound-plugins.md). The host must provide the Gateway bridge.
+
+All plugin kinds can register `ctx.settings(provider)` to own their settings schema and storage. Inbound handlers may implement the optional `InboundTextRenderer` contract to assemble text without hardcoded host prompt labels; authorization, media blocks and delivery stay with the host.

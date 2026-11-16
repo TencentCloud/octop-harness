@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Add host-neutral inbound registration and lifecycle contracts, a generic settings provider for every plugin kind, and optional inbound text rendering. Hosts retain authorization, routing and media delivery.
+
 ## [1.0.10] - 2026-11-15
 
 ### 新增
