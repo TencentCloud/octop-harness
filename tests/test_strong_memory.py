@@ -294,15 +294,15 @@ async def test_profile_snapshot_deduplicates_recall_without_reloading_files(tmp_
     )
     config = {"configurable": {"thread_id": "profile-session"}}
     await graph.ainvoke({"messages": [HumanMessage(content="PostgreSQL")]}, config=config)
-    assert "<memory-context>" not in str(model.requests[-1][-1].content)
+    assert "<memory-context" not in str(model.requests[-1][-1].content)
     ws.write_text("USER.md", "A different profile", force=True)
     with patch.object(ws.backend, "adownload_files", side_effect=AssertionError("session snapshot must not reload")):
         await graph.ainvoke({"messages": [HumanMessage(content="PostgreSQL")]}, config=config)
-    assert "<memory-context>" not in str(model.requests[-1][-1].content)
+    assert "<memory-context" not in str(model.requests[-1][-1].content)
     await graph.ainvoke(
         {"messages": [HumanMessage(content="PostgreSQL")]},
         config={"configurable": {"thread_id": "new-profile-session"}},
     )
     assert fact in str(model.requests[-1][-1].content)
-    assert "<memory-context>" in str(model.requests[-1][-1].content)
+    assert "<memory-context" in str(model.requests[-1][-1].content)
     capture.shutdown()

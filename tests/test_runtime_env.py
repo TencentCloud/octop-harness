@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from octop_harness.runtime_env import (
@@ -9,6 +10,7 @@ from octop_harness.runtime_env import (
     merge_host_stdio_env,
     overlay_env,
     parse_env_text,
+    prepend_user_cli_path,
     resolve_docker_execute_env,
     resolve_local_execute_env,
 )
@@ -24,6 +26,14 @@ def test_protected_keys() -> None:
     assert is_protected_env_key("OCTOP_HOME")
     assert is_protected_env_key("OCTOP_DATABASE_URL")
     assert not is_protected_env_key("TAVILY_API_KEY")
+
+
+def test_prepend_user_cli_path_adds_existing_home_bins(tmp_path: Path) -> None:
+    bindir = tmp_path / ".opencode" / "bin"
+    bindir.mkdir(parents=True)
+    env = prepend_user_cli_path({"HOME": str(tmp_path), "PATH": "/usr/bin"})
+    assert env["PATH"].startswith(str(bindir) + os.pathsep)
+    assert env["PATH"].endswith("/usr/bin")
 
 
 def test_overlay_skips_protected_when_requested() -> None:

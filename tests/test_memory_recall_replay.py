@@ -372,7 +372,7 @@ def test_real_recall_survives_database_reopen_without_polluting_raw(tmp_path: Pa
         # Capture is the real MemoryService write path, not a spy.
         rows = reopened.search_raw("ALPHA", limit=20)
         assert any(row.content == "ALPHA deadline" for row in rows)
-        assert all("<memory-context>" not in row.content for row in rows)
+        assert all("<memory-context" not in row.content for row in rows)
     finally:
         reopened.delete_thread(namespace)
         if backend == "postgres":

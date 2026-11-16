@@ -9,6 +9,56 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
 
 from octop_harness.protocols.langgraph import LangGraphProtocol
+from octop_harness.protocols.mcp import MCPProtocol
+from octop_harness.protocols.openai import OpenAIProtocol
+
+
+@pytest.mark.parametrize("adapter", [LangGraphProtocol, MCPProtocol, OpenAIProtocol])
+@pytest.mark.parametrize(("setting", "expected"), [(None, "exit"), ("async", "async"), (" SYNC ", "sync")])
+async def test_checkpoint_durability_on_graph_entry_points(adapter, setting, expected, monkeypatch):
+    if setting is None:
+        monkeypatch.delenv("OCTOP_CHECKPOINT_DURABILITY", raising=False)
+    else:
+        monkeypatch.setenv("OCTOP_CHECKPOINT_DURABILITY", setting)
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(return_value={})
+    graph.astream_events = AsyncMock()
+    streamed = []
+
+    async def astream(*args, **kwargs):
+        streamed.append(kwargs["durability"])
+        for chunk in ():
+            yield chunk
+
+    graph.astream = astream
+    protocol = adapter(graph=graph)
+    messages = [HumanMessage(content="hello")]
+    await protocol.call(messages, {})
+    assert graph.ainvoke.await_args.kwargs["durability"] == expected
+    await protocol.call(messages, {}, durability="sync")
+    assert graph.ainvoke.await_args.kwargs["durability"] == "sync"
+    assert [chunk async for chunk in protocol.stream(messages, {})] == []
+    assert [chunk async for chunk in protocol.resume_stream("thread", [], {}, durability="async")] == []
+    assert streamed == [expected, "async"]
+    await protocol.stream_events(messages, {})
+    assert graph.astream_events.await_args.kwargs["durability"] == expected
+    await protocol.stream_events(messages, {}, durability="async")
+    assert graph.astream_events.await_args.kwargs["durability"] == "async"
+
+
+async def test_invalid_durability_warns_once_and_does_not_change_stateless_graphs(monkeypatch, caplog):
+    monkeypatch.setenv("OCTOP_CHECKPOINT_DURABILITY", "unrecognized-mode")
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(return_value={})
+    protocol = LangGraphProtocol(graph=graph)
+    for _ in range(2):
+        await protocol.call([], {})
+        assert graph.ainvoke.await_args.kwargs["durability"] == "exit"
+    assert caplog.text.count("OCTOP_CHECKPOINT_DURABILITY") == 1
+    graph.checkpointer = None
+    await protocol.call([], {})
+    assert "durability" not in graph.ainvoke.await_args.kwargs
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,7 +105,7 @@ class TestCall:
 
         await protocol.call(messages, config)
 
-        graph.ainvoke.assert_awaited_once_with({"messages": messages}, config=config)
+        graph.ainvoke.assert_awaited_once_with({"messages": messages}, config=config, durability="exit")
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +504,7 @@ class TestStream:
             "config": config,
             "stream_mode": ["values", "updates", "messages", "custom"],
             "version": "v2",
+            "durability": "exit",
         }
 
     @pytest.mark.asyncio
@@ -631,7 +682,9 @@ class TestStreamEvents:
         result = await protocol.stream_events(messages, config)
 
         assert result is fake_stream
-        graph.astream_events.assert_awaited_once_with({"messages": messages}, config=config, version="v3")
+        graph.astream_events.assert_awaited_once_with(
+            {"messages": messages}, config=config, version="v3", durability="exit"
+        )
 
     @pytest.mark.asyncio
     async def test_stream_events_passes_kwargs(self) -> None:
@@ -645,5 +698,9 @@ class TestStreamEvents:
         await protocol.stream_events([HumanMessage(content="hi")], {}, include_names=["agent"])
 
         graph.astream_events.assert_awaited_once_with(
-            {"messages": [HumanMessage(content="hi")]}, config={}, version="v3", include_names=["agent"]
+            {"messages": [HumanMessage(content="hi")]},
+            config={},
+            version="v3",
+            include_names=["agent"],
+            durability="exit",
         )

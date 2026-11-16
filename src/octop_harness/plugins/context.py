@@ -14,6 +14,7 @@ from octop_harness.plugins.registry import (
     PluginRegistry,
     ToolRegistration,
 )
+from octop_harness.plugins.settings import PluginSettingsProvider, validate_settings_provider
 
 
 class PluginContext:
@@ -29,6 +30,7 @@ class PluginContext:
         self._skills_dir: Path | None = None
         self._model_factory: Any | None = None
         self._get_protocol: Any | None = None
+        self._settings: PluginSettingsProvider | None = None
 
     @property
     def plugin_id(self) -> str:
@@ -71,6 +73,17 @@ class PluginContext:
                 priority=priority,
             ),
         )
+
+    def settings(self, provider: PluginSettingsProvider) -> None:
+        """Register one settings provider for any plugin kind.
+
+        The host supplies common context and controls access; the plugin owns
+        field validation, defaults, inheritance and persistence.
+        """
+        if self._settings is not None:
+            raise ValueError("plugin settings provider already registered")
+        validate_settings_provider(provider)
+        self._settings = provider
 
     def inbound(self, handler: InboundHandler) -> None:
         """Register a pre-agent admission handler. Requires host gateway support.
@@ -171,6 +184,7 @@ class PluginContext:
             inbound=list(self._inbound),
             channels=list(self._channels),
             skills_dir=self._skills_dir,
+            settings=self._settings,
         )
 
 

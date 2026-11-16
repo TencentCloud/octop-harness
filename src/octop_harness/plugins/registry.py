@@ -80,6 +80,7 @@ class LoadedPlugin:
     diagnostics: list[str] = field(default_factory=list)
     context: Any | None = None
     inbound: list[InboundHandler] = field(default_factory=list)
+    settings: Any | None = None
 
 
 class PluginRegistry:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -21,6 +23,23 @@ from octop_harness.middleware.runtime import runtime_config
 from octop_harness.middleware.turn_model import max_input_tokens_from_model
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _OutboundRequest:
+    request: ModelRequest
+
+
+# LangChain can run inner middleware in a copy of the context. Share the
+# holder so the outer middleware still sees the request recorded there.
+_OUTBOUND_REQUEST: ContextVar[_OutboundRequest | None] = ContextVar("octop_outbound_model_request", default=None)
+
+
+def record_outbound_request(request: ModelRequest) -> None:
+    """Use the request after deepagents' tail middleware for the active capture."""
+    outbound = _OUTBOUND_REQUEST.get()
+    if outbound is not None:
+        outbound.request = request
 
 
 def _thread_id_from_request(request: ModelRequest) -> str | None:
@@ -113,14 +132,26 @@ class ContextUsageMiddleware(AgentMiddleware[Any, Any]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        return self._capture(request, handler(request))
+        outbound = _OutboundRequest(request)
+        token = _OUTBOUND_REQUEST.set(outbound)
+        try:
+            response = handler(request)
+            return self._capture(outbound.request, response)
+        finally:
+            _OUTBOUND_REQUEST.reset(token)
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        return self._capture(request, await handler(request))
+        outbound = _OutboundRequest(request)
+        token = _OUTBOUND_REQUEST.set(outbound)
+        try:
+            response = await handler(request)
+            return self._capture(outbound.request, response)
+        finally:
+            _OUTBOUND_REQUEST.reset(token)
 
     def _capture(self, request: ModelRequest, response: ModelResponse) -> ModelResponse:
         try:

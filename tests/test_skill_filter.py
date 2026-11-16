@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
@@ -92,6 +94,56 @@ class TestSkillFilterMiddleware:
 
         assert captured["metadata"] == sample_skills_metadata
         assert captured["system_message"] is req.system_message
+
+    def test_canonical_octop_skills_directory_is_listed_first(self) -> None:
+        from octop_harness.middleware.skill_filter import format_skills_locations
+
+        builtin_path = "/home/wally/.octop/agents/Q6084B/.octop/_builtin_skills"
+        legacy_path = "/home/wally/.octop/agents/Q6084B/skills"
+        canonical_path = "/home/wally/.octop/agents/Q6084B/.octop/skills"
+        text = format_skills_locations(
+            [builtin_path, legacy_path, canonical_path],
+            ["_builtin_skills", "Q6084B", "Octop"],
+        )
+        builtin = f"**_builtin_skills Skills**: `{builtin_path}`"
+        legacy = f"**Q6084B Skills**: `{legacy_path}`"
+        canonical = f"**Octop Skills**: `{canonical_path}` (higher priority)"
+        assert text.index(canonical) < text.index(builtin) < text.index(legacy)
+
+    def test_canonical_location_patch_is_idempotent_and_falls_back(self) -> None:
+        from deepagents.middleware.skills import SkillsMiddleware
+
+        from octop_harness.middleware.skill_filter import install_canonical_skill_location_order
+
+        barrier = threading.Barrier(8)
+
+        def _install() -> None:
+            barrier.wait()
+            install_canonical_skill_location_order()
+
+        threads = [threading.Thread(target=_install) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        installed = SkillsMiddleware._format_skills_locations
+        assert getattr(installed, "_octop_canonical_first", False) is True
+        original = installed._octop_original  # type: ignore[attr-defined]
+        assert original is not installed
+        sample = SimpleNamespace(
+            sources=["/ws/.octop/_builtin_skills", "/ws/.octop/skills"],
+            source_labels=["Builtin", "Octop"],
+        )
+        rendered = installed(sample)
+        assert rendered.index("/ws/.octop/skills") < rendered.index("/ws/.octop/_builtin_skills")
+        with patch(
+            "octop_harness.middleware.skill_filter.format_skills_locations",
+            side_effect=RuntimeError("boom"),
+        ):
+            fallback = installed(sample)
+        assert fallback == original(sample)
+        assert fallback.index("/ws/.octop/_builtin_skills") < fallback.index("/ws/.octop/skills")
 
     def test_config_disabled_skills_filtered_without_request_filter(
         self,

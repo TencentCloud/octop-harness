@@ -32,6 +32,26 @@ Cleanup failures are logged and do not prevent other handlers from closing.
 an optional `wait_closed()` after synchronous cancellation. Cleanup should be
 idempotent. Failed plugin updates must reload a fresh instance of a closed hook.
 
+## Optional settings and text rendering
+
+Any plugin kind can register one `ctx.settings(provider)`. The provider implements
+`async get_settings(context) -> dict` and `async save_settings(context, values)`.
+It owns its schema, validation, defaults, inheritance and storage. A host decides
+which common, credential-free catalog data to include in `context` and controls
+authentication and authorization. Harness does not interpret business fields or
+provide an HTTP server. `PluginSettingsProvider` is exported for type checking.
+
+An inbound handler can also implement `InboundTextRenderer.render_inbound_text(
+message, current_text, *, background, locale) -> str | None`. A supporting host
+invokes it only while assembling model input, after command routing and media
+materialization. `current_text` includes prepared attachment/document hints;
+`background` contains dictionaries with `sender_id`, `sender_name`, and text
+`segments`. Return `None` to retain host rendering, or text to replace the user
+turn's text block. Separate image blocks, routing and permissions stay with the
+host. Plugins should claim only their own messages and never parse or replace
+hardcoded host prompt prefixes. Hosts without this optional extension continue
+their original rendering.
+
 ## Optional decision scoring
 
 A handler may implement `DecisionScorerAware.bind_decision_scorer(provider)`.

@@ -11,10 +11,12 @@ from octop_harness.plugins.inbound import (
     DecisionScorerProvider,
     InboundDispatch,
     InboundHandler,
+    InboundTextRenderer,
 )
 from octop_harness.plugins.loader import discover_plugin_dirs, load_all, load_plugin_dir, unload_plugin
 from octop_harness.plugins.manifest import PluginManifest
 from octop_harness.plugins.registry import ChannelRegistration, LoadedPlugin, PluginRegistry
+from octop_harness.plugins.settings import PluginSettingsProvider
 from octop_harness.plugins.tools import build_plugin_tools, collect_plugin_tool_configs, get_tool_config
 
 __all__ = [
@@ -25,10 +27,12 @@ __all__ = [
     "DecisionScorerProvider",
     "InboundDispatch",
     "InboundHandler",
+    "InboundTextRenderer",
     "LoadedPlugin",
     "PluginContext",
     "PluginManifest",
     "PluginRegistry",
+    "PluginSettingsProvider",
     "build_plugin_tools",
     "collect_plugin_tool_configs",
     "discover_plugin_dirs",

@@ -570,3 +570,89 @@ async def test_force_compact_reuses_graph_mw_and_restores_keep(tmp_path) -> None
     assert graph_mw._lc_helper.keep == original_keep
     sid = graph.aupdate_state.await_args.args[1]["_summarization_session_id"]
     assert result.display_path == f".octop/conversation_history/{sid}.md"
+
+
+def _claude_thread(turns: int = 8) -> list:
+    """Alternating turns whose AI replies carry Claude reasoning blocks and ids."""
+    msgs: list = []
+    for i in range(turns):
+        msgs.append(HumanMessage(id=f"h{i}", content=f"user-{i} " + ("x" * 40)))
+        msgs.append(
+            AIMessage(
+                id=f"a{i}",
+                content=[
+                    {"type": "thinking", "thinking": f"plan-{i}", "signature": "sig"},
+                    {"type": "text", "text": f"asst-{i} " + ("y" * 40)},
+                ],
+                response_metadata={"model_provider": "anthropic", "model_name": "claude-sonnet"},
+            )
+        )
+    return msgs
+
+
+def _reasoning_blocks(messages: list) -> int:
+    return sum(
+        1
+        for m in messages
+        if isinstance(m.content, list) and any(isinstance(b, dict) and b.get("type") == "thinking" for b in m.content)
+    )
+
+
+@pytest.mark.asyncio
+async def test_force_compact_event_matches_auto_compaction_fields(tmp_path) -> None:
+    """/compact writes the fields deepagents' own summarization writes (0.7.35+).
+
+    ``created_at_index`` makes the kept messages drop Claude reasoning blocks
+    bound to the summarized conversation; ``cutoff_message_id`` pins the cutoff
+    to a message instead of a bare index.
+    """
+    messages = _claude_thread(8)
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=SimpleNamespace(values={"messages": messages}))
+    graph.aupdate_state = AsyncMock()
+
+    result = await force_compact_thread(
+        graph=graph,
+        backend=_workspace_backend(tmp_path),
+        model=_summary_model("SUMMARY"),
+        thread_id="thr_fields",
+    )
+
+    assert result.ok is True
+    event = graph.aupdate_state.await_args.args[1]["_summarization_event"]
+    assert event["cutoff_index"] == len(messages) - FORCE_KEEP_MESSAGES
+    assert event["cutoff_message_id"] == messages[event["cutoff_index"]].id
+    assert event["created_at_index"] == len(messages)
+
+
+@pytest.mark.asyncio
+async def test_force_compact_drops_reasoning_from_kept_messages(tmp_path) -> None:
+    """The model must not see reasoning blocks of messages kept across /compact."""
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.summarization import SummarizationMiddleware
+
+    messages = _claude_thread(8)
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=SimpleNamespace(values={"messages": messages}))
+    graph.aupdate_state = AsyncMock()
+
+    result = await force_compact_thread(
+        graph=graph,
+        backend=_workspace_backend(tmp_path),
+        model=_summary_model("SUMMARY"),
+        thread_id="thr_reasoning",
+    )
+    assert result.ok is True
+    event = graph.aupdate_state.await_args.args[1]["_summarization_event"]
+
+    reader = SummarizationMiddleware(
+        model=_summary_model("unused"), backend=StateBackend(), trigger=("messages", 99), keep=("messages", 2)
+    )
+    effective = reader._apply_event_to_messages(messages, event)
+
+    assert effective[0] is event["summary_message"]
+    assert len(effective) == 1 + FORCE_KEEP_MESSAGES
+    assert _reasoning_blocks(messages) == 8  # the stored history is untouched
+    assert _reasoning_blocks(effective[1:]) == 0
+    # Dropping reasoning keeps the visible answer.
+    assert all(any(b.get("type") == "text" for b in m.content) for m in effective[1:] if isinstance(m.content, list))

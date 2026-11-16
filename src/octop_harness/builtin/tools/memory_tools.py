@@ -9,7 +9,7 @@ The agent exposes service-backed tools:
   :class:`MemoryService` ranker (atom + page + raw).
 * ``memory_get(path, start, lines)`` resolves a virtual path returned by
   ``memory_search``.
-* ``memory_save(content, topic)`` explicitly persists a fact through
+* ``memory_save(content, topic, kind)`` explicitly persists a typed memory through
   :meth:`MemoryService.save`.
 
 ``MEMORY.md`` is user-maintained strong memory, loaded in full into chat
@@ -23,8 +23,9 @@ crashing the agent turn or leaking a stack trace into the conversation.
 
 from __future__ import annotations
 
+import inspect
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from langchain_core.tools import StructuredTool, tool
 
@@ -45,12 +46,16 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
     * ``memory_get(path, start, lines)`` — resolve a virtual path to its
       source markdown excerpt.
 
-    * ``memory_save(content, topic)`` — persist canonical memory through the
+    * ``memory_save(content, topic, kind)`` — persist canonical memory through the
       service, independently of the user-maintained ``MEMORY.md``.
 
     Args:
         service: A :class:`MemoryService` to bind the tools to.
     """
+    save_parameters = inspect.signature(service.save).parameters
+    supports_kind = "kind" in save_parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in save_parameters.values()
+    )
 
     @tool
     def memory_search(query: str, max_results: int = 5) -> str:
@@ -111,22 +116,37 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
         return str(result)
 
     @tool
-    def memory_save(content: str, topic: str | None = None) -> str:
-        """Save a durable fact, preference, decision, or lesson to octop-memory.
+    def memory_save(
+        content: str,
+        topic: str | None = None,
+        kind: Literal["Fact", "Preference", "Decision", "Task"] = "Fact",
+    ) -> str:
+        """Save a durable memory with its semantic kind to octop-memory.
 
         Use when the user asks you to remember something. Store one concise
-        fact per call; only confirm remembering after this tool succeeds.
-        Do not read USER.md or MEMORY.md to save a fact. Those files stay
+        memory per call; choose its kind in this tool call, without another
+        model request. Only confirm remembering after this tool succeeds.
+        Do not read USER.md or MEMORY.md to save a memory. Those files stay
         in the session snapshot, and document reconciliation runs later.
 
         Args:
-            content: The fact to remember, preserving its scope and qualifiers.
+            content: The memory to save, preserving its scope and qualifiers.
             topic: Optional topic used to organize the memory.
+            kind: Preference for stable likes/communication habits, Decision
+                for an agreed choice, Task for a commitment/to-do, Fact for
+                other factual knowledge or uncertain classification. A Task
+                does not create a scheduled reminder. Topic is not a kind.
+                Do not retry a typed save as Fact after an upgrade error.
         """
         if not content.strip():
             return "memory_save failed: content is empty"
+        if kind != "Fact" and not supports_kind:
+            return "memory_save failed: upgrade octop-memory to a version supporting MemoryService.save(kind=...)"
         try:
-            service.save(content.strip(), topic=topic)
+            if kind == "Fact":
+                service.save(content.strip(), topic=topic)
+            else:
+                service.save(content.strip(), topic=topic, kind=kind)
         except Exception as exc:  # pragma: no cover - fail softly at the tool boundary; pylint: disable=broad-except
             logger.warning("memory_save failed: %s", exc, exc_info=True)
             return f"memory_save failed: {exc.__class__.__name__}"

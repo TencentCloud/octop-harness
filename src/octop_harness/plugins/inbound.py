@@ -19,6 +19,19 @@ class InboundHandler(Protocol):
         ...
 
 
+class InboundTextRenderer(Protocol):
+    """Optional text assembly after admission; returning None keeps host defaults.
+
+    The host supplies current text plus media/document hints, rendered background
+    segments and the resolved locale. The plugin never needs to parse host labels.
+    Routing, media blocks, commands and authorization remain host-owned.
+    """
+
+    def render_inbound_text(
+        self, message: Any, current_text: str, *, background: list[dict[str, Any]], locale: str
+    ) -> str | None: ...
+
+
 class DecisionScorer(Protocol):
     async def __call__(
         self, *, state: str, statements: list[tuple[str, str]], strict: bool = False
@@ -38,3 +51,6 @@ def validate_inbound_handler(handler: InboundHandler) -> None:
         raise ValueError("inbound handler must implement handle() and close()")
     if inspect.iscoroutinefunction(handler.close):
         raise ValueError("inbound close() must be synchronous; use wait_closed() for asynchronous cleanup")
+    render = getattr(handler, "render_inbound_text", None)
+    if render is not None and (not callable(render) or inspect.iscoroutinefunction(render)):
+        raise ValueError("inbound render_inbound_text() must be synchronous")

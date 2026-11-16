@@ -437,6 +437,81 @@ def _mark_api_fallback_chunk(chunk: Any) -> Any:
     return chunk
 
 
+def _chunk_without_usage(chunk: Any) -> Any:
+    """Drop token usage from a non-final stream chunk.
+
+    OpenAI-compatible streams report a cumulative total, and only the final
+    chunk is supposed to carry it. Gateways that repeat that total on every
+    chunk make ``AIMessageChunk`` addition multiply ``input_tokens`` by the
+    chunk count, and ``response_metadata`` merges sum nested usage integers
+    the same way. Intermediate chunks keep their text and tool calls.
+    """
+    message = getattr(chunk, "message", None)
+    if message is None:
+        return chunk
+    usage = getattr(message, "usage_metadata", None)
+    response_metadata = getattr(message, "response_metadata", None)
+    wire = response_metadata if isinstance(response_metadata, dict) else {}
+    has_wire = bool(wire.get("token_usage") or wire.get("usage"))
+    if not usage and not has_wire:
+        return chunk
+    updates: dict[str, Any] = {}
+    if usage:
+        updates["usage_metadata"] = None
+    if has_wire:
+        cleaned = dict(wire)
+        cleaned.pop("token_usage", None)
+        cleaned.pop("usage", None)
+        updates["response_metadata"] = cleaned
+    if not updates or not hasattr(message, "model_copy"):
+        return chunk
+    new_message = message.model_copy(update=updates)
+    if hasattr(chunk, "model_copy"):
+        return chunk.model_copy(update={"message": new_message})
+    return chunk
+
+
+def _iter_final_chunk_usage(chunks: Iterator[Any]) -> Iterator[Any]:
+    """Yield stream chunks with usage retained only on the last one.
+
+    On a mid-stream error the buffered chunk is flushed with its usage so
+    already-received text is not dropped. That usage is the last cumulative
+    total seen before the failure.
+    """
+    pending: Any | None = None
+    try:
+        for chunk in chunks:
+            if pending is not None:
+                yield _chunk_without_usage(pending)
+            pending = chunk
+        if pending is not None:
+            final = pending
+            pending = None
+            yield final
+    except Exception:
+        if pending is not None:
+            yield pending
+        raise
+
+
+async def _aiter_final_chunk_usage(chunks: AsyncIterator[Any]) -> AsyncIterator[Any]:
+    """Async form of :func:`_iter_final_chunk_usage`."""
+    pending: Any | None = None
+    try:
+        async for chunk in chunks:
+            if pending is not None:
+                yield _chunk_without_usage(pending)
+            pending = chunk
+        if pending is not None:
+            final = pending
+            pending = None
+            yield final
+    except Exception:
+        if pending is not None:
+            yield pending
+        raise
+
+
 def _fallback_model_for(instance: Any, exc: BaseException, kwargs: Mapping[str, Any]) -> Any | None:
     fallback = getattr(instance, "_harness_api_fallback_model", None)
     if fallback is None or not _request_allows_chat_completions_fallback(kwargs):
@@ -594,6 +669,10 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 
     No module-level helpers are mutated, so the subclass is safe under
     concurrent use.
+
+    Streaming keeps usage on the final chunk only. Official streams already
+    look like that; gateways that attach a cumulative total to every chunk
+    otherwise inflate token counts when the chunks are added together.
     """
     cached = _REASONING_AWARE_CHAT_OPENAI.get(id(base_cls))
     if cached is not None:
@@ -623,20 +702,22 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
         def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
             yielded = False
             try:
-                for chunk in super()._stream(*args, **kwargs):
+                for chunk in _iter_final_chunk_usage(super()._stream(*args, **kwargs)):
                     yielded = True
                     yield chunk
             except Exception as exc:
                 fallback = None if yielded else _fallback_model_for(self, exc, kwargs)
                 if fallback is None:
                     raise
+                # Fallback is the same subclass, so its own ``_stream`` keeps
+                # usage on the final chunk as well.
                 for chunk in fallback._stream(*args, **kwargs):
                     yield _mark_api_fallback_chunk(chunk)
 
         async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
             yielded = False
             try:
-                async for chunk in super()._astream(*args, **kwargs):
+                async for chunk in _aiter_final_chunk_usage(super()._astream(*args, **kwargs)):
                     yielded = True
                     yield chunk
             except Exception as exc:
@@ -662,6 +743,11 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 
         def _get_request_payload(self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
             input_ = _sanitize_input_messages(input_)
+            # Drop office/PDF ``file`` blocks before LangChain turns them into
+            # ``file_data`` data URIs. ModelConfig.input has no file modality,
+            # and OpenAI-compatible backends (MiniMax and others) reject the
+            # part. Images stay. Copies only messages that change.
+            input_ = _omit_inline_file_blocks(input_)
             payload: dict[str, Any] = super()._get_request_payload(input_, stop=stop, **kwargs)
             if getattr(self, "_harness_codex", False):
                 source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
@@ -669,6 +755,7 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             messages_out = payload.get("messages")
             if not isinstance(messages_out, list):
                 return payload
+            _drop_openai_file_parts(messages_out)
             supported: set[str] = getattr(self, "_harness_supported_input", set()) or {"text", "image"}
             if "image" not in supported:
                 _strip_unsupported_content_types(messages_out)
@@ -684,6 +771,66 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 # ---------------------------------------------------------------------------
 # Legacy image block sanitization
 # ---------------------------------------------------------------------------
+
+_FILE_BLOCK_TYPES = frozenset({"file", "input_file"})
+_FILE_OMITTED_NOTE = "[file omitted: binary file content was not sent to the model]"
+
+
+def _is_file_block(block: Any) -> bool:
+    return isinstance(block, dict) and block.get("type") in _FILE_BLOCK_TYPES
+
+
+def _content_without_file_blocks(content: list[Any]) -> str | list[Any] | None:
+    """Return replacement content when *content* embeds a binary file block.
+
+    ``None`` means the list has no file block and should be left unchanged.
+    Text-only leftovers collapse to a string so providers that reject list
+    content still accept the message.
+    """
+    if not any(_is_file_block(block) for block in content):
+        return None
+    kept = [block for block in content if not _is_file_block(block)]
+    if not kept:
+        return _FILE_OMITTED_NOTE
+    if all(isinstance(block, dict) and block.get("type") == "text" for block in kept):
+        text = "\n".join(str(block.get("text") or "") for block in kept if isinstance(block, dict))
+        return f"{text}\n{_FILE_OMITTED_NOTE}".strip() if text else _FILE_OMITTED_NOTE
+    return [*kept, {"type": "text", "text": _FILE_OMITTED_NOTE}]
+
+
+def _omit_inline_file_blocks(input_: Any) -> Any:
+    """Copy messages that carry ``type: file`` blocks, leaving originals intact."""
+    if not isinstance(input_, list):
+        return input_
+    from langchain_core.messages import BaseMessage
+
+    rewritten: list[Any] | None = None
+    for index, msg in enumerate(input_):
+        if not isinstance(msg, BaseMessage):
+            continue
+        content = msg.content
+        if not isinstance(content, list):
+            continue
+        replacement = _content_without_file_blocks(content)
+        if replacement is None:
+            continue
+        if rewritten is None:
+            rewritten = list(input_)
+        rewritten[index] = msg.model_copy(update={"content": replacement})
+    return rewritten if rewritten is not None else input_
+
+
+def _drop_openai_file_parts(messages: list[Any]) -> None:
+    """Remove already-serialized OpenAI file parts from a request payload."""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        replacement = _content_without_file_blocks(content)
+        if replacement is not None:
+            msg["content"] = replacement
 
 
 def _sanitize_input_messages(input_: Any) -> Any:
