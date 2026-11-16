@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- Read explicitly selected skills' `SKILL.md` bodies before the first model request. Bodies apply only to the current request and are omitted when deselected on a later turn in the same thread; disabled skills remain unavailable.
+
 ## [1.0.10] - 2026-11-15
 
 ### 新增

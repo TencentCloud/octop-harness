@@ -1564,7 +1564,7 @@ class HarnessAgent:
             ModelRouterMiddleware(cfg, self._model_factory, get_protocol=self._get_protocol),
             ModelSettingsMiddleware(),
             SessionHeaderMiddleware(),
-            SkillFilterMiddleware(config=cfg),
+            SkillFilterMiddleware(config=cfg, backend=self._backend),
             McpToolErrorMiddleware(),
         ]
 

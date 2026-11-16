@@ -9,7 +9,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 
-from deepagents.middleware.skills import SkillMetadata
+from deepagents.backends.protocol import BackendProtocol
+from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import ToolMessage
@@ -223,26 +224,59 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
 
     System-prompt rendering is fully delegated to the downstream
     ``SkillsMiddleware`` added by :func:`deepagents.create_deep_agent`.
-    This middleware exclusively updates state so that ``SkillsMiddleware``
-    builds one correct, filtered section — avoiding duplicate sections.
+    After filtering, explicitly selected skills are read through native
+    ``pinned_skills`` support. Pinned messages are appended only to the current
+    model request and are not persisted in checkpoints, so deselection on a later
+    turn removes the bodies. Without a selection, progressive disclosure applies.
     """
 
-    def __init__(self, *, config: HarnessAgentConfig) -> None:
+    def __init__(self, *, config: HarnessAgentConfig, backend: BackendProtocol | None = None) -> None:
         self._config = config
+        self._skill_pinner = SkillsMiddleware(backend=backend, sources=[], system_prompt=None) if backend else None
 
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        return handler(self._apply_filter(request))
+        request = self._apply_filter(request)
+        state = self._selected_skill_state(request)
+        if state is not None and self._skill_pinner is not None:
+            update = self._skill_pinner.before_model(state, request.runtime)
+            request = self._with_pinned_skills(request, state, update)
+        return handler(request)
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        return await handler(self._apply_filter(request))
+        request = self._apply_filter(request)
+        state = self._selected_skill_state(request)
+        if state is not None and self._skill_pinner is not None:
+            update = await self._skill_pinner.abefore_model(state, request.runtime)
+            request = self._with_pinned_skills(request, state, update)
+        return await handler(request)
+
+    def _selected_skill_state(self, request: ModelRequest) -> SkillsState | None:
+        allowed = (runtime_config(request).get("configurable") or {}).get("skills")
+        raw_metadata = request.state.get("skills_metadata")
+        metadata: list[SkillMetadata] = list(raw_metadata) if isinstance(raw_metadata, list) else []
+        if not isinstance(allowed, list) or not allowed or not metadata:
+            return None
+        # Metadata already excludes disabled and unselected skills. Paths come from the native catalog, not user input.
+        return {
+            "messages": request.messages,
+            "skills_metadata": metadata,
+            "pinned_skills": [skill["name"] for skill in metadata],
+        }
+
+    @staticmethod
+    def _with_pinned_skills(request: ModelRequest, state: SkillsState, update: dict[str, Any] | None) -> ModelRequest:
+        messages = update.get("messages", []) if update else []
+        if len(messages) != len(state["pinned_skills"]):
+            raise ValueError("Could not read all selected skill SKILL.md bodies for this turn; model request stopped")
+        return request.override(messages=[*request.messages, *messages])
 
     def _blocked_tool_message(self, request: ToolCallRequest, reason: str) -> ToolMessage:
         tool_call = request.tool_call
