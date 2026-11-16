@@ -1,4 +1,4 @@
-"""通过真实 DeepAgents 图与本地假模型验证选中技能正文。"""
+"""Verify selected skill bodies with a real DeepAgents graph and a local fake model."""
 
 from __future__ import annotations
 
@@ -21,20 +21,20 @@ class SelectedSkillContextTests(unittest.TestCase):
     filter_class = SkillFilterMiddleware
 
     def setUp(self):
-        temp = tempfile.TemporaryDirectory(prefix="amberseal-skill-context-")
+        temp = tempfile.TemporaryDirectory(prefix="selected-skill-context-")
         self.addCleanup(temp.cleanup)
         self.workspace = Path(temp.name)
         for slug, body in (
-            ("current-consultation", "CURRENT_BODY_编造业务答案禁止"),
-            ("historical-analysis", "HISTORY_BODY_不得自动注入"),
+            ("current-consultation", "CURRENT_BODY_DO_NOT_FABRICATE_BUSINESS_ANSWERS"),
+            ("historical-analysis", "HISTORY_BODY_DO_NOT_AUTO_INJECT"),
         ):
             path = self.workspace / ".octop/skills" / slug / "SKILL.md"
             path.parent.mkdir(parents=True)
-            path.write_text(f"---\nname: {slug}\ndescription: 合成测试技能\n---\n\n{body}\n", encoding="utf-8")
+            path.write_text(f"---\nname: {slug}\ndescription: Synthetic test skill\n---\n\n{body}\n", encoding="utf-8")
         self.backend = FilesystemBackend(root_dir=self.workspace, virtual_mode=True)
         reference = self.workspace / ".octop/skills/current-consultation/references/detail.md"
         reference.parent.mkdir()
-        reference.write_text("REFERENCE_BODY_不自动展开", encoding="utf-8")
+        reference.write_text("REFERENCE_BODY_DO_NOT_AUTO_EXPAND", encoding="utf-8")
 
     def graph(self, *, disabled=frozenset()):
         class CaptureModel(FakeMessagesListChatModel):
@@ -47,7 +47,7 @@ class SelectedSkillContextTests(unittest.TestCase):
                 self.captured.append(messages)
                 return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
-        model = CaptureModel(responses=[AIMessage(content="合成响应")])
+        model = CaptureModel(responses=[AIMessage(content="Synthetic response")])
         graph = create_deep_agent(
             model,
             backend=self.backend,
@@ -60,7 +60,7 @@ class SelectedSkillContextTests(unittest.TestCase):
     def test_first_request_contains_native_pinned_body_and_unselect_does_not_leak(self):
         graph, model = self.graph()
         config = {"configurable": {"thread_id": "same-thread", "skills": ["current-consultation"]}}
-        result = graph.invoke({"messages": [HumanMessage("合成问题")]}, config=config)
+        result = graph.invoke({"messages": [HumanMessage("Synthetic question")]}, config=config)
         pinned = [m for m in model.captured[0] if m.additional_kwargs.get("lc_source") == "pinned_skill"]
         self.assertEqual(len(pinned), 1)
         self.assertIn("CURRENT_BODY_", pinned[0].content)
@@ -69,14 +69,14 @@ class SelectedSkillContextTests(unittest.TestCase):
         self.assertNotIn("REFERENCE_BODY_", str(model.captured[0]))
         self.assertFalse(any(m.additional_kwargs.get("lc_source") == "pinned_skill" for m in result["messages"]))
         config["configurable"]["skills"] = []
-        graph.invoke({"messages": [HumanMessage("取消选择后的合成问题")]}, config=config)
+        graph.invoke({"messages": [HumanMessage("Synthetic question after deselection")]}, config=config)
         self.assertNotIn("CURRENT_BODY_", str(model.captured[1]))
 
     def test_async_first_request_contains_body(self):
         graph, model = self.graph()
         asyncio.run(
             graph.ainvoke(
-                {"messages": [HumanMessage("合成问题")]},
+                {"messages": [HumanMessage("Synthetic question")]},
                 config={"configurable": {"thread_id": "async", "skills": ["current-consultation"]}},
             )
         )
@@ -86,7 +86,7 @@ class SelectedSkillContextTests(unittest.TestCase):
     def test_disabled_skill_never_injects_body(self):
         graph, model = self.graph(disabled=frozenset({"current-consultation"}))
         graph.invoke(
-            {"messages": [HumanMessage("合成问题")]},
+            {"messages": [HumanMessage("Synthetic question")]},
             config={
                 "configurable": {"thread_id": "disabled", "skills": ["current-consultation"]},
             },
@@ -96,7 +96,7 @@ class SelectedSkillContextTests(unittest.TestCase):
     def test_no_selection_keeps_progressive_disclosure(self):
         graph, model = self.graph()
         graph.invoke(
-            {"messages": [HumanMessage("合成问题")]},
+            {"messages": [HumanMessage("Synthetic question")]},
             config={
                 "configurable": {"thread_id": "unselected"},
             },
@@ -107,26 +107,26 @@ class SelectedSkillContextTests(unittest.TestCase):
     def test_next_turn_reads_updated_body_without_caching_previous_content(self):
         graph, model = self.graph()
         config = {"configurable": {"thread_id": "updated", "skills": ["current-consultation"]}}
-        graph.invoke({"messages": [HumanMessage("第一轮")]}, config=config)
+        graph.invoke({"messages": [HumanMessage("First turn")]}, config=config)
         path = self.workspace / ".octop/skills/current-consultation/SKILL.md"
         path.write_text(path.read_text(encoding="utf-8").replace("CURRENT_BODY_", "UPDATED_BODY_"), encoding="utf-8")
-        graph.invoke({"messages": [HumanMessage("第二轮")]}, config=config)
+        graph.invoke({"messages": [HumanMessage("Second turn")]}, config=config)
         self.assertIn("UPDATED_BODY_", str(model.captured[1]))
         self.assertNotIn("CURRENT_BODY_", str(model.captured[1]))
 
     def test_unreadable_selected_skill_stops_before_model(self):
         graph, model = self.graph()
         config = {"configurable": {"thread_id": "missing", "skills": ["current-consultation"]}}
-        graph.invoke({"messages": [HumanMessage("第一轮")]}, config=config)
+        graph.invoke({"messages": [HumanMessage("First turn")]}, config=config)
         (self.workspace / ".octop/skills/current-consultation/SKILL.md").unlink()
-        with self.assertRaisesRegex(ValueError, "无法完整读取"):
-            graph.invoke({"messages": [HumanMessage("技能文件已不可读")]}, config=config)
+        with self.assertRaisesRegex(ValueError, "Could not read all selected skill"):
+            graph.invoke({"messages": [HumanMessage("The skill file is no longer readable")]}, config=config)
         self.assertEqual(len(model.captured), 1)
 
     def test_unknown_selection_never_treats_input_as_file_path(self):
         graph, model = self.graph()
         graph.invoke(
-            {"messages": [HumanMessage("合成问题")]},
+            {"messages": [HumanMessage("Synthetic question")]},
             config={
                 "configurable": {"thread_id": "unknown", "skills": ["/.octop/skills/historical-analysis/SKILL.md"]},
             },

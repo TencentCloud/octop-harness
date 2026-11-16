@@ -224,9 +224,10 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
 
     System-prompt rendering is fully delegated to the downstream
     ``SkillsMiddleware`` added by :func:`deepagents.create_deep_agent`.
-    显式选择的技能在过滤后通过原生 ``pinned_skills`` 读取正文。
-    固定消息仅附加到当前模型请求。正文不写入 checkpoint。
-    后轮取消选择后不再携带旧技能正文。未选择时仍使用渐进披露。
+    After filtering, explicitly selected skills are read through native
+    ``pinned_skills`` support. Pinned messages are appended only to the current
+    model request and are not persisted in checkpoints, so deselection on a later
+    turn removes the bodies. Without a selection, progressive disclosure applies.
     """
 
     def __init__(self, *, config: HarnessAgentConfig, backend: BackendProtocol | None = None) -> None:
@@ -263,7 +264,7 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
         metadata: list[SkillMetadata] = list(raw_metadata) if isinstance(raw_metadata, list) else []
         if not isinstance(allowed, list) or not allowed or not metadata:
             return None
-        # 元数据已经过禁用与本轮选择过滤。路径来自原生目录而非用户参数。
+        # Metadata already excludes disabled and unselected skills. Paths come from the native catalog, not user input.
         return {
             "messages": request.messages,
             "skills_metadata": metadata,
@@ -274,7 +275,7 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
     def _with_pinned_skills(request: ModelRequest, state: SkillsState, update: dict[str, Any] | None) -> ModelRequest:
         messages = update.get("messages", []) if update else []
         if len(messages) != len(state["pinned_skills"]):
-            raise ValueError("无法完整读取本轮选中技能的 SKILL.md。已停止模型请求")
+            raise ValueError("Could not read all selected skill SKILL.md bodies for this turn; model request stopped")
         return request.override(messages=[*request.messages, *messages])
 
     def _blocked_tool_message(self, request: ToolCallRequest, reason: str) -> ToolMessage:

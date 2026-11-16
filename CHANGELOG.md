@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
-- 显式选择的技能在模型首个请求前读取 `SKILL.md` 正文。正文仅用于当前请求，同一线程下一轮取消选择后不再携带旧技能正文；已禁用的技能仍无法加载。
+- Read explicitly selected skills' `SKILL.md` bodies before the first model request. Bodies apply only to the current request and are omitted when deselected on a later turn in the same thread; disabled skills remain unavailable.
 
 ## [1.0.10] - 2026-11-15
 
