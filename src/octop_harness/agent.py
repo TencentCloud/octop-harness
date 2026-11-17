@@ -174,6 +174,7 @@ class HarnessAgent:
 
     _mcp_tools: list[Any]
     _mcp_tool_name_set: frozenset[str]
+    _checkpointer_instance: Any
 
     def __init__(
         self,
@@ -1835,7 +1836,7 @@ class HarnessAgent:
     ) -> Any:
         cfg = self._config
         checkpointer = self._resolve_checkpointer()
-        self._checkpointer_instance: Any = checkpointer
+        self._checkpointer_instance = checkpointer
 
         kwargs: dict[str, Any] = {
             "model": self._build_seed_model(),
