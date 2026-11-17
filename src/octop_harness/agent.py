@@ -1347,11 +1347,13 @@ class HarnessAgent:
             from octop_harness.acp.models import ACPConfig
 
             self._seed_model_ref = None
+            checkpointer = self._resolve_checkpointer()
+            self._checkpointer_instance = checkpointer
             self._base_graph = build_managed_graph(
                 runner=managed_runner,
                 acp_config=ACPConfig(runners=dict(self._config.acp_runners)),
                 cwd=str(self._workspace_path),
-                checkpointer=self._resolve_checkpointer(),
+                checkpointer=checkpointer,
             )
             self._graph = self._wrap_graph(self._base_graph)
             self._sync_protocol_graph()
