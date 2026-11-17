@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 托管 ACP 回合可以带上本轮的 MCP 服务器、会话模式和附加提示。YOLO 会切到代理公布的免审批模式，并自动放行未被硬拦截的权限请求。代理拒绝这批 MCP 时，会话改为不带这些工具继续。
+
 ### 修复
 
 - 配套 Memory 支持活动锁时，PG checkpoint 的调用、流式执行、恢复、历史读取及状态更新会与宿主裁剪协调，取消和提前关闭流也会等待图退出再释放锁。宿主可通过 `HarnessAgent.checkpoint_activity(thread_id)` 保护直接操作图的分叉等流程。
