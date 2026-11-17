@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 配套 Memory 支持活动锁时，PG checkpoint 的调用、流式执行、恢复、历史读取及状态更新会与宿主裁剪协调，取消和提前关闭流也会等待图退出再释放锁。宿主可通过 `HarnessAgent.checkpoint_activity(thread_id)` 保护直接操作图的分叉等流程。
+- 将 octop-memory 最低依赖提高到 1.0.5。定时 checkpoint 裁剪在调用 Memory 裁剪器前跳过 PostgreSQL 共享表。宿主在核实线程归属并暂停该线程在所有宿主上的执行、恢复和分叉后，可用 1.0.5 的离线接口显式裁剪该线程。
+- SQLite 定时裁剪在已完成的纯根图线程上，把保留边界所需的旧消息增量合并到边界 checkpoint，再删除旧父链。
+
 ## [1.0.10] - 2026-11-15
 
 ### 新增
