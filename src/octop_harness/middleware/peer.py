@@ -41,6 +41,11 @@ def has_agent_at_mention(text: str) -> bool:
     return _AGENT_AT_RE.search(text) is not None
 
 
+def agent_at_mentions(text: str) -> list[str]:
+    """``@`` tokens in *text*, using the same rule as :func:`has_agent_at_mention`."""
+    return [match.group(1) for match in _AGENT_AT_RE.finditer(text)]
+
+
 def _latest_user_text(request: ModelRequest) -> str:
     messages = getattr(request, "messages", None) or []
     for msg in reversed(messages):
@@ -263,6 +268,7 @@ render_team_prompt = render_peer_prompt
 __all__ = [
     "PeerAgentMiddleware",
     "TeamMiddleware",
+    "agent_at_mentions",
     "has_agent_at_mention",
     "render_peer_prompt",
     "render_team_prompt",

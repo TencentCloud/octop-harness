@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-11-17
+
+### 新增
+
+- 托管 ACP 回合可以带上本轮的 MCP 服务器、会话模式和附加提示。YOLO 会切到代理公布的免审批模式，并自动放行未被硬拦截的权限请求。代理拒绝这批 MCP 时，会话改为不带这些工具继续。
+
+### 修复
+
+- Memory 支持活动锁时，checkpoint 的执行、恢复和读写会避开宿主裁剪；取消或提前结束也会等图退出再放锁。直接改图（如分叉）可调用 `HarnessAgent.checkpoint_activity(thread_id)`。
+- 最低依赖 octop-memory 1.0.5。定时裁剪跳过 PostgreSQL 共享表；宿主确认线程归属并暂停该线程后，可用离线接口按线程裁剪。SQLite 会把保留边界仍需要的旧消息并入边界 checkpoint，再删掉更早的父链。
+
 ## [1.0.10] - 2026-11-15
 
 ### 新增

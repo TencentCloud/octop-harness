@@ -31,6 +31,56 @@ class ManagedState(TypedDict, total=False):
     resume_option: str
 
 
+def managed_session_mode(config: RunnableConfig) -> str:
+    """ACP ``modeId`` chosen for this turn. Empty keeps the agent's current mode."""
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return ""
+    raw = configurable.get("acp_session_mode")
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def managed_permission_mode(config: RunnableConfig) -> str:
+    """``yolo`` skips ACP approval cards for this turn."""
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return "ask"
+    return "yolo" if configurable.get("acp_permission_mode") == "yolo" else "ask"
+
+
+def managed_turn_mcp(config: RunnableConfig) -> dict[str, Any] | None:
+    """Harness MCP specs the host attached for this managed turn."""
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    raw = configurable.get("acp_mcp_servers")
+    return raw if isinstance(raw, dict) else None
+
+
+def _locale(config: RunnableConfig) -> str:
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return ""
+    raw = configurable.get("locale")
+    return raw if isinstance(raw, str) else ""
+
+
+def managed_prompt_note(config: RunnableConfig) -> str:
+    """Extra instruction the host wants appended to the ACP prompt."""
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return ""
+    raw = configurable.get("acp_prompt_note")
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def append_prompt_note(text: str, note: str) -> str:
+    extra = note.strip()
+    if text and extra:
+        return f"{text}\n\n{extra}"
+    return text
+
+
 def _thread_id(config: RunnableConfig) -> str:
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
@@ -349,6 +399,11 @@ class AcpRunnerChatModel(BaseChatModel):
     thread_id: str
     service: Any
     option_id: str | None = None
+    mcp_servers: dict[str, Any] | None = None
+    prompt_note: str = ""
+    locale: str = ""
+    permission_mode: str = "ask"
+    session_mode: str = ""
     _permission: Any = PrivateAttr(default=None)
 
     @property
@@ -411,9 +466,15 @@ class AcpRunnerChatModel(BaseChatModel):
                     result = await self.service.run_turn(
                         thread_id=self.thread_id,
                         runner=self.runner,
-                        prompt_blocks=[{"type": "text", "text": _user_text(list(messages))}],
+                        prompt_blocks=[
+                            {"type": "text", "text": append_prompt_note(_user_text(list(messages)), self.prompt_note)}
+                        ],
                         cwd=self.cwd,
                         on_message=on_message,
+                        mcp_servers=self.mcp_servers,
+                        locale=self.locale,
+                        permission_mode=self.permission_mode,
+                        session_mode=self.session_mode,
                     )
                 if result.get("status") == "permission_required":
                     self._permission = result.get("suspended_permission")
@@ -450,6 +511,11 @@ def build_managed_graph(
             thread_id=thread_id,
             service=bound,
             option_id=option_id,
+            mcp_servers=managed_turn_mcp(config),
+            prompt_note=managed_prompt_note(config),
+            locale=_locale(config),
+            permission_mode=managed_permission_mode(config),
+            session_mode=managed_session_mode(config),
         )
         text_parts: list[str] = []
         reasoning_parts: list[str] = []

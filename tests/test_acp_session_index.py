@@ -51,13 +51,13 @@ class _Conn:
 @pytest.mark.asyncio
 async def test_resume_reuses_saved_session() -> None:
     conn = _Conn()
-    session_id = await resume_or_create_session(
+    opened = await resume_or_create_session(
         conn,
         cwd="/work",
         session_id="sess-old",
         load_supported=True,
     )
-    assert session_id == "sess-old"
+    assert opened.session_id == "sess-old"
     assert conn.loaded == "sess-old"
     assert conn.created is False
 
@@ -65,26 +65,26 @@ async def test_resume_reuses_saved_session() -> None:
 @pytest.mark.asyncio
 async def test_resume_falls_back_when_load_fails() -> None:
     conn = _Conn(fail_load=True)
-    session_id = await resume_or_create_session(
+    opened = await resume_or_create_session(
         conn,
         cwd="/work",
         session_id="sess-old",
         load_supported=True,
     )
-    assert session_id == "sess-new"
+    assert opened.session_id == "sess-new"
     assert conn.created is True
 
 
 @pytest.mark.asyncio
 async def test_resume_creates_when_agent_cannot_load() -> None:
     conn = _Conn()
-    session_id = await resume_or_create_session(
+    opened = await resume_or_create_session(
         conn,
         cwd="/work",
         session_id="sess-old",
         load_supported=False,
     )
-    assert session_id == "sess-new"
+    assert opened.session_id == "sess-new"
     assert conn.loaded is None
 
 

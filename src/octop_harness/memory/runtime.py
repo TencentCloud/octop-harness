@@ -14,6 +14,8 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from deepagents._messages_reducer import _messages_delta_reducer
+from langgraph.channels.delta import DeltaChannel
 from octop_memory import Memory, MemoryService
 
 from octop_harness.builtin.tools.memory_tools import build_memory_tools
@@ -33,6 +35,10 @@ if TYPE_CHECKING:
     from octop_harness.llm.factory import ChatModelFactory
 
 logger = logging.getLogger(__name__)
+
+# Match the reducer used by DeepAgentState. DeltaChannel creates a fresh
+# instance on restore, so graph rebuilds and the maintenance timer can share it.
+_CHECKPOINT_MESSAGES_CHANNEL = DeltaChannel(lambda state, writes: _messages_delta_reducer(state, list(writes)), list)
 
 
 class MemoryRuntime:
@@ -163,6 +169,7 @@ class MemoryRuntime:
             "jsonl_max_bytes": cfg.session_log_max_bytes,
             "on_chat_model": on_chat_model,
             "maintenance_interval_seconds": maintenance_interval,
+            "checkpoint_messages_channel": _CHECKPOINT_MESSAGES_CHANNEL,
             # Start the first maintenance pass shortly after binding.
             "maintenance_initial_delay_seconds": 1.0,
         }

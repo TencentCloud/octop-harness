@@ -233,7 +233,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 ## How to Use
 
-Current release: **1.0.10**. See the [release notes](CHANGELOG.md).
+Current release: **1.0.11**. See the [release notes](CHANGELOG.md).
 
 ### Prerequisites
 - **Python 3.12+**
@@ -351,6 +351,22 @@ authorize the resume caller. This context is process-local, isolated by thread,
 and released when the resumed stream finishes or the agent closes.
 
 ### Scheduled SQLite checkpoint backups
+
+PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
+With octop-memory 1.0.5, hosts can prune a verified thread offline after
+pausing its execution, resumption and forks across all hosts.
+
+With a Memory version exposing `acheckpoint_activity(thread_id)`, Harness holds
+that activity scope through calls, streams, HITL resumes, history reads and state
+updates. Cancellation drains accepted saver I/O before releasing the lease, and
+late saver tasks are rejected. The v3 stream keeps its scope across pull tasks
+until it finishes or is aborted. Hosts
+using `agent.graph` directly must guard the entire operation with
+`async with agent.checkpoint_activity(thread_id)`; the equivalent helper is
+`octop_harness.memory.checkpoint_activity(checkpointer, thread_id)`. This also
+applies to history forks and their source reads. All runtimes sharing those
+threads must participate before a host enables coordinated PostgreSQL retention.
+Older Memory versions remain compatible, but provide no coordination guarantee.
 
 With checkpoint retention enabled, `OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE`
 defaults to `first`. The first cleanup with eligible checkpoints attempts to

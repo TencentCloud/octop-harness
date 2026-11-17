@@ -1,4 +1,4 @@
-"""Manage the SQLite snapshot taken before scheduled checkpoint pruning."""
+"""Manage the backup taken before scheduled checkpoint pruning."""
 
 from __future__ import annotations
 
@@ -99,6 +99,8 @@ def expire_checkpoint_backups(path: Path, keep_days: int) -> None:
             for candidate in backup.parent.iterdir():
                 if candidate.name.startswith(prefix):
                     _remove_file(candidate, max_age_seconds=_DAY_SECONDS)
+        except FileNotFoundError:
+            pass
         except OSError:
             logger.warning("could not inspect temporary checkpoint backups in %s", backup.parent, exc_info=True)
 
