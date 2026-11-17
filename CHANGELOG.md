@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 新增可选启用的 Windows Shell 执行器：超时后仍能返回，并在后代仍持有输出写端时结束其进程树；异步调用被取消时先完成 Job 清理再返回，连续取消同样如此。
+- Windows Shell 清理失败会记录结构化告警日志；输出快照被截断时按增量解码，避免多字节字符被替换成替换符。
+
 ## [1.0.11] - 2026-11-17
 
 ### 新增
