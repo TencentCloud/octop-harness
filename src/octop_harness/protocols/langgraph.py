@@ -13,6 +13,7 @@ from typing import Any
 from langchain_core.messages import BaseMessage
 from langgraph.types import Command, Durability, Overwrite
 
+from octop_harness.memory.checkpoint_activity import _guarded_checkpoint_stream, checkpoint_activity
 from octop_harness.protocols.base import ChatProtocol
 from octop_harness.protocols.think_splitter import ThinkSplitter
 from octop_harness.usage import normalize_usage_metadata
@@ -194,8 +195,11 @@ class LangGraphProtocol(ChatProtocol):
         self, messages: list[BaseMessage], config: dict[str, Any], *, durability: Durability | None = None
     ) -> dict[str, Any]:
         options = self._durability_options({"durability": durability} if durability is not None else {})
-        result: dict[str, Any] = await self._graph.ainvoke({"messages": messages}, config=config, **options)
-        return result
+        async with checkpoint_activity(
+            getattr(self._graph, "checkpointer", None), str((config.get("configurable") or {}).get("thread_id") or "")
+        ):
+            result: dict[str, Any] = await self._graph.ainvoke({"messages": messages}, config=config, **options)
+            return result
 
     async def stream(
         self,
@@ -205,12 +209,16 @@ class LangGraphProtocol(ChatProtocol):
     ) -> AsyncGenerator[dict[str, Any], None]:
         splitter = ThinkSplitter()
         async with aclosing(
-            self._graph.astream(
-                {"messages": messages},
-                config=config,
-                stream_mode=["values", "updates", "messages", "custom"],
-                version="v2",
-                **self._durability_options(kwargs),
+            _guarded_checkpoint_stream(
+                self._graph.astream(
+                    {"messages": messages},
+                    config=config,
+                    stream_mode=["values", "updates", "messages", "custom"],
+                    version="v2",
+                    **self._durability_options(kwargs),
+                ),
+                getattr(self._graph, "checkpointer", None),
+                str((config.get("configurable") or {}).get("thread_id") or ""),
             )
         ) as graph_chunks:
             async for chunk in graph_chunks:
@@ -233,12 +241,16 @@ class LangGraphProtocol(ChatProtocol):
 
         splitter = ThinkSplitter()
         async with aclosing(
-            self._graph.astream(
-                Command(resume={"decisions": decisions}),
-                config=merged_config,
-                stream_mode=["values", "updates", "messages", "custom"],
-                version="v2",
-                **self._durability_options(kwargs),
+            _guarded_checkpoint_stream(
+                self._graph.astream(
+                    Command(resume={"decisions": decisions}),
+                    config=merged_config,
+                    stream_mode=["values", "updates", "messages", "custom"],
+                    version="v2",
+                    **self._durability_options(kwargs),
+                ),
+                getattr(self._graph, "checkpointer", None),
+                thread_id,
             )
         ) as graph_chunks:
             async for chunk in graph_chunks:
@@ -358,6 +370,21 @@ class LangGraphProtocol(ChatProtocol):
         config: dict[str, Any],
         **kwargs: Any,
     ) -> Any:
-        return await self._graph.astream_events(
+        stream = await self._graph.astream_events(
             {"messages": messages}, config=config, version="v3", **self._durability_options(kwargs)
         )
+        checkpointer = getattr(self._graph, "checkpointer", None)
+        if callable(getattr(type(checkpointer), "checkpoint_activity", None)) or callable(
+            getattr(type(checkpointer), "acheckpoint_activity", None)
+        ):
+            # LangGraph v3 projections all pump this iterator. Wrapping it keeps
+            # the native stream API and holds the lease through final flush and
+            # abort, even when consumers use output() or subgraph projections.
+            # This experimental adapter is covered by real LangGraph v3 tests.
+            source = getattr(stream, "_graph_aiter", None)
+            if source is None:
+                raise RuntimeError("checkpoint activity requires a compatible LangGraph v3 stream")
+            stream._graph_aiter = _guarded_checkpoint_stream(
+                source, checkpointer, str((config.get("configurable") or {}).get("thread_id") or "")
+            )
+        return stream

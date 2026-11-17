@@ -356,6 +356,18 @@ PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
 With octop-memory's PostgreSQL pruning support, hosts can prune a verified
 thread after pausing its execution, resumption and forks across all hosts.
 
+With a Memory version exposing `acheckpoint_activity(thread_id)`, Harness holds
+that activity scope through calls, streams, HITL resumes, history reads and state
+updates. Cancellation drains accepted saver I/O before releasing the lease, and
+late saver tasks are rejected. The v3 stream keeps its scope across pull tasks
+until it finishes or is aborted. Hosts
+using `agent.graph` directly must guard the entire operation with
+`async with agent.checkpoint_activity(thread_id)`; the equivalent helper is
+`octop_harness.memory.checkpoint_activity(checkpointer, thread_id)`. This also
+applies to history forks and their source reads. All runtimes sharing those
+threads must participate before a host enables coordinated PostgreSQL retention.
+Older Memory versions remain compatible, but provide no coordination guarantee.
+
 With checkpoint retention enabled, `OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE`
 defaults to `first`. The first cleanup with eligible checkpoints attempts to
 write `memory.sqlite.pre-prune.bak`. If the database plus WAL and 10% headroom
