@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 新增
 
 - 新增可选的 `cloro` 网页搜索供应商（`cloro_search`），返回实时 Google 自然搜索结果，可指定国家。需要 `CLORO_API_KEY`；设置后加入 `auto`。Add the optional `cloro` web-search provider (`cloro_search`): live Google organic results for a query and country. Needs `CLORO_API_KEY`; joins `auto` once it is set.
+- 托管 ACP 回合可以带上本轮的 MCP 服务器、会话模式和附加提示。YOLO 会切到代理公布的免审批模式，并自动放行未被硬拦截的权限请求。代理拒绝这批 MCP 时，会话改为不带这些工具继续。
+
+### 修复
+
+- 配套 Memory 支持活动锁时，PG checkpoint 的调用、流式执行、恢复、历史读取及状态更新会与宿主裁剪协调，取消和提前关闭流也会等待图退出再释放锁。宿主可通过 `HarnessAgent.checkpoint_activity(thread_id)` 保护直接操作图的分叉等流程。
+- 将 octop-memory 最低依赖提高到 1.0.5。定时 checkpoint 裁剪在调用 Memory 裁剪器前跳过 PostgreSQL 共享表。宿主在核实线程归属并暂停该线程在所有宿主上的执行、恢复和分叉后，可用 1.0.5 的离线接口显式裁剪该线程。
+- SQLite 定时裁剪在已完成的纯根图线程上，把保留边界所需的旧消息增量合并到边界 checkpoint，再删除旧父链。
+
+## [1.0.10] - 2026-11-15
+
+### 新增
+
+- 每个 agent 可单独配置自动压缩的触发、保留和截断，也可关闭自动触发。`/compact` 和上下文溢出仍可摘要。
+- 配置 `managed_runner` 后，该 agent 把每一轮转发给指定 ACP runner，不再进入模型循环。
+
+### 修复
+
+- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage，避免累计 usage 被重复累加。
 
 ## [1.0.9] - 2026-11-10
 

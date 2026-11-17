@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
 from types import TracebackType
@@ -36,6 +36,7 @@ from octop_harness.llm.factory import ChatModelFactory
 from octop_harness.llm.session_header import session_header_scope
 from octop_harness.mcp import load_mcp_tools, mcp_tool_names, validate_mcp_default_servers
 from octop_harness.memory import MemoryRuntime
+from octop_harness.memory.checkpoint_activity import checkpoint_activity
 from octop_harness.memory.policy import (
     manual_documents_locked,
     memory_system_prompt,
@@ -283,6 +284,16 @@ class HarnessAgent:
         if explicitly disabled, or ``None`` if unavailable.
         """
         return self._checkpointer_instance
+
+    def checkpoint_activity(self, thread_id: str) -> AbstractAsyncContextManager[None]:
+        """Exclude checkpoint maintenance while a host reads or changes graph state.
+
+        Normal calls and streams are guarded automatically. Hosts using the raw
+        ``graph`` escape hatch (for example, a history fork) must wrap the whole
+        read/write operation in ``async with agent.checkpoint_activity(thread_id)``.
+        SQLite acquires no PostgreSQL lock; older checkpointers remain compatible.
+        """
+        return checkpoint_activity(getattr(self, "_checkpointer_instance", None), thread_id)
 
     @property
     def protocol(self) -> ChatProtocol:
@@ -686,26 +697,27 @@ class HarnessAgent:
             )
             return []
 
-        before_config: dict[str, Any] | None = (
-            {"configurable": {"checkpoint_id": before}} if before is not None else None
-        )
-        raw = await self._read_history_checkpoint(
-            cp,
-            config={"configurable": {"thread_id": thread_id}},
-            before_config=before_config,
-        )
-        if raw is not None:
-            base_messages = [m for m in raw if isinstance(m, BaseMessage)]
-            if base_messages:
-                return base_messages[-limit:]
+        async with self.checkpoint_activity(thread_id):
+            before_config: dict[str, Any] | None = (
+                {"configurable": {"checkpoint_id": before}} if before is not None else None
+            )
+            raw = await self._read_history_checkpoint(
+                cp,
+                config={"configurable": {"thread_id": thread_id}},
+                before_config=before_config,
+            )
+            if raw is not None:
+                base_messages = [m for m in raw if isinstance(m, BaseMessage)]
+                if base_messages:
+                    return base_messages[-limit:]
 
-        # Empty / missing messages on the latest checkpoint (delta savers), or
-        # checkpointer read failed — reconstruct via graph state.
-        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
-        if before is not None:
-            config["configurable"]["checkpoint_id"] = before
-        base_messages = await self._read_history_from_graph_state(config)
-        return base_messages[-limit:] if base_messages else []
+            # Empty / missing messages on the latest checkpoint (delta savers), or
+            # checkpointer read failed — reconstruct via graph state.
+            config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+            if before is not None:
+                config["configurable"]["checkpoint_id"] = before
+            base_messages = await self._read_history_from_graph_state(config)
+            return base_messages[-limit:] if base_messages else []
 
     async def aappend_messages(
         self,
@@ -740,10 +752,11 @@ class HarnessAgent:
             stamped = stamp_missing_checkpoint_ts([with_id], now_ms=now_ms)
             prepared.append(stamped[0] if stamped else with_id)
 
-        await self._graph.aupdate_state(
-            {"configurable": {"thread_id": tid}},
-            {"messages": prepared},
-        )
+        async with self.checkpoint_activity(tid):
+            await self._graph.aupdate_state(
+                {"configurable": {"thread_id": tid}},
+                {"messages": prepared},
+            )
         return prepared
 
     async def adelete_thread(self, thread_id: str) -> bool:
@@ -780,12 +793,13 @@ class HarnessAgent:
                 thread_id,
             )
             return False
-        if hasattr(cp, "adelete_thread"):
-            await cp.adelete_thread(thread_id)
-        elif hasattr(cp, "delete_thread"):
-            await asyncio.to_thread(cp.delete_thread, thread_id)
-        else:
-            raise NotImplementedError(f"checkpointer {type(cp).__name__!r} does not support thread deletion")
+        async with self.checkpoint_activity(thread_id):
+            if hasattr(cp, "adelete_thread"):
+                await cp.adelete_thread(thread_id)
+            elif hasattr(cp, "delete_thread"):
+                await asyncio.to_thread(cp.delete_thread, thread_id)
+            else:
+                raise NotImplementedError(f"checkpointer {type(cp).__name__!r} does not support thread deletion")
         return True
 
     async def aget_context_usage(
@@ -856,14 +870,15 @@ class HarnessAgent:
         else:
             chat_model = self._build_seed_model()
 
-        result = await force_compact_thread(
-            graph=graph,
-            backend=self._backend,
-            model=chat_model,
-            thread_id=thread_id,
-            model_ref=model_ref,
-            summarization_middleware=self._summarization_mw,
-        )
+        async with self.checkpoint_activity(thread_id):
+            result = await force_compact_thread(
+                graph=graph,
+                backend=self._backend,
+                model=chat_model,
+                thread_id=thread_id,
+                model_ref=model_ref,
+                summarization_middleware=self._summarization_mw,
+            )
         # No model call happened, so ContextUsageMiddleware wrote no new
         # snapshot — and its in-process snapshot outranks the message stamp in
         # ``aget_context_usage``. Without this the host context ring keeps
@@ -1036,6 +1051,25 @@ class HarnessAgent:
         )
         return True
 
+    def _close_acp_sessions(self) -> None:
+        """Stop ACP child processes bound to this workspace."""
+        workspace = getattr(self, "_workspace_path", None)
+        if workspace is None:
+            return
+        from octop_harness.acp.service import close_acp_service
+
+        close_acp_service(str(workspace))
+
+    async def _aclose_acp_sessions(self) -> None:
+        workspace = getattr(self, "_workspace_path", None)
+        if workspace is None:
+            return
+        from octop_harness.acp.service import pop_acp_service
+
+        service = pop_acp_service(str(workspace))
+        if service is not None:
+            await service.close_all_sessions()
+
     def close(self) -> None:
         """Release long-lived resources (idempotent, sync).
 
@@ -1056,6 +1090,7 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        self._close_acp_sessions()
         if self._owns_model_factory:
             self._model_factory.close()
         self._memory_runtime.close()
@@ -1074,6 +1109,7 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        await self._aclose_acp_sessions()
         if self._owns_model_factory:
             await self._model_factory.aclose()
         self._memory_runtime.close()
@@ -1271,6 +1307,9 @@ class HarnessAgent:
         if cfg.providers:
             return ChatModelFactory(cfg.providers, agent_config=cfg)
 
+        if (cfg.managed_runner or "").strip():
+            return ChatModelFactory([], agent_config=cfg)
+
         from octop_harness.config.env import detect_providers_from_env
 
         detected_providers, detected_default = detect_providers_from_env()
@@ -1302,6 +1341,21 @@ class HarnessAgent:
 
     def _init_graph(self) -> None:
         """Compile the deep-agent graph and snapshot the seed model ref."""
+        managed_runner = (self._config.managed_runner or "").strip()
+        if managed_runner:
+            from octop_harness.acp.managed import build_managed_graph
+            from octop_harness.acp.models import ACPConfig
+
+            self._seed_model_ref = None
+            self._base_graph = build_managed_graph(
+                runner=managed_runner,
+                acp_config=ACPConfig(runners=dict(self._config.acp_runners)),
+                cwd=str(self._workspace_path),
+                checkpointer=self._resolve_checkpointer(),
+            )
+            self._graph = self._wrap_graph(self._base_graph)
+            self._sync_protocol_graph()
+            return
         # Promote empty-tuple (bootstrap suppression) to None once bootstrap completes,
         # so the unified loader includes the standard workspace context files.
         memory_override = None if self._config.memory == () and self.is_bootstrapped() else self._config.memory
@@ -1875,20 +1929,12 @@ class HarnessAgent:
 
         captured: list[Any] = []
 
-        def _capture_summarization_middleware(*args: Any, **kwargs: Any) -> Any:
-            from octop_harness.middleware.memory_recall import count_tokens_with_recall
+        def _capture_summarization_middleware(*args: Any, **factory_kwargs: Any) -> Any:
             from octop_harness.middleware.summarization_limits import (
-                SUMMARY_INPUT_TOKEN_LIMIT,
-                harden_summarization_middleware,
+                build_configured_summarization_middleware,
             )
 
-            # Summarization wraps the memory middleware and sees clean state
-            # messages. Include their recall snapshots in its budget/keep math.
-            kwargs.setdefault("token_counter", count_tokens_with_recall)
-            # deepagents' factory leaves this unset, so compaction resends the
-            # whole evicted history. Cap it before the summary model sees it.
-            kwargs.setdefault("trim_tokens_to_summarize", SUMMARY_INPUT_TOKEN_LIMIT)
-            mw = harden_summarization_middleware(orig_factory(*args, **kwargs))
+            mw = build_configured_summarization_middleware(orig_factory, args, factory_kwargs, self._config)
             captured.append(mw)
             return mw
 

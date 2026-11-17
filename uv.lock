@@ -1963,7 +1963,7 @@ wheels = [
 
 [[package]]
 name = "octop-harness"
-version = "1.0.9"
+version = "1.0.10"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents" },
@@ -2100,7 +2100,7 @@ requires-dist = [
     { name = "mss", marker = "extra == 'all'", specifier = ">=9.0" },
     { name = "mss", marker = "extra == 'desktop'", specifier = ">=9.0" },
     { name = "octop-browser", specifier = ">=0.9.9" },
-    { name = "octop-memory", specifier = ">=1.0.4" },
+    { name = "octop-memory", specifier = ">=1.0.5" },
     { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=0.1.16,<1.2" },
     { name = "oss2", marker = "extra == 'all'", specifier = ">=2.18" },
     { name = "oss2", marker = "extra == 'object-storage'", specifier = ">=2.18" },
@@ -2141,11 +2141,11 @@ dev = [
 
 [[package]]
 name = "octop-memory"
-version = "1.0.4"
+version = "1.0.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/83/34/84bd86a2b4042322d23badba90f9ce47f5f96900d046c83708d271570d2a/octop_memory-1.0.4.tar.gz", hash = "sha256:c7375ac29fecf222b76ca738a9547ce1f34743d32a81d3287de230d4e7c9a566", size = 628000, upload-time = "2026-11-10T10:38:26.693Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/64/b6/d9f3bd989aea1fd799ad026338d662c59f65aeaa8e687b94b3f6e50c1080/octop_memory-1.0.5.tar.gz", hash = "sha256:c406870d598cd38bc9424817b51c4d69832e36c89c83d1b8c80698eef57ca55f", size = 647402, upload-time = "2026-11-17T12:15:12.763Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6b/97/54a6a30f227e54464326769f53568761cb12b90a7f31cdda976befd590d9/octop_memory-1.0.4-py3-none-any.whl", hash = "sha256:73e54ec492990fb5556da82808f7c65e690e717f02e3f8d06ea90a9669e1a3dc", size = 389426, upload-time = "2026-11-10T10:38:25.241Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/26/c95a66fe2d925391102d0b17fc8353e265dffc5f587bcdd83c76305b6388/octop_memory-1.0.5-py3-none-any.whl", hash = "sha256:aa17fa4c2576cc2f9bef15f61f2a8e103233bc86fd479d2c50208b11e2fc1ca9", size = 405810, upload-time = "2026-11-17T12:15:11.121Z" },
 ]
 
 [[package]]
