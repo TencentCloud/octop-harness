@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 托管 ACP 回合可以带上本轮的 MCP 服务器、会话模式和附加提示。YOLO 会切到代理公布的免审批模式，并自动放行未被硬拦截的权限请求。代理拒绝这批 MCP 时，会话改为不带这些工具继续。
+
 ### 修复
 
 - OpenAI 兼容流式调用只保留最后一个 chunk 的 usage。上游在每个分片都带累计 usage 时，`input_tokens` 不再被乘以分片数（Octop#2007）。

@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, NoReturn
 
 from octop_harness.acp.models import ACPRunnerConfig, SuspendedPermission
+from octop_harness.acp.permission_mode import parse_permission_mode, yolo_option_id
 from octop_harness.acp.permissions import ACPPermissionAdapter
 
 MessageHandler = Callable[[dict[str, Any], bool], Awaitable[None]]
@@ -29,6 +30,10 @@ class ACPHostedClient:
         self._pending_permission: SuspendedPermission | None = None
         self._permission_future: asyncio.Future[Any] | None = None
         self._permission_requested = asyncio.Event()
+        self.permission_mode = "ask"
+
+    def set_permission_mode(self, mode: str) -> None:
+        self.permission_mode = parse_permission_mode(mode)
 
     @property
     def pending_permission(self) -> SuspendedPermission | None:
@@ -80,6 +85,11 @@ class ACPHostedClient:
             tool_call=tool_call,
             options=options,
         )
+        if self.permission_mode == "yolo" and not self._permission_adapter.is_hard_blocked(tool_call):
+            option_id = yolo_option_id(suspended.options)
+            selected = self._permission_adapter.resolve_option_by_id(suspended.options, option_id)
+            if selected is not None:
+                return self._permission_adapter.selected_response(selected)
         await self._emit_message(
             {
                 "type": "permission_request",
