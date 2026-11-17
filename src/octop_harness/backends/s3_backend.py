@@ -38,6 +38,7 @@ from typing import Any, cast
 
 from deepagents.backends.protocol import FileData, FileInfo
 
+from octop_harness.backends.bounded import read_capped
 from octop_harness.backends.cloud_storage_base import CloudStorageBackend
 
 logger = logging.getLogger(__name__)
@@ -289,7 +290,7 @@ class S3Backend(CloudStorageBackend):
                     return result
                 raise v1_exc
 
-    def _get_object_bytes(self, key: str) -> bytes | None:
+    def _get_object_bytes(self, key: str, *, max_bytes: int | None = None) -> bytes | None:
         from botocore.exceptions import ClientError
 
         def _load(client: Any) -> bytes | None:
@@ -301,7 +302,13 @@ class S3Backend(CloudStorageBackend):
                 if code in {"NoSuchKey", "404", "NotFound"} or http_status == 404:
                     return None
                 raise
-            return cast("bytes", resp["Body"].read())
+            stream = resp["Body"]
+            if max_bytes is None:
+                return cast("bytes", stream.read())
+            try:
+                return read_capped(stream, max_bytes)
+            finally:
+                stream.close()
 
         try:
             return _load(self._client)
@@ -317,8 +324,12 @@ class S3Backend(CloudStorageBackend):
     # SDK primitives
     # ------------------------------------------------------------------
 
-    def _get_file_data(self, path: str) -> FileData | None:
-        raw = self._get_object_bytes(self._key(path))
+    def _get_file_data(self, path: str, *, max_bytes: int | None = None) -> FileData | None:
+        raw = (
+            self._get_object_bytes(self._key(path))
+            if max_bytes is None
+            else self._get_object_bytes(self._key(path), max_bytes=max_bytes)
+        )
         if raw is None:
             return None
         return self._parse_body(raw)

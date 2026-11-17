@@ -604,16 +604,19 @@ __all__ = [
     "DEFAULT_BACKEND_SPEC",
     "BackendWorkspace",
     "BubbledLocalShellBackend",
+    "DownloadTooLargeError",
     "HarnessLocalShellBackend",
     "MountedCompositeBackend",
     "ProbeResult",
     "anchor_at_backend_root",
     "cos_spec_to_s3_compat",
+    "download_bytes_capped",
     "probe_backend",
     "resolve_backend",
     "spec_supports_execution",
 ]
 
+from octop_harness.backends.bounded import DownloadTooLargeError, download_bytes_capped
 from octop_harness.backends.bwrap_shell import BubbledLocalShellBackend
 from octop_harness.backends.local_shell import HarnessLocalShellBackend
 from octop_harness.backends.probe import ProbeResult, probe_backend

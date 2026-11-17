@@ -499,3 +499,7 @@ async with ManagedMCPClient({"transport": "stdio", "command": "my-mcp", "args": 
 Explicit `await client.aclose()` is also supported. Closed or disconnected clients
 must be replaced; writes are never retried automatically. Default MCP tool loading
 remains stateless.
+
+### Bounded binary downloads
+
+`BackendWorkspace.download_bytes_capped(path, max_bytes)` and its async counterpart `adownload_bytes_capped` stop local reads at the byte budget plus one. `octop_harness.backends.download_bytes_capped(backend, path, max_bytes)` also supports composite routes and S3/COS/OSS/OBS/PostgreSQL FileData storage. Cloud envelopes are bounded before decoding (up to six times the decoded budget plus 64 KiB of metadata); decoded bytes are checked separately. Overflow raises `DownloadTooLargeError`; unsupported transports raise `NotImplementedError` before downloading. These calls never fall back to an unbounded download.

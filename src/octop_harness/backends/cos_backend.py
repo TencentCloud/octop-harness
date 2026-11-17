@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from deepagents.backends.protocol import FileData, FileInfo
 
+from octop_harness.backends.bounded import read_capped
 from octop_harness.backends.cloud_storage_base import CloudStorageBackend
 
 if TYPE_CHECKING:
@@ -135,7 +136,7 @@ class CosBackend(CloudStorageBackend):
     # SDK primitives
     # ------------------------------------------------------------------
 
-    def _get_file_data(self, path: str) -> FileData | None:
+    def _get_file_data(self, path: str, *, max_bytes: int | None = None) -> FileData | None:
         key = self._key(path)
         from qcloud_cos.cos_exception import CosServiceError
 
@@ -149,7 +150,14 @@ class CosBackend(CloudStorageBackend):
                 return None
             raise
 
-        body = resp["Body"].get_raw_stream().read()
+        stream = resp["Body"].get_raw_stream()
+        if max_bytes is None:
+            body = stream.read()
+        else:
+            try:
+                body = read_capped(stream, max_bytes)
+            finally:
+                stream.close()
         return self._parse_body(body)
 
     def _put_file_data(self, path: str, file_data: FileData) -> None:
