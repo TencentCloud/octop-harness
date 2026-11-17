@@ -15,12 +15,15 @@ import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse
 
 from octop_harness.runtime_env import resolve_local_execute_env
+
+if TYPE_CHECKING:
+    from octop_harness.backends.windows_process import CleanupStatus, WindowsResult
 
 # Quoted absolute path, or bare absolute token (heuristic; not a full shell parser).
 # Bare tokens stop at ``:`` so path-list values are considered segment-wise.
@@ -261,8 +264,15 @@ class HarnessLocalShellBackend(LocalShellBackend):
         env: dict[str, str] | None = None,
         inherit_env: bool = True,
         explicit_virtual_paths: bool = False,
+        windows_executor: str | None = None,
         **kwargs: Any,
     ) -> None:
+        if windows_executor is None:
+            windows_executor = os.environ.get("OCTOP_WINDOWS_EXECUTOR")
+        if windows_executor not in (None, "v2_file_job"):
+            raise ValueError(f"Unsupported windows_executor: {windows_executor}")
+        self._windows_executor = windows_executor
+        self._last_windows_cleanup: CleanupStatus | None = None
         self._explicit_virtual_paths = explicit_virtual_paths
         self._extra_env = {str(k): str(v) for k, v in dict(env or {}).items()}
         self._inherit_live = inherit_env
@@ -322,17 +332,33 @@ class HarnessLocalShellBackend(LocalShellBackend):
                 exit_code=1,
                 truncated=False,
             )
+        result: WindowsResult | subprocess.CompletedProcess[bytes]
         try:
-            result = subprocess.run(
-                command,
-                check=False,
-                shell=True,
-                capture_output=True,
-                stdin=subprocess.DEVNULL,
-                timeout=effective_timeout,
-                env=self._env,
-                cwd=str(self._host_execute_cwd()),
-            )
+            if os.name == "nt" and self._windows_executor == "v2_file_job":
+                from .windows_process import execute_windows
+
+                self._last_windows_cleanup = None
+                result = execute_windows(
+                    command,
+                    cwd=str(self._host_execute_cwd()),
+                    env=self._env,
+                    timeout=effective_timeout,
+                    max_output_bytes=self._max_output_bytes,
+                )
+                self._last_windows_cleanup = result.cleanup
+                if result.timed_out:
+                    raise subprocess.TimeoutExpired(command, effective_timeout)
+            else:
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    shell=True,
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=effective_timeout,
+                    env=self._env,
+                    cwd=str(self._host_execute_cwd()),
+                )
             # Decode explicitly instead of passing ``text=True``: see
             # :func:`decode_child_output` for why the locale code page is wrong.
             decoded = subprocess.CompletedProcess(
@@ -341,7 +367,14 @@ class HarnessLocalShellBackend(LocalShellBackend):
                 decode_child_output(result.stdout),
                 decode_child_output(result.stderr),
             )
-            return format_execute_result(decoded, max_output_bytes=self._max_output_bytes)
+            response = format_execute_result(decoded, max_output_bytes=self._max_output_bytes)
+            if getattr(result, "snapshot_truncated", False):
+                response = ExecuteResponse(
+                    output=response.output,
+                    exit_code=response.exit_code,
+                    truncated=True,
+                )
+            return response
         except subprocess.TimeoutExpired:
             if timeout is not None:
                 detail = f"{effective_timeout} seconds (custom timeout)"
