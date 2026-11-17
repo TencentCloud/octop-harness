@@ -72,9 +72,7 @@ class _Conn:
 async def test_new_session_attaches_servers_and_falls_back_when_rejected() -> None:
     servers = acp_mcp_servers_from_specs({"notes": {"transport": "http", "url": "http://127.0.0.1/mcp"}})
     ok = _Conn()
-    opened = await resume_or_create_session(
-        ok, cwd="/work", session_id=None, load_supported=False, mcp_servers=servers
-    )
+    opened = await resume_or_create_session(ok, cwd="/work", session_id=None, load_supported=False, mcp_servers=servers)
     assert opened.session_id == "sess-1"
     assert opened.mcp_degraded is False
     assert ok.calls == [("new", ["notes"])]

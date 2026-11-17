@@ -100,12 +100,7 @@ def ask_mode_id(modes: list[Any], default_mode_id: str | None) -> str | None:
     for mode in modes:
         blob = _blob(mode)
         mode_id = _mode_id(mode)
-        if (
-            mode_id
-            and not _is_yolo(blob)
-            and not _is_deny(blob)
-            and any(marker in blob for marker in _ASK_MARKERS)
-        ):
+        if mode_id and not _is_yolo(blob) and not _is_deny(blob) and any(marker in blob for marker in _ASK_MARKERS):
             return mode_id
     return None
 
@@ -128,7 +123,7 @@ def mode_state(response: Any) -> tuple[str | None, list[Any], str | None]:
     return current_id, available, default_id
 
 
-def yolo_option_id(options: list[dict[str, Any]]) -> str:
+def yolo_option_id(options: list[Any]) -> str:
     """Allow option for an unattended turn. Prefer a permanent allow."""
     always = ""
     plain = ""

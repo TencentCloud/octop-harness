@@ -117,9 +117,7 @@ class ACPService:
 
             conversation.cwd = cwd or conversation.cwd
             conversation.client.update_cwd(conversation.cwd)
-            await self._apply_permission_mode(
-                conversation, permission_mode, session_mode=session_mode
-            )
+            await self._apply_permission_mode(conversation, permission_mode, session_mode=session_mode)
             conversation.client.start_prompt(on_message)
             if not conversation.mcp_notice_sent:
                 notice = collaboration_notice(
@@ -355,9 +353,7 @@ class ACPService:
             await exit_stack.aclose()
             raise
 
-    async def _apply_permission_mode(
-        self, conversation: _Conversation, mode: str, *, session_mode: str = ""
-    ) -> None:
+    async def _apply_permission_mode(self, conversation: _Conversation, mode: str, *, session_mode: str = "") -> None:
         """Switch the agent to the requested session mode, then auto-allow YOLO."""
         selected, target = select_session_mode(
             list(conversation.available_modes),
