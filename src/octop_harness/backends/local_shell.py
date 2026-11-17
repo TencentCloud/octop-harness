@@ -8,13 +8,17 @@ runs from the host workspace.
 
 from __future__ import annotations
 
+import asyncio
+import codecs
 import locale
 import os
 import re
 import shlex
 import subprocess
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 from deepagents.backends import LocalShellBackend
@@ -188,7 +192,7 @@ def present_host_paths_in_output(text: str, root_dir: Path | str) -> str:
     return re.sub(rf"{re.escape(root)}(?=$|[\s'\"),:;])", "/", replaced)
 
 
-def decode_child_output(data: bytes | str | None) -> str:
+def decode_child_output(data: bytes | str | None, *, truncated: bool = False) -> str:
     """Decode child-process output without ever raising.
 
     ``subprocess`` in text mode decodes with ``locale.getpreferredencoding(False)``
@@ -200,7 +204,8 @@ def decode_child_output(data: bytes | str | None) -> str:
     Shell output is a mixed ecosystem, though, so no single encoding is correct:
     ``python`` / ``git`` / ``rg`` emit UTF-8 while ``cmd`` builtins emit the
     console code page. Try strict UTF-8 first, then the locale code page, then
-    GBK, and only then degrade to replacement characters.
+    GBK, and only then degrade to replacement characters. An intentionally truncated
+    snapshot can end with an incomplete final character.
 
     Already-decoded ``str`` payloads (``CompletedProcess`` is routinely built by
     hand and ``format_execute_result`` is public) are returned unchanged.
@@ -215,6 +220,9 @@ def decode_child_output(data: bytes | str | None) -> str:
             continue
         seen.add(encoding.lower())
         try:
+            if truncated:
+                decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+                return decoder.decode(data, final=False)
             return data.decode(encoding)
         except (UnicodeDecodeError, LookupError):
             continue
@@ -225,6 +233,7 @@ def format_execute_result(
     result: subprocess.CompletedProcess[str],
     *,
     max_output_bytes: int,
+    snapshot_truncated: bool = False,
 ) -> ExecuteResponse:
     """Match deepagents ``LocalShellBackend.execute`` stdout/stderr formatting."""
     output_parts: list[str] = []
@@ -236,11 +245,10 @@ def format_execute_result(
 
     output = "\n".join(output_parts) if output_parts else "<no output>"
 
-    truncated = False
-    if len(output) > max_output_bytes:
+    truncated = snapshot_truncated or len(output) > max_output_bytes
+    if truncated:
         output = output[:max_output_bytes]
         output += f"\n\n... Output truncated at {max_output_bytes} bytes."
-        truncated = True
 
     if result.returncode != 0:
         output = f"{output.rstrip()}\n\nExit code: {result.returncode}"
@@ -324,6 +332,7 @@ class HarnessLocalShellBackend(LocalShellBackend):
         command: str,
         *,
         timeout: int | None,
+        cancel_event: Event | None = None,
     ) -> ExecuteResponse:
         effective_timeout = timeout if timeout is not None else self._default_timeout
         if effective_timeout <= 0:
@@ -333,6 +342,7 @@ class HarnessLocalShellBackend(LocalShellBackend):
                 truncated=False,
             )
         result: WindowsResult | subprocess.CompletedProcess[bytes]
+        stdout_truncated = stderr_truncated = False
         try:
             if os.name == "nt" and self._windows_executor == "v2_file_job":
                 from .windows_process import execute_windows
@@ -344,8 +354,11 @@ class HarnessLocalShellBackend(LocalShellBackend):
                     env=self._env,
                     timeout=effective_timeout,
                     max_output_bytes=self._max_output_bytes,
+                    cancel_event=cancel_event,
                 )
                 self._last_windows_cleanup = result.cleanup
+                stdout_truncated = result.stdout_truncated
+                stderr_truncated = result.stderr_truncated
                 if result.timed_out:
                     raise subprocess.TimeoutExpired(command, effective_timeout)
             else:
@@ -364,17 +377,14 @@ class HarnessLocalShellBackend(LocalShellBackend):
             decoded = subprocess.CompletedProcess(
                 result.args,
                 result.returncode,
-                decode_child_output(result.stdout),
-                decode_child_output(result.stderr),
+                decode_child_output(result.stdout, truncated=stdout_truncated),
+                decode_child_output(result.stderr, truncated=stderr_truncated),
             )
-            response = format_execute_result(decoded, max_output_bytes=self._max_output_bytes)
-            if getattr(result, "snapshot_truncated", False):
-                response = ExecuteResponse(
-                    output=response.output,
-                    exit_code=response.exit_code,
-                    truncated=True,
-                )
-            return response
+            return format_execute_result(
+                decoded,
+                max_output_bytes=self._max_output_bytes,
+                snapshot_truncated=stdout_truncated or stderr_truncated,
+            )
         except subprocess.TimeoutExpired:
             if timeout is not None:
                 detail = f"{effective_timeout} seconds (custom timeout)"
@@ -398,12 +408,39 @@ class HarnessLocalShellBackend(LocalShellBackend):
         *,
         timeout: int | None = None,
     ) -> ExecuteResponse:
+        return self._execute_command(command, timeout=timeout)
+
+    async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """Run the shell and propagate asynchronous cancellation to its Windows Job."""
+        if os.name != "nt" or self._windows_executor != "v2_file_job":
+            return await super().aexecute(command, timeout=timeout)
+
+        cancel_event = Event()
+        worker = asyncio.create_task(
+            asyncio.to_thread(self._execute_command, command, timeout=timeout, cancel_event=cancel_event)
+        )
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancel_event.set()
+            # Let the worker finish reaping its Job, including after a second cancel request.
+            with suppress(Exception):
+                while True:
+                    try:
+                        await asyncio.shield(worker)
+                        break
+                    except asyncio.CancelledError:
+                        if worker.cancelled():
+                            break
+            raise
+
+    def _execute_command(
+        self, command: str, *, timeout: int | None, cancel_event: Event | None = None
+    ) -> ExecuteResponse:
         if not command or not isinstance(command, str):
             return super().execute(command, timeout=timeout)
         self._refresh_execute_env()
-        if self._explicit_virtual_paths:
-            return self._execute_on_host(command, timeout=timeout)
-        if self.virtual_mode and not is_host_root(self.cwd):
+        if not self._explicit_virtual_paths and self.virtual_mode and not is_host_root(self.cwd):
             command = rewrite_virtual_paths_in_command(
                 command,
                 self.cwd,
@@ -414,7 +451,12 @@ class HarnessLocalShellBackend(LocalShellBackend):
                 self.cwd,
                 workspace_dir=self._workspace_dir,
             )
-        return self._present_execute_response(self._execute_on_host(command, timeout=timeout))
+        response = (
+            self._execute_on_host(command, timeout=timeout)
+            if cancel_event is None
+            else self._execute_on_host(command, timeout=timeout, cancel_event=cancel_event)
+        )
+        return response if self._explicit_virtual_paths else self._present_execute_response(response)
 
 
 __all__ = [
