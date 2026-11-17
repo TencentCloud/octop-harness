@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
-- 定时 checkpoint 裁剪跳过 PostgreSQL 共享表。宿主可通过支持 PG 裁剪的 octop-memory，在核实线程归属并暂停该线程在所有宿主上的执行、恢复和分叉后，显式裁剪该线程。
+- 定时 checkpoint 裁剪在调用 Memory 裁剪器前跳过 PostgreSQL 共享表，搭配已发布的 octop-memory 1.0.4 时也不会反复触发不支持裁剪的告警或初始化 checkpoint 连接。宿主可通过支持 PG 裁剪的 octop-memory，在核实线程归属并暂停该线程在所有宿主上的执行、恢复和分叉后，显式裁剪该线程。
 - SQLite 定时裁剪在已完成的纯根图线程上，把保留边界所需的旧消息增量合并到边界 checkpoint，再删除旧父链。安装支持此参数的 octop-memory 时启用。
+
 ## [1.0.10] - 2026-11-15
 
 ### 新增

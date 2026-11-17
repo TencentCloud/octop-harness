@@ -395,6 +395,23 @@ def retention_dsn(backend):
             conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(schema)))
 
 
+@pytest.mark.parametrize("backend", ["postgres"])
+def test_pg_maintenance_skips_before_calling_memory_pruner(retention_dsn, monkeypatch):
+    from octop_memory.pipeline.lifecycle import checkpoint_gc
+
+    from octop_harness.middleware.memory import _prune_checkpoints_if_configured
+
+    memory = Memory("retention", backend="postgres", backend_config={"dsn": retention_dsn})
+    calls = []
+    monkeypatch.setattr(checkpoint_gc, "prune_checkpoints", lambda *args, **kwargs: calls.append(kwargs))
+    try:
+        _prune_checkpoints_if_configured(memory)
+        assert not calls
+        assert memory._checkpointer_pool is None
+    finally:
+        memory.backend.close()
+
+
 @pytest.mark.parametrize("approval", ["parent", "child"])
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
 async def test_pruning_snapshots_messages_and_preserves_approval(

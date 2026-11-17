@@ -207,6 +207,15 @@ def _prune_checkpoints_if_configured(memory: Any, *, messages_channel: DeltaChan
     """Keep the configured checkpoint window and snapshot replayed messages when supported."""
     keep_last, keep_days = _checkpoint_retention_from_env()
     try:
+        backend = getattr(memory, "backend", None)
+        if backend is not None:
+            try:
+                from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+            except ImportError:
+                pass  # PostgreSQL is an optional octop-memory extra.
+            else:
+                if isinstance(backend, PostgresMemoryBackend):
+                    return
         path = _checkpoint_sqlite_path(memory)
         backup_mode, backup_keep_days = checkpoint_backup_policy_from_env()
         if path is not None:
