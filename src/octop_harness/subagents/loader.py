@@ -197,7 +197,13 @@ def parse_agent_markdown(
         if isinstance(skills_raw, str):
             skills_raw = [skills_raw]
         if isinstance(skills_raw, list):
-            spec["skills"] = [workspace.resolve_path(str(s)) for s in skills_raw if str(s).strip()]
+            # SkillsMiddleware resolves these through the backend, so they must
+            # be backend source paths, not host paths from resolve_path().
+            spec["skills"] = [
+                workspace._deepagents_source_path(str(s))
+                for s in skills_raw
+                if str(s).strip()
+            ]
     if parent_tools is not None:
         tools_meta = _parse_tools_meta(meta.get("tools"))
         resolved_tools = resolve_subagent_tools(

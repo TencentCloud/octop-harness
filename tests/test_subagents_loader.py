@@ -108,6 +108,16 @@ class TestSlugAndParse:
             for rec in caplog.records
         )
 
+    def test_skills_use_backend_source_paths(self, tmp_path: Path) -> None:
+        backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+        workspace = BackendWorkspace(backend, tmp_path)
+        text = "---\ndescription: Uses workspace skills\nskills:\n  - skills\n---\nbody"
+
+        spec = parse_agent_markdown(text, path_fragment="agents/x.md", workspace=workspace)
+
+        assert spec is not None
+        assert spec["skills"] == ["/skills"]
+
 
 class TestCollectAndLoad:
     def test_collect_nested_markdown(self, workspace: BackendWorkspace, tmp_path: Path) -> None:
