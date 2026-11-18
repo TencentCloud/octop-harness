@@ -82,6 +82,38 @@ class TestSlugAndParse:
         text = "---\nname: X\n---\nbody"
         assert parse_agent_markdown(text, path_fragment="agents/x.md", workspace=workspace) is None
 
+    def test_plain_markdown_is_ignored_without_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            spec = parse_agent_markdown("Notes and rules, not an agent.\n", path_fragment="agents/x/lessons.md")
+
+        assert spec is None
+        assert not any("frontmatter" in rec.message for rec in caplog.records)
+
+    def test_broken_frontmatter_still_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            spec = parse_agent_markdown(
+                "---\nfoo: [unclosed\n---\nbody",
+                path_fragment="agents/x/broken.md",
+            )
+
+        assert spec is None
+        assert any("invalid YAML frontmatter" in rec.message for rec in caplog.records)
+
+    def test_unknown_tool_warning_names_the_agent(self, caplog: pytest.LogCaptureFixture) -> None:
+        parent_tool = MagicMock()
+        parent_tool.name = "known"
+        text = "---\ndescription: d\ntools:\n  - missing-tool\n---\nbody"
+
+        with caplog.at_level(logging.WARNING):
+            spec = parse_agent_markdown(
+                text,
+                path_fragment="agents/x/agent.md",
+                parent_tools=[parent_tool],
+            )
+
+        assert spec is not None
+        assert any("missing-tool" in rec.message and "agents/x/agent.md" in rec.message for rec in caplog.records)
+
 
 class TestCollectAndLoad:
     def test_collect_nested_markdown(self, workspace: BackendWorkspace, tmp_path: Path) -> None:

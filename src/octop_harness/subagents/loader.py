@@ -135,6 +135,7 @@ def resolve_subagent_tools(
     tool_names: list[str] | None,
     *,
     parent_tools: Sequence[Any],
+    agent_label: str | None = None,
 ) -> list[Any] | None:
     """Map tool name strings to callables from the parent tool pool."""
     if tool_names is None:
@@ -150,7 +151,10 @@ def resolve_subagent_tools(
     for name in tool_names:
         tool = by_name.get(name)
         if tool is None:
-            logger.warning("Unknown subagent tool %r; skipping", name)
+            if agent_label:
+                logger.warning("Unknown subagent tool %r in %s; skipping", name, agent_label)
+            else:
+                logger.warning("Unknown subagent tool %r; skipping", name)
             continue
         resolved.append(tool)
     return resolved
@@ -166,7 +170,10 @@ def parse_agent_markdown(
     """Parse agent markdown into a ``SubAgent`` dict, or ``None`` if invalid."""
     meta, body = parse_agent_frontmatter(text)
     if not meta:
-        logger.warning("Skipping agent %s: missing YAML frontmatter", path_fragment)
+        if text.startswith("---\n"):
+            logger.warning("Skipping agent %s: invalid YAML frontmatter", path_fragment)
+        else:
+            logger.debug("Ignoring non-agent markdown %s: no YAML frontmatter", path_fragment)
         return None
     description = meta.get("description")
     if not description or not str(description).strip():
@@ -192,7 +199,11 @@ def parse_agent_markdown(
             spec["skills"] = [workspace.resolve_path(str(s)) for s in skills_raw if str(s).strip()]
     if parent_tools is not None:
         tools_meta = _parse_tools_meta(meta.get("tools"))
-        resolved_tools = resolve_subagent_tools(tools_meta, parent_tools=parent_tools)
+        resolved_tools = resolve_subagent_tools(
+            tools_meta,
+            parent_tools=parent_tools,
+            agent_label=path_fragment,
+        )
         if resolved_tools is not None:
             spec["tools"] = resolved_tools
     return spec
