@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
 - Add bounded binary download APIs for workspace, composite and cloud storage; reject oversized streams before buffering complete objects.
+
+### 修复
+
+- 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
 
 ## [1.0.11] - 2026-11-17
 

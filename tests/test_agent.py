@@ -1089,6 +1089,31 @@ class TestAappendMessages:
         assert appended == [original]
 
     @pytest.mark.asyncio
+    async def test_managed_agent_can_append_without_a_native_graph(self, tmp_path: Path) -> None:
+        from langchain_core.messages import HumanMessage
+
+        fake_cp = MagicMock()
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+        cfg = HarnessAgentConfig(
+            name="managed-agent",
+            workspace_dir=tmp_path,
+            backend={"type": "filesystem", "root_dir": str(tmp_path), "virtual_mode": False},
+            managed_runner="codebuddy",
+            checkpointer=fake_cp,
+            memory_enabled=False,
+        )
+        with patch("octop_harness.acp.managed.build_managed_graph", return_value=graph):
+            agent = HarnessAgent(cfg)
+
+        assert agent.checkpointer is fake_cp
+        appended = await agent.aappend_messages("thread-1", [HumanMessage(content="drink water")])
+        graph.aupdate_state.assert_awaited_once_with(
+            {"configurable": {"thread_id": "thread-1"}},
+            {"messages": appended},
+        )
+
+    @pytest.mark.asyncio
     async def test_rejects_append_without_checkpointer(self, tmp_path: Path) -> None:
         from langchain_core.messages import HumanMessage
 

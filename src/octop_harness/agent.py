@@ -174,6 +174,7 @@ class HarnessAgent:
 
     _mcp_tools: list[Any]
     _mcp_tool_name_set: frozenset[str]
+    _checkpointer_instance: Any
 
     def __init__(
         self,
@@ -1347,11 +1348,13 @@ class HarnessAgent:
             from octop_harness.acp.models import ACPConfig
 
             self._seed_model_ref = None
+            checkpointer = self._resolve_checkpointer()
+            self._checkpointer_instance = checkpointer
             self._base_graph = build_managed_graph(
                 runner=managed_runner,
                 acp_config=ACPConfig(runners=dict(self._config.acp_runners)),
                 cwd=str(self._workspace_path),
-                checkpointer=self._resolve_checkpointer(),
+                checkpointer=checkpointer,
             )
             self._graph = self._wrap_graph(self._base_graph)
             self._sync_protocol_graph()
@@ -1833,7 +1836,7 @@ class HarnessAgent:
     ) -> Any:
         cfg = self._config
         checkpointer = self._resolve_checkpointer()
-        self._checkpointer_instance: Any = checkpointer
+        self._checkpointer_instance = checkpointer
 
         kwargs: dict[str, Any] = {
             "model": self._build_seed_model(),
