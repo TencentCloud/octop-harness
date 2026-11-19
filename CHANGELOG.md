@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- Inbox 后台 worker 在空的 contextvars 上下文中启动，不再继承触发 `enqueue()` 的那一轮运行上下文，避免任务事件泄漏进该轮流式输出、以及相关 token 无法回收。
 - 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
 
 ## [1.0.11] - 2026-11-17
