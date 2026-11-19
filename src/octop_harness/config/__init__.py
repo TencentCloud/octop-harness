@@ -858,6 +858,11 @@ class HarnessAgentConfig:
     # ``extraction.max_tokens`` — the extractor always sends its own
     # ``max_tokens``, so a client-side fallback cannot override it.
     memory_extract_max_tokens: int | None = None
+    # User/admin retention preferences forwarded into octop-memory's
+    # ``extraction.keep_rules`` / ``extraction.skip_rules`` (TencentCloud/Octop#2963).
+    # ``None`` leaves the built-in extraction prompts untouched.
+    memory_extract_keep_rules: str | None = None
+    memory_extract_skip_rules: str | None = None
     # How long one auxiliary request may block. ``None`` keeps
     # ``HarnessAgentLLMClient`` defaults (light 120s, heavy 300s). These are
     # not the idle/interval trigger: those decide when extraction starts.
@@ -942,6 +947,16 @@ class HarnessAgentConfig:
         if isinstance(backoff, bool) or not isinstance(backoff, int | float) or not 0 <= backoff <= 60:
             raise ValueError("memory_aux_retry_backoff_s must be between 0 and 60 seconds")
         _validate_extract_max_tokens(self.memory_extract_max_tokens)
+        object.__setattr__(
+            self,
+            "memory_extract_keep_rules",
+            _normalize_extract_rule("memory_extract_keep_rules", self.memory_extract_keep_rules),
+        )
+        object.__setattr__(
+            self,
+            "memory_extract_skip_rules",
+            _normalize_extract_rule("memory_extract_skip_rules", self.memory_extract_skip_rules),
+        )
         _validate_aux_timeout("memory_aux_light_timeout_s", self.memory_aux_light_timeout_s)
         _validate_aux_timeout("memory_aux_heavy_timeout_s", self.memory_aux_heavy_timeout_s)
         _validate_summarization_settings(self)
@@ -1156,6 +1171,8 @@ class HarnessAgentConfig:
             "memory_extract_idle_seconds": self.memory_extract_idle_seconds,
             "memory_extract_interval_seconds": self.memory_extract_interval_seconds,
             "memory_extract_max_tokens": self.memory_extract_max_tokens,
+            "memory_extract_keep_rules": self.memory_extract_keep_rules,
+            "memory_extract_skip_rules": self.memory_extract_skip_rules,
             "memory_aux_light_timeout_s": self.memory_aux_light_timeout_s,
             "memory_aux_heavy_timeout_s": self.memory_aux_heavy_timeout_s,
             "memory_aux_thinking": self.memory_aux_thinking,
@@ -1371,6 +1388,22 @@ def _validate_summarization_trim(value: int | None) -> None:
         return
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("summarization_trim_tokens must be a positive int, or None")
+
+
+_MAX_EXTRACT_RULE_CHARS = 2000
+
+
+def _normalize_extract_rule(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string or None")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > _MAX_EXTRACT_RULE_CHARS:
+        raise ValueError(f"{name} must be at most {_MAX_EXTRACT_RULE_CHARS} characters")
+    return text
 
 
 def _validate_extract_max_tokens(value: int | None) -> None:
