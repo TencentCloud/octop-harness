@@ -162,6 +162,12 @@ async def _send_to_agent(
         console.print(f"  [{theme.dot_error}]●[/] Generation stopped.")
     except DEFENSIVE_OP_ERRORS as e:
         console.print(f"  [{theme.dot_error}]●[/] Error: {e}")
+    finally:
+        # The CLI persists no per-turn change summaries, so captured write
+        # snapshots would otherwise accumulate for the whole REPL session.
+        discard = getattr(agent, "discard_file_changes", None)
+        if callable(discard):
+            discard(state.session_id)
 
 
 def print_welcome(

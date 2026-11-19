@@ -1185,6 +1185,71 @@ class TestAdeleteThread:
             await agent.adelete_thread("thread-1")
 
 
+class TestFileChangeLifecycle:
+    """Per-turn capture windows: pop/discard semantics and purge on teardown."""
+
+    def _make_agent(self, tmp_path: Path) -> HarnessAgent:
+        return TestAgetHistory()._make_agent(tmp_path, checkpointer=False)
+
+    def _record(self, agent: HarnessAgent, path: str, scope: str) -> None:
+        agent._file_changes.record(path, "old", "new", scope=scope)
+
+    def test_pop_drains_scope_once(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        self._record(agent, "b.md", "t2")
+        drained = agent.pop_file_changes("t1")
+        assert [c["path"] for c in drained] == ["a.md"]
+        assert agent.pop_file_changes("t1") == []
+        # The other scope is untouched by the t1 drain.
+        assert [c["path"] for c in agent.pop_file_changes("t2")] == ["b.md"]
+
+    def test_discard_drops_scope(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        agent.discard_file_changes("t1")
+        assert agent.pop_file_changes("t1") == []
+
+    def test_discard_all_clears_every_scope(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        self._record(agent, "b.md", "t2")
+        agent.discard_all_file_changes()
+        assert agent.pop_file_changes("t1") == []
+        assert agent.pop_file_changes("t2") == []
+
+    def test_new_window_drops_stale_captures(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        agent._start_file_change_window("t1", "t1")
+        assert agent.pop_file_changes("t1") == []
+
+    def test_pop_resolves_capture_scope_alias(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        # An override makes captures land under a different scope than the
+        # request's thread id; drain must follow the alias.
+        agent._start_file_change_window("t-req", "t-override")
+        self._record(agent, "a.md", "t-override")
+        drained = agent.pop_file_changes("t-req")
+        assert [c["path"] for c in drained] == ["a.md"]
+        assert agent.pop_file_changes("t-req") == []
+
+    @pytest.mark.asyncio
+    async def test_adelete_thread_purges_scope(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "thread-1")
+        await agent.adelete_thread("thread-1")
+        assert agent.pop_file_changes("thread-1") == []
+
+    def test_close_clears_all_scopes(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        self._record(agent, "b.md", "t2")
+        agent.close()
+        assert agent.pop_file_changes("t1") == []
+        assert agent.pop_file_changes("t2") == []
+
+
 class TestMcpIntegration:
     def test_loads_mcp_tools_and_middleware_when_configured(
         self,

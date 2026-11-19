@@ -45,6 +45,7 @@ from octop_harness.memory.policy import (
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
 from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
+from octop_harness.middleware.file_changes import FileChangeTracker
 from octop_harness.middleware.mcp_tool_error import McpToolErrorMiddleware
 from octop_harness.middleware.mcp_tools import MCPToolMiddleware
 from octop_harness.middleware.media_offload import MediaOffloadMiddleware
@@ -96,6 +97,18 @@ def _tool_name_of(tool: Any) -> str:
         if isinstance(raw, str):
             return raw
     return ""
+
+
+def _config_thread_id(config: dict[str, Any]) -> str:
+    """Thread id as the graph actually received it.
+
+    ``ChatRequest.to_runnable_config`` lets ``configurable["thread_id"]``
+    override the request field, and the file-change middleware keys captures
+    off the graph config — window open/drain must use the same key.
+    """
+    configurable = (config.get("configurable") or {}) if isinstance(config, dict) else {}
+    thread_id = configurable.get("thread_id") if isinstance(configurable, dict) else None
+    return str(thread_id) if isinstance(thread_id, str) and thread_id else ""
 
 
 _SUMMARIZATION_FACTORY_LOCK = threading.Lock()
@@ -220,6 +233,8 @@ class HarnessAgent:
         self.on_bootstrap_complete: Callable[[], None] | None = None
         self._context_usage_mw: ContextUsageMiddleware | None = None
         self._summarization_mw: Any | None = None
+        self._file_changes = FileChangeTracker()
+        self._file_change_scope_alias: dict[str, str] = {}
 
         self._init_graph()
         self._init_protocols()
@@ -276,6 +291,78 @@ class HarnessAgent:
         if middleware is None:
             return None
         return middleware.maintenance_status()
+
+    def pop_file_changes(self, thread_id: str) -> list[dict[str, Any]]:
+        """Drain file write checkpoints captured for one turn.
+
+        The host drains this at each turn end and persists the before/after
+        snapshots so it can offer per-turn diffs and rewind. Each item is
+        ``{"path", "before", "after"}`` with ``None`` meaning absent.
+        ``thread_id`` names the invocation whose writes to drain — concurrent
+        invocations with distinct thread ids never share a drain window, and
+        at most one turn may be in flight per thread.
+
+        Captures cover parent-agent filesystem tool writes; subagent tool
+        writes are not captured. Capture windows are opened by
+        ``call``/``stream``/``stream_events``/``resume_hitl``; protocol-level
+        HTTP entry points that bypass those methods record into the scopeless
+        window, which only the tracker's retention caps bound.
+        """
+        scope = self._capture_scope_for(thread_id)
+        self._file_change_scope_alias.pop(thread_id or "", None)
+        return [{"path": c.path, "before": c.before, "after": c.after} for c in self._file_changes.drain(scope)]
+
+    def discard_file_changes(self, thread_id: str) -> None:
+        """Drop undrained file-change captures for one turn's scope.
+
+        Hosts should call this when a turn ends without draining (failed or
+        cancelled turns) so its writes never merge into the next turn's
+        window. Use :meth:`discard_all_file_changes` for teardown.
+        """
+        tracker = getattr(self, "_file_changes", None)
+        if tracker is None:
+            # A minimally constructed agent (no __init__) has nothing captured.
+            return
+        scope = self._capture_scope_for(thread_id)
+        self._file_change_scope_alias.pop(thread_id, None)
+        tracker.discard(scope)
+
+    def discard_all_file_changes(self) -> None:
+        """Drop every undrained capture across all scopes (teardown)."""
+        tracker = getattr(self, "_file_changes", None)
+        if tracker is not None:
+            tracker.discard(None)
+
+    def _capture_scope_for(self, thread_id: str) -> str:
+        """Map a host thread id onto the scope its captures actually used.
+
+        ``ChatRequest.to_runnable_config`` lets ``configurable["thread_id"]``
+        override the request field, and the capture middleware keys off the
+        graph config; the alias recorded at window open keeps drain/discard
+        addressing the same scope even after such an override.
+        """
+        alias = getattr(self, "_file_change_scope_alias", None)
+        if not alias:
+            return thread_id or ""
+        return alias.get(thread_id or "", thread_id or "")
+
+    def _start_file_change_window(self, thread_id: str, capture_scope: str) -> None:
+        """Open a fresh capture window: drop the previous turn's leftovers.
+
+        Hosts that drain at turn end lose nothing; hosts that never drain
+        keep at most one turn of snapshots per thread instead of accumulating
+        them for the agent's lifetime. Assumes at most one in-flight turn per
+        thread — hosts that allow concurrent same-thread turns must serialize
+        before draining.
+        """
+        alias = getattr(self, "_file_change_scope_alias", None)
+        if alias is None:
+            return
+        previous = alias.get(thread_id or "")
+        alias[thread_id or ""] = capture_scope or ""
+        if previous is not None and previous != (capture_scope or ""):
+            self._file_changes.discard(previous)
+        self._file_changes.discard(capture_scope or "")
 
     @property
     def checkpointer(self) -> Any:
@@ -510,6 +597,7 @@ class HarnessAgent:
 
         async def _call(prepared: ChatRequest) -> dict[str, Any]:
             messages, config, proto = self._prepare_call(prepared, protocol)
+            self._start_file_change_window(prepared.thread_id or "", _config_thread_id(config))
             with session_header_scope(prepared.thread_id):
                 if durability is not None:
                     return await proto.call(messages, config, durability=durability)
@@ -548,6 +636,7 @@ class HarnessAgent:
                 self._cancel_events[thread_id] = cancel_event
                 self._hitl_resume_configs.pop(thread_id, None)
             try:
+                self._start_file_change_window(prepared.thread_id or "", _config_thread_id(config))
                 with session_header_scope(prepared.thread_id):
                     async with contextlib.aclosing(
                         self._iter_until_cancelled(
@@ -609,6 +698,15 @@ class HarnessAgent:
         paused = False
         options = {"durability": durability} if durability is not None else {}
         async with self._invocation():
+            # A resumed HITL turn continues its original capture window —
+            # its earlier writes' checkpoints are still pending and must not
+            # be dropped. resume_stream forces configurable["thread_id"] to
+            # the resumed id, so migrate captures recorded under the paused
+            # turn's (possibly overridden) scope.
+            previous_scope = self._capture_scope_for(thread_id)
+            if previous_scope and previous_scope != thread_id:
+                self._file_changes.rebind_scope(previous_scope, thread_id)
+                self._file_change_scope_alias[thread_id] = thread_id
             with session_header_scope(thread_id):
                 async with contextlib.aclosing(resume_stream(thread_id, decisions, config, **options)) as chunks:
                     async for chunk in chunks:
@@ -638,7 +736,9 @@ class HarnessAgent:
         ``/reset``) are **not** intercepted.  Callers that need slash handling
         should use ``stream`` instead, or pre-process the input themselves.
         """
-        messages, config, proto = self._prepare_call(request, protocol)
+        req = ChatRequest.coerce(request)
+        messages, config, proto = self._prepare_call(req, protocol)
+        self._start_file_change_window(req.thread_id or "", _config_thread_id(config))
         return await proto.stream_events(messages, config, **kwargs)
 
     async def aget_history(
@@ -788,6 +888,9 @@ class HarnessAgent:
             fallback for a privacy/retention operation.
         """
         cp = self._checkpointer_instance
+        # Captured write snapshots are per-thread in-memory data; a deleted
+        # thread's file contents must not outlive the deletion request.
+        self.discard_file_changes(thread_id)
         if not cp:
             logger.warning(
                 "adelete_thread: checkpointer unavailable; no checkpoint data to delete for thread %r",
@@ -1091,6 +1194,8 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        self._file_change_scope_alias.clear()
+        self.discard_all_file_changes()
         self._close_acp_sessions()
         if self._owns_model_factory:
             self._model_factory.close()
@@ -1110,6 +1215,8 @@ class HarnessAgent:
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
+        self._file_change_scope_alias.clear()
+        self.discard_all_file_changes()
         await self._aclose_acp_sessions()
         if self._owns_model_factory:
             await self._model_factory.aclose()
@@ -1613,6 +1720,7 @@ class HarnessAgent:
                     memory_enabled=cfg.memory_enabled,
                     policy=cfg.manual_document_policy,
                 ),
+                file_changes=self._file_changes,
             )
         )
 
