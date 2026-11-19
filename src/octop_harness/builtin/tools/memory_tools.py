@@ -153,7 +153,10 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
             logger.warning("memory_search failed: %s", exc, exc_info=True)
             return f"memory_search failed: {exc.__class__.__name__}"
         hits = result.get("hits", []) if isinstance(result, dict) else []
+        warning = result.get("warning") if isinstance(result, dict) else None
         if not hits:
+            if warning:
+                return str(warning)
             empty_reason = result.get("empty_reason") if isinstance(result, dict) else None
             return f"No matching memory entries. ({empty_reason or 'empty'})"
         lines: list[str] = []
@@ -170,7 +173,9 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
                 snippet = snippet[:200] + "..."
             lines.append(f"- [{layer}] {path}\n  {snippet}")
         if not lines:
-            return "No matching memory entries. (empty)"
+            return str(warning or "No matching memory entries. (empty)")
+        if warning:
+            lines.append(str(warning))
         return "Memory hits:\n" + "\n".join(lines)
 
     @tool

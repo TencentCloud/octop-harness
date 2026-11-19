@@ -185,6 +185,22 @@ class TestBuildMemoryTools:
 
         assert text.replace("\n", " ") in search.invoke({"query": "example"})
 
+    @pytest.mark.parametrize("with_hits", [True, False])
+    def test_search_reports_pending_index_upgrade(self, with_hits: bool) -> None:
+        service = _FakeService()
+        hint = "Raw memory search index needs an upgrade. Run `octop-memory db upgrade-index`."
+        hit = {"layer": "atom", "path": "atom/a.md", "snippet": "A saved preference."}
+        service.search_result = {
+            "hits": [hit] if with_hits else [],
+            "warning": hint,
+            "empty_reason": None if with_hits else hint,
+        }
+        search = next(t for t in build_memory_tools(service) if t.name == "memory_search")
+        result = search.invoke({"query": "preference"})
+        assert result.count(hint) == 1
+        if with_hits:
+            assert "A saved preference." in result
+
     def test_memory_search_empty(self) -> None:
         service = _FakeService()
         service.search_result = {"hits": [], "empty_reason": "no_index"}
