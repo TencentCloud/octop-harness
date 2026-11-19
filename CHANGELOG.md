@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `memory_search` 返回带图原话的文字，过滤图片引用和图片数据；跳过只有图片的命中。
 - `memory_get` 打开带图原始记录时保留文字和分页位置，纯图片摘录返回没有可用内容。
+- 修复事件循环退出时同步关闭 SQLite checkpointer 可能触发的后台线程异常。
 - 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
 
 ## [1.0.11] - 2026-11-17
