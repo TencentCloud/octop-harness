@@ -372,6 +372,7 @@ class DockerSandbox(BaseSandbox):
         self._environment_file = str(Path(environment_file).expanduser()) if environment_file else None
         self._workspace_dotenv_cache: tuple[float, dict[str, str]] | None = None
         self._workspace_dotenv_ttl = 2.0
+        self._container_uid_gid_cache: tuple[int, int] | None = None
 
         if extra_run_args:
             logger.debug("extra_run_args currently unused by docker-py binding: %s", extra_run_args)
@@ -971,6 +972,35 @@ class DockerSandbox(BaseSandbox):
             raise RuntimeError("DockerSandbox is closed")
         self._rebind_if_missing()
 
+    def _container_uid_gid(self) -> tuple[int, int]:
+        """Resolve the container's default UID/GID for archive ownership.
+
+        ``put_archive`` is unpacked by dockerd as root, so files written into a
+        bind-mounted workspace become ``root:root`` with ``mtime=0`` unless the
+        tar header carries the container user's ids. The default user does not
+        change while the container lives, so resolve it once.
+        """
+        if self._container_uid_gid_cache is not None:
+            return self._container_uid_gid_cache
+        uid_gid = (0, 0)
+        try:
+            result = self._container.exec_run(
+                cmd=["bash", "-c", "id -u; id -g"],
+                workdir=self._workspace_root,
+            )
+            output = getattr(result, "output", None)
+            if output is None and isinstance(result, tuple) and len(result) > 1:
+                output = result[1]
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            ids = re.findall(r"(?m)^\s*(\d+)\s*$", str(output or ""))
+            if len(ids) >= 2:
+                uid_gid = (int(ids[-2]), int(ids[-1]))
+        except Exception:  # best-effort; fall back to root ownership (previous behavior)
+            logger.debug("DockerSandbox could not resolve container uid/gid", exc_info=True)
+        self._container_uid_gid_cache = uid_gid
+        return uid_gid
+
     def _put_file(self, container_path: str, data: bytes) -> None:
         parent = str(PurePosixPath(container_path).parent)
         name = PurePosixPath(container_path).name
@@ -978,10 +1008,16 @@ class DockerSandbox(BaseSandbox):
             cmd=["bash", "-lc", f"mkdir -p {shlex.quote(parent)}"],
             workdir=self._workspace_root,
         )
+        uid, gid = self._container_uid_gid()
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             info = tarfile.TarInfo(name=name)
             info.size = len(data)
+            # dockerd extracts the archive as root; without explicit ids the
+            # file lands root-owned in a bind mount with mtime 0.
+            info.uid = uid
+            info.gid = gid
+            info.mtime = int(time.time())
             tar.addfile(info, io.BytesIO(data))
         buf.seek(0)
         ok = self._container.put_archive(parent, buf.getvalue())
