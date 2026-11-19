@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 空闲维护时清理旧的 LangGraph checkpoint，默认保留每个线程最近 20 个及恢复依赖，跳过有待处理工作的线程。保留窗口、裁剪前备份及 VACUUM 仍可配置。
 - `memory_save(content, topic, kind)` 支持 Fact、Preference、Decision、Task；中英文运行时规则引导当前对话模型直接选择类别，不额外调用分类模型。旧调用默认 Fact；连接不支持 kind 的旧 memory 库时，非 Fact 保存明确提示升级，不静默降级。需先合入并安装 memory 对应 API；保存 Task 不创建提醒，历史事实不变。
 
+### 修复
+
+- 修复 `MCPToolMiddleware` 持有 server 名单构造期快照的问题：改为每轮实时读取 `mcp_server_configs`，运行时动态挂载（`append_mcp_tools` 后原地写入 config）的 MCP server 不再被每轮工具过滤清零；默认路径（未选 MCP 的 turn）行为不变。`server_names` 参数放宽为 `Mapping | AbstractSet` 以支持活引用（#93）。
+
 ### 变更
 
 - 要求 `deepagents>=0.7.35`，随之需要 langchain 1.4.9+、langchain-core 1.7.6+、langgraph 1.2.12+。主 agent 的模型拒答仍作为普通回复返回，不中断本轮；子 agent 拒答时，`task` 结果会说明拒答原因，不再是空字符串。系统提示词中 skill 段落的位置有变化，升级后第一轮提示词缓存会失效一次。

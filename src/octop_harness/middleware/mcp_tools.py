@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Set as AbstractSet
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -30,11 +31,16 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
     def __init__(
         self,
         *,
-        server_names: frozenset[str],
+        server_names: Mapping[str, Any] | AbstractSet[str],
         mcp_tool_names: frozenset[str],
         default_servers: list[str] | None,
     ) -> None:
         super().__init__()
+        # Keep a live view of the configured server names. Callers may pass
+        # ``cfg.mcp_server_configs`` (a dict mutated in place when servers are
+        # attached at runtime, e.g. via ``append_mcp_tools``); snapshotting a
+        # ``frozenset`` here made servers mounted after agent construction
+        # invisible to this filter, silently dropping their tools every turn.
         self._server_names = server_names
         self._mcp_tool_names = mcp_tool_names
         self._default_servers = list(default_servers) if default_servers else None
@@ -65,21 +71,26 @@ class MCPToolMiddleware(AgentMiddleware[Any, Any]):
             logger.warning("Invalid MCP server selection; hiding all MCP tools", exc_info=True)
             active = None
 
+        # ``known`` must be computed unconditionally: the
+        # ``filter_tools_for_mcp_servers`` call below references it even on the
+        # default path (``active is None``), and defining it inside the block
+        # would raise ``NameError`` on every turn without an MCP opt-in.
+        known = set(self._server_names)
         if active is not None:
-            unknown = sorted(set(active) - self._server_names)
+            unknown = sorted(set(active) - known)
             if unknown:
                 logger.warning(
                     "ChatRequest references unknown MCP server(s) %s; configured: %s",
                     unknown,
-                    sorted(self._server_names),
+                    sorted(known),
                 )
-                active = [s for s in active if s in self._server_names]
+                active = [s for s in active if s in known]
 
         tools_in: list[BaseTool | dict[str, Any]] = list(request.tools or [])
         filtered = filter_tools_for_mcp_servers(
             tools_in,
             mcp_tool_names=self._mcp_tool_names,
-            server_names=self._server_names,
+            server_names=known,
             active_servers=active,
         )
         if active:
