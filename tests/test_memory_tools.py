@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 from octop_memory import Memory, MemoryService
+from octop_memory.application.path_projection import raw_to_path
 from pydantic import ValidationError
 
 from octop_harness.builtin.tools.memory_tools import build_memory_tools
@@ -252,12 +253,17 @@ class TestBuildMemoryTools:
                 session_id="image-session",
                 thread_id="image-thread",
             )
-            path = service.search("septentrion")["hits"][0]["path"]
-            get_tool = next(t for t in build_memory_tools(service) if t.name == "memory_get")
+            [raw] = memory.list_raw(thread_id="image-thread", event_type="user_message")
+            path = raw_to_path(raw)
+            tools = {tool.name: tool for tool in build_memory_tools(service)}
             image_line = service.get(path)["excerpt"].splitlines().index(image) + 1
 
-            assert get_tool.invoke({"path": path}) == "No usable memory content."
-            assert get_tool.invoke({"path": path, "start": image_line, "lines": 1}) == "No usable memory content."
+            assert tools["memory_search"].invoke({"query": "septentrion"}).startswith("No matching memory entries.")
+            assert tools["memory_get"].invoke({"path": path}) == "No usable memory content."
+            assert (
+                tools["memory_get"].invoke({"path": path, "start": image_line, "lines": 1})
+                == "No usable memory content."
+            )
         finally:
             memory.backend.close()
 
