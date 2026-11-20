@@ -312,6 +312,26 @@ def test_low_tool_scores_keep_capability_tools() -> None:
     assert scorer.calls == 1
 
 
+def test_low_tool_scores_keep_memory_save() -> None:
+    tools = [
+        _tool("read_file", "读取文件"),
+        _tool("memory_search", "搜索记忆"),
+        _tool("memory_get", "读取记忆"),
+        _tool("memory_save", "保存记忆, 用户说记住时写入"),
+    ]
+    tools.extend(_tool(f"misc_{i}", "unrelated") for i in range(8))
+    scorer = _Scorer({"tool:memory_save": 0.1, **{f"tool:misc_{i}": 0.1 for i in range(8)}})
+    mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
+    out = mw.wrap_model_call(_request(tools=tools, text="记住这个偏好: 我喜欢咖啡"), lambda item: item)
+    assert [tool.name for tool in out.tools] == [
+        "read_file",
+        "memory_search",
+        "memory_get",
+        "memory_save",
+        "call_deferred_tool",
+    ]
+
+
 def test_unscored_tools_stay_in_the_catalog() -> None:
     tools = [_tool(f"misc_{i}", "unrelated") for i in range(8)]
     tools.append(_tool("read_pdf", "读取 pdf 合同"))
