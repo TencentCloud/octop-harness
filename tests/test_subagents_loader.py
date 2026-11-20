@@ -82,6 +82,32 @@ class TestSlugAndParse:
         text = "---\nname: X\n---\nbody"
         assert parse_agent_markdown(text, path_fragment="agents/x.md", workspace=workspace) is None
 
+    def test_plain_markdown_is_ignored_without_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            spec = parse_agent_markdown(
+                "# lessons\n\nOrdinary notes.\n",
+                path_fragment="agents/afang/lessons.md",
+            )
+        assert spec is None
+        assert not any("missing YAML frontmatter" in rec.message for rec in caplog.records)
+
+    def test_unknown_tool_log_names_the_file(self, caplog: pytest.LogCaptureFixture) -> None:
+        parent = MagicMock()
+        parent.name = "current_time"
+        text = SAMPLE_MD.replace("  - current_time", "  - 阅读、写作、编辑")
+        with caplog.at_level(logging.WARNING):
+            spec = parse_agent_markdown(
+                text,
+                path_fragment="agents/dispatch/rules-agent.md",
+                parent_tools=[parent],
+            )
+        assert spec is not None
+        assert spec["tools"] == []
+        assert any(
+            "阅读、写作、编辑" in rec.message and "agents/dispatch/rules-agent.md" in rec.message
+            for rec in caplog.records
+        )
+
 
 class TestCollectAndLoad:
     def test_collect_nested_markdown(self, workspace: BackendWorkspace, tmp_path: Path) -> None:
