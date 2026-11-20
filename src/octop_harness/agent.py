@@ -45,6 +45,7 @@ from octop_harness.memory.policy import (
 from octop_harness.middleware.bootstrap import BootstrapMiddleware, bootstrap_marker_exists
 from octop_harness.middleware.checkpoint_ts import CheckpointTsMiddleware
 from octop_harness.middleware.context_usage import ContextUsageMiddleware
+from octop_harness.middleware.file_capture import FileCaptureMiddleware
 from octop_harness.middleware.file_changes import FileChangeTracker
 from octop_harness.middleware.mcp_tool_error import McpToolErrorMiddleware
 from octop_harness.middleware.mcp_tools import MCPToolMiddleware
@@ -235,6 +236,10 @@ class HarnessAgent:
         self._summarization_mw: Any | None = None
         self._file_changes = FileChangeTracker()
         self._file_change_scope_alias: dict[str, str] = {}
+        # One capture middleware shared by the parent chain and every
+        # subagent spec: subagents do not inherit the parent middleware
+        # chain, so the instance is attached to each spec explicitly.
+        self._file_capture = FileCaptureMiddleware(self._workspace, self._file_changes)
 
         self._init_graph()
         self._init_protocols()
@@ -302,11 +307,13 @@ class HarnessAgent:
         invocations with distinct thread ids never share a drain window, and
         at most one turn may be in flight per thread.
 
-        Captures cover parent-agent filesystem tool writes; subagent tool
-        writes are not captured. Capture windows are opened by
-        ``call``/``stream``/``stream_events``/``resume_hitl``; protocol-level
-        HTTP entry points that bypass those methods record into the scopeless
-        window, which only the tracker's retention caps bound.
+        Captures cover filesystem tool writes from the parent agent and its
+        subagents (the capture middleware rides both chains, and subagent
+        writes inherit the parent thread's scope). Capture windows are opened
+        by ``call``/``stream``/``stream_events``/``resume_hitl``;
+        protocol-level HTTP entry points that bypass those methods record
+        into the scopeless window, which only the tracker's retention caps
+        bound.
         """
         scope = self._capture_scope_for(thread_id)
         self._file_change_scope_alias.pop(thread_id or "", None)
@@ -342,9 +349,10 @@ class HarnessAgent:
         addressing the same scope even after such an override.
         """
         alias = getattr(self, "_file_change_scope_alias", None)
-        if not alias:
+        if not isinstance(alias, dict):
             return thread_id or ""
-        return alias.get(thread_id or "", thread_id or "")
+        resolved: str = alias.get(thread_id or "", thread_id or "")
+        return resolved
 
     def _start_file_change_window(self, thread_id: str, capture_scope: str) -> None:
         """Open a fresh capture window: drop the previous turn's leftovers.
@@ -1668,7 +1676,8 @@ class HarnessAgent:
 
         Order: bootstrap (front-loaded) → router → model_settings → session_header →
         skill_filter → mcp_tool_error → tool_guard → filesystem_guard (outside-root
-        soft-fail; deny rules when permissions + execution backend) → mcp_tools →
+        soft-fail; deny rules when permissions + execution backend) → file_capture
+        (write snapshots; also attached to every subagent spec) → mcp_tools →
         retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
         conversation_mode → tools_filter → decision (only when enabled) → tool search →
         task tool ordering → refusal passthrough → context_usage.
@@ -1720,9 +1729,11 @@ class HarnessAgent:
                     memory_enabled=cfg.memory_enabled,
                     policy=cfg.manual_document_policy,
                 ),
-                file_changes=self._file_changes,
             )
         )
+        # Placed right after the guard so capture sees the guard's request
+        # rewrites (relative-path resolution, legacy Windows paths).
+        chain.append(self._file_capture)
 
         if cfg.mcp_server_configs:
             chain.append(
@@ -1896,9 +1907,9 @@ class HarnessAgent:
         from octop_harness.subagents.loader import load_subagents_from_workspace, merge_subagents
 
         cfg = self._config
-        config_specs = list(cfg.subagents or [])
+        config_specs = list(cfg.subagents or ())
         if not cfg.subagents_auto_load:
-            return [dict(spec) for spec in config_specs]
+            return self._attach_subagent_file_capture(config_specs)
         loaded = load_subagents_from_workspace(
             self._workspace,
             subagents_path=cfg.subagents_path,
@@ -1932,7 +1943,24 @@ class HarnessAgent:
             # so an ``ask_user_question`` call there can never reach a human.
             # Hide it instead of letting them burn a turn on the fallback.
             spec["tools"] = [t for t in spec["tools"] if _tool_name_of(t) != ASK_USER_TOOL_NAME]
-        return specs
+        return self._attach_subagent_file_capture(specs)
+
+    def _attach_subagent_file_capture(self, specs: Sequence[Any]) -> list[dict[str, Any]]:
+        """Attach the shared file-capture middleware to every subagent spec.
+
+        Subagent graphs run without the parent's middleware chain, so the
+        capture middleware must ride on the spec itself. Writes then land in
+        the parent invocation's drain window because the task tool's config
+        inherits the parent ``configurable``. The middleware list is copied,
+        never the caller's, so repeated resolutions stay idempotent.
+        """
+        attached: list[dict[str, Any]] = []
+        for spec in specs:
+            middleware = list(spec.get("middleware") or ())
+            if self._file_capture not in middleware:
+                middleware.append(self._file_capture)
+            attached.append({**spec, "middleware": middleware})
+        return attached
 
     def _build_graph(
         self,

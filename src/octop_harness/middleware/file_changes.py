@@ -150,6 +150,16 @@ class FileChangeTracker:
             self._last_touch.pop(old, None)
             self._touch(new)
 
+    def unrewindable(self, path: str, scope: str = "") -> bool:
+        """True when this path/window can never produce a usable record.
+
+        Covers paths with an unusable snapshot and scopes that failed closed:
+        callers can skip the whole capture (no before, no after read) since
+        any record would be dropped anyway.
+        """
+        with self._lock:
+            return path in self._skipped.get(scope, {}) or scope in self._unrewindable_scopes
+
     def next_seq(self) -> int:
         """Allocate the next capture-order sequence number."""
         return next(self._capture_seq)

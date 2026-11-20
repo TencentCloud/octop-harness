@@ -805,7 +805,7 @@ class TestHarnessAgentModelFactory:
 class TestAgetHistory:
     """Tests for HarnessAgent.aget_history()."""
 
-    def _make_agent(self, tmp_path: Path, checkpointer: Any) -> HarnessAgent:
+    def _make_agent(self, tmp_path: Path, checkpointer: Any, **overrides: Any) -> HarnessAgent:
         cfg = HarnessAgentConfig(
             name="hist-agent",
             workspace_dir=tmp_path,
@@ -821,6 +821,7 @@ class TestAgetHistory:
             default_model="p/text",
             checkpointer=checkpointer,
             memory_enabled=False,
+            **overrides,
         )
         with (
             patch("langchain_openai.ChatOpenAI", return_value=MagicMock()),
@@ -1248,6 +1249,45 @@ class TestFileChangeLifecycle:
         agent.close()
         assert agent.pop_file_changes("t1") == []
         assert agent.pop_file_changes("t2") == []
+
+
+class TestSubagentFileCaptureWiring:
+    """The shared capture middleware must ride every subagent spec."""
+
+    def _make_agent(self, tmp_path: Path, **overrides: Any) -> HarnessAgent:
+        spec = {
+            "name": "helper",
+            "description": "helps",
+            "prompt": "You help.",
+        }
+        return TestAgetHistory()._make_agent(
+            tmp_path,
+            checkpointer=False,
+            subagents=[spec],
+            **overrides,
+        )
+
+    def test_parent_chain_contains_capture_middleware(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        assert agent._file_capture in agent._build_middleware()
+
+    def test_config_specs_get_capture_middleware(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path, subagents_auto_load=False)
+        specs = agent._resolve_subagents()
+        assert len(specs) == 1
+        middleware = specs[0]["middleware"]
+        assert agent._file_capture in middleware
+        # Resolution is idempotent and never mutates the config's own list.
+        again = agent._resolve_subagents()
+        assert again[0]["middleware"].count(agent._file_capture) == 1
+        assert "middleware" not in agent._config.subagents[0]
+
+    def test_workspace_merged_specs_get_capture_middleware(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)  # subagents_auto_load defaults True
+        specs = agent._resolve_subagents()
+        assert specs
+        for spec in specs:
+            assert agent._file_capture in spec["middleware"]
 
 
 class TestMcpIntegration:
