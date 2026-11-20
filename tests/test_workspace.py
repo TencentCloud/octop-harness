@@ -74,6 +74,26 @@ class TestBackendWorkspace:
         ws.write_text("present.md", "x", force=True)
         assert ws.exists("present.md")
 
+    def test_exists_strict_positively_confirms_local_and_backend(self, fs_backend: Any, tmp_path: Path) -> None:
+        ws = BackendWorkspace(fs_backend, tmp_path)
+        # Local candidate hit -> True.
+        (tmp_path / "local.md").write_text("x", encoding="utf-8")
+        assert ws.exists_strict("local.md") is True
+        # Written through the workspace so the backend has it too.
+        ws.write_text("stored.md", "y", force=True)
+        assert ws.exists_strict("stored.md") is True
+        # Local miss + positively-confirmed backend absence -> False.
+        assert ws.exists_strict("missing.md") is False
+
+    def test_exists_strict_unknown_when_backend_probe_fails(self, fs_backend: Any, tmp_path: Path) -> None:
+        class _ExplodingBackend:
+            def read(self, path, *, offset=0, limit=None):
+                raise RuntimeError("backend down")
+
+        ws = BackendWorkspace(_ExplodingBackend(), tmp_path)
+        # Mixed local miss + backend error -> None (unknown), never False.
+        assert ws.exists_strict("missing.md") is None
+
     def test_materialize_local(self, fs_backend: Any, tmp_path: Path) -> None:
         ws = BackendWorkspace(fs_backend, tmp_path)
         ws.write_text("file.txt", "hello", force=True)
@@ -770,7 +790,10 @@ class TestBackendWorkspaceVirtualMode:
         backend.root_dir = None
 
         ws = BackendWorkspace(backend, workspace)
-        with patch("octop_harness.backends.workspace.backend_file_exists", return_value=True) as exists_fn:
+        with patch(
+            "octop_harness.backends.workspace.backend_file_exists_strict",
+            return_value=True,
+        ) as exists_fn:
             assert ws.exists("AGENTS.md") is True
         exists_fn.assert_called_once()
 
