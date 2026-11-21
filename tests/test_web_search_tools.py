@@ -40,6 +40,7 @@ class TestRegistry:
             "yuanbao",
             "searchfree",
             "you",
+            "cloro",
         }
 
     def test_provider_available_all_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,6 +72,7 @@ class TestLoadWebSearchTools:
             "MOONSHOT_API_KEY",
             "TENCENTCLOUD_WSA_APIKEY",
             "YDC_API_KEY",
+            "CLORO_API_KEY",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -111,12 +113,22 @@ class TestLoadWebSearchTools:
             "yuanbao_search",
             "searchfree_search",
             "you_search",
+            "cloro_search",
         }
 
     def test_auto_includes_you_only_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         assert "you_search" not in {t.name for t in load_web_search_tools("auto")}
         monkeypatch.setenv("YDC_API_KEY", "ydc")
         assert "you_search" in {t.name for t in load_web_search_tools("auto")}
+
+    def test_auto_includes_cloro_only_with_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert "cloro_search" not in {t.name for t in load_web_search_tools("auto")}
+        monkeypatch.setenv("CLORO_API_KEY", "cl")
+        assert "cloro_search" in {t.name for t in load_web_search_tools("auto")}
+
+    def test_explicit_cloro_requires_key(self) -> None:
+        with pytest.raises(RuntimeError, match="CLORO_API_KEY"):
+            load_web_search_tools(["cloro"])
 
     def test_explicit_you_works_without_key(self) -> None:
         assert [t.name for t in load_web_search_tools(["you"])] == ["you_search"]
@@ -909,4 +921,88 @@ class TestYouSearch:
 
         with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body={"results": {"web": []}}), [])):
             result = await mod.you_search.ainvoke({"query": "hi"})
+        assert result == "No results found."
+
+
+# ---------------------------------------------------------------------------
+# cloro_search (CLORO_API_KEY required)
+# ---------------------------------------------------------------------------
+
+
+_CLORO_BODY = {
+    "success": True,
+    "result": {
+        "organicResults": [
+            {"position": 1, "title": "Example", "link": "https://example.com", "snippet": "desc"},
+            {"position": 2, "title": "Unresolved", "link": "", "snippet": "no link yet"},
+            {"position": 3, "title": "Second", "link": "https://example.org", "snippet": None},
+        ]
+    },
+}
+
+
+class TestCloroSearch:
+    @pytest.fixture(autouse=True)
+    def _set_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLORO_API_KEY", "cl-test")
+
+    @pytest.mark.asyncio
+    async def test_missing_key_returns_plain_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from octop_harness.builtin.tools.web_search import cloro as mod
+
+        monkeypatch.delenv("CLORO_API_KEY", raising=False)
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_CLORO_BODY), calls)):
+            result = await mod.cloro_search.ainvoke({"query": "hi"})
+        assert "CLORO_API_KEY" in result
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_posts_query_and_country(self) -> None:
+        from octop_harness.builtin.tools.web_search import cloro as mod
+
+        calls: list[dict[str, Any]] = []
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_CLORO_BODY), calls)):
+            await mod.cloro_search.ainvoke({"query": "hello", "country": "de"})
+        assert calls[0]["method"] == "POST"
+        assert calls[0]["url"] == mod.ENDPOINT
+        assert calls[0]["json"] == {"query": "hello", "country": "DE"}
+        assert calls[0]["headers"]["Authorization"] == "Bearer cl-test"
+        assert calls[0]["headers"]["User-Agent"] == "cloro-integration/tencentcloud-octop-harness"
+
+    @pytest.mark.asyncio
+    async def test_maps_results_and_skips_unresolved_links(self) -> None:
+        from octop_harness.builtin.tools.web_search import cloro as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_CLORO_BODY), [])):
+            result = await mod.cloro_search.ainvoke({"query": "hello"})
+        assert json.loads(result) == [
+            {"position": 1, "title": "Example", "url": "https://example.com", "snippet": "desc"},
+            {"position": 2, "title": "Second", "url": "https://example.org", "snippet": ""},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_max_results_limits_output(self) -> None:
+        from octop_harness.builtin.tools.web_search import cloro as mod
+
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=_CLORO_BODY), [])):
+            result = await mod.cloro_search.ainvoke({"query": "hello", "max_results": 1})
+        assert [row["url"] for row in json.loads(result)] == ["https://example.com"]
+
+    @pytest.mark.asyncio
+    async def test_error_envelope_returns_plain_text(self) -> None:
+        from octop_harness.builtin.tools.web_search import cloro as mod
+
+        body = {"success": False, "error": {"code": "INSUFFICIENT_CREDITS", "message": "Not enough credits"}}
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(status_code=402, body=body), [])):
+            result = await mod.cloro_search.ainvoke({"query": "hi"})
+        assert result == "Error: cloro returned HTTP 402 (Not enough credits)."
+
+    @pytest.mark.asyncio
+    async def test_empty_results(self) -> None:
+        from octop_harness.builtin.tools.web_search import cloro as mod
+
+        body = {"success": True, "result": {"organicResults": []}}
+        with patch.object(mod.httpx, "AsyncClient", _you_client(_YouResp(body=body), [])):
+            result = await mod.cloro_search.ainvoke({"query": "hi"})
         assert result == "No results found."

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 新增
 
+- 新增可选的 `cloro` 网页搜索供应商（`cloro_search`），返回实时 Google 自然搜索结果，可指定国家。需要 `CLORO_API_KEY`；设置后加入 `auto`。Add the optional `cloro` web-search provider (`cloro_search`): live Google organic results for a query and country. Needs `CLORO_API_KEY`; joins `auto` once it is set.
 - 托管 ACP 回合可以带上本轮的 MCP 服务器、会话模式和附加提示。YOLO 会切到代理公布的免审批模式，并自动放行未被硬拦截的权限请求。代理拒绝这批 MCP 时，会话改为不带这些工具继续。
 
 ### 修复

@@ -35,7 +35,7 @@ import os
 from collections.abc import Iterable
 from typing import Any, Literal, cast
 
-WebSearchToolName = Literal["tavily", "brave", "deepseek", "google", "kimi", "yuanbao", "searchfree", "you"]
+WebSearchToolName = Literal["tavily", "brave", "deepseek", "google", "kimi", "yuanbao", "searchfree", "you", "cloro"]
 
 # ``provider name → (required env vars, lazy loader returning a langchain tool)``.
 # Loaders are deliberately lazy so importing this module is cheap.
@@ -89,6 +89,12 @@ def _load_you() -> Any:
     return you_search
 
 
+def _load_cloro() -> Any:
+    from octop_harness.builtin.tools.web_search.cloro import cloro_search
+
+    return cloro_search
+
+
 WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     "tavily": (("TAVILY_API_KEY",), _load_tavily),
     "brave": (("BRAVE_API_KEY",), _load_brave),
@@ -102,6 +108,7 @@ WEB_SEARCH_PROVIDERS: dict[WebSearchToolName, tuple[tuple[str, ...], Any]] = {
     # ``you`` works without a key when named explicitly; ``YDC_API_KEY``
     # raises its limits. See ``_AUTO_REQUIRED_ENV`` for the ``auto`` gate.
     "you": ((), _load_you),
+    "cloro": (("CLORO_API_KEY",), _load_cloro),
 }
 
 # Providers that need no env vars when named explicitly but should only join
