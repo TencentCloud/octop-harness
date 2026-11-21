@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- `memory_search` 返回带图原话的文字，过滤图片引用和图片数据；跳过只有图片的命中。旧库原话索引待升级时，工具会显示升级提示，并保留已命中的长期记忆。
+- `memory_get` 打开带图原始记录时保留文字和分页位置，纯图片摘录返回没有可用内容。
+- 修复事件循环退出时同步关闭 SQLite checkpointer 可能触发的后台线程异常。
 - 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
 - 华为云 OBS 客户端改为传入单个秒级超时。原先传入 `(connect, read)` 元组，探测和浏览会在 `socket.settimeout` 上报 `'tuple' object cannot be interpreted as an integer`（Octop#2971）。
 - 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。

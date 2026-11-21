@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -2078,35 +2079,20 @@ async def _async_close_sqlite_connection(conn: Any) -> None:
 
 
 def _sync_close_sqlite_connection(conn: Any) -> None:
-    """Close an ``aiosqlite.Connection`` synchronously for agent teardown.
+    """Wait for the SQLite worker to close its own connection."""
 
-    ``aiosqlite.Connection.close()`` is async. During pytest teardown (or any
-    sync ``close()`` while an event loop is running) scheduling ``ensure_future``
-    leaves the underlying ``sqlite3.Connection`` open until GC — which trips
-    ``ResourceWarning`` under pytest's strict unraisable hook. Closing the
-    private ``_connection`` first is safe: checkpoint writes are committed per
-    step, and ``close()`` is idempotent.
-    """
-    raw = getattr(conn, "_connection", None)
-    if raw is not None:
-        with contextlib.suppress(Exception):
-            raw.close()
-    stop_fn = getattr(conn, "stop", None)
-    if callable(stop_fn):
-        with contextlib.suppress(Exception):
-            fut = stop_fn()
-            if fut is not None:
-                try:
-                    asyncio.get_running_loop()
-                except RuntimeError:
-                    with contextlib.suppress(Exception):
-                        asyncio.run(fut)
-    if raw is None:
+    def close() -> None:
+        asyncio.run(conn.close())
+
+    with contextlib.suppress(*DEFENSIVE_OP_ERRORS):
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            with contextlib.suppress(Exception):
-                asyncio.run(conn.close())
+            close()
+        else:
+            # Keep the loop receiving the worker callbacks alive through shutdown.
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(close).result()
 
 
 def _build_async_sqlite_saver(conn: Any) -> Any:
