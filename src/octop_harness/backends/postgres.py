@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from deepagents.backends.protocol import FileData, FileInfo
 
+from octop_harness.backends.bounded import DownloadTooLargeError
 from octop_harness.backends.cloud_storage_base import CloudStorageBackend
 
 logger = logging.getLogger(__name__)
@@ -288,17 +289,23 @@ class PostgresBackend(CloudStorageBackend):
             out["modified_at"] = str(raw["modified_at"])
         return out
 
-    def _get_file_data(self, path: str) -> FileData | None:
+    def _get_file_data(self, path: str, *, max_bytes: int | None = None) -> FileData | None:
         key = self._key(path)
         if not key or key.endswith("/"):
             return None
         with self._connect() as conn:
-            row = conn.execute(
-                f"SELECT content FROM {self._qualified} WHERE path = %s",
-                (key,),
-            ).fetchone()
+            if max_bytes is None:
+                row = conn.execute(f"SELECT content FROM {self._qualified} WHERE path = %s", (key,)).fetchone()
+            else:
+                row = conn.execute(
+                    f"SELECT CASE WHEN octet_length(content::text) <= %s "
+                    f"THEN content ELSE NULL END FROM {self._qualified} WHERE path = %s",
+                    (max_bytes, key),
+                ).fetchone()
         if row is None:
             return None
+        if row[0] is None:
+            raise DownloadTooLargeError("file exceeds download limit")
         return self._normalize_stored(row[0])
 
     def _put_file_data(self, path: str, file_data: FileData) -> None:
