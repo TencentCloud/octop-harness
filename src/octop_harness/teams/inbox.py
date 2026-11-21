@@ -13,6 +13,7 @@ follow-up ``call``s are serialized per source thread:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -155,7 +156,16 @@ class HarnessAgentInboxManager:
 
     def start(self) -> None:
         if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._worker_loop(), name="harness-inbox")
+            # A fresh Context() keeps the long-lived worker (and its _run_job
+            # tasks) from inheriting the caller's LangGraph/LangChain run
+            # context. Otherwise the first turn that calls enqueue() donates
+            # its ContextVar tokens; inbox events leak into that turn's stream
+            # and the tokens are never reclaimed while the worker lives.
+            self._worker = asyncio.create_task(
+                self._worker_loop(),
+                name="harness-inbox",
+                context=contextvars.Context(),
+            )
 
     async def shutdown(self) -> None:
         if self._worker is None and not self._tasks:
