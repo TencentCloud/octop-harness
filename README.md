@@ -47,6 +47,22 @@
 | 💬 | **Teams** | Peer inbox; `peer_invoke_mode` selects sync / async / both |
 | ⌨️ | **Terminal CLI** | Interactive chat, provider/skill config, and agent management |
 
+### CubeSandbox backend
+
+Install `octop-harness[cubesandbox-native,remote-backends]` for the native
+SDK and PostgreSQL locking, or use `[cubesandbox,remote-backends]` for the E2B
+compatibility SDK. Resolve a backend with
+`{"type": "cubesandbox", "template": "...", "octop_user": "...", "octop_agent": "..."}`.
+Set `CUBE_API_URL`, the SDK's API key environment variable, and
+`OCTOP_CUBESANDBOX_LOCK_DSN` on the harness host. Managed hosts must share the
+lock database. The default `octop_scope` of `agent` reuses a sandbox per agent.
+Use `user` to share the workspace across that user's agents. Closing a backend
+releases its connection. Call `destroy()` to terminate the sandbox explicitly.
+Add `workspace_backup` (a nested backend spec such as `{"type": "cos", "bucket": "..."}`)
+to mirror the sandbox workspace into object storage: it is copied into every freshly
+created sandbox, and `archive_workspace()` pushes it back before the sandbox goes away.
+
+
 ## Why Octop Harness?
 
 octop-harness is a library (not an app) that turns deepagents into a deployable runtime. A single `HarnessAgentManager` owns a registry of agents; each agent wires together a model, a set of tools/skills, a memory backend, and a LangGraph checkpoint — all assembled through the `harness` layering discipline (L0 I/O helpers → L1 workspace facade → L2 business logic → L3 assembly).

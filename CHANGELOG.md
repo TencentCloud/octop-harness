@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- 新增 CubeSandbox 后端，支持远程命令、虚拟文件系统，以及基于 PostgreSQL 锁的沙箱复用。
+- CubeSandbox 工作区可镜像到对象存储：新建沙箱自动回灌，`archive_workspace()` 负责归档。
+
 ### 修复
 
 - 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
