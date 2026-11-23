@@ -178,5 +178,13 @@ def test_backup_options_reject_incomplete_specs() -> None:
 
 def test_archive_requires_a_configured_backup() -> None:
     remote = CubeSandbox(sandbox=FakeSandbox())
+    assert remote.archives_workspace is False
     with pytest.raises(RuntimeError, match="No workspace_backup"):
         remote.archive_workspace()
+    backed = CubeSandbox(
+        sandbox=FakeSandbox(),
+        octop_user="alice",
+        octop_agent="bot-1",
+        workspace_backup=CubeWorkspaceBackup(storage=FakeStorage(), prefix="/p"),
+    )
+    assert backed.archives_workspace is True

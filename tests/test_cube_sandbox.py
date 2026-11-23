@@ -88,6 +88,13 @@ def test_file_errors_and_quoted_mutations(sandbox: Mock) -> None:
         remote.delete_path("/")
 
 
+def test_native_missing_optional_file(sandbox: Mock) -> None:
+    remote = CubeSandbox(sandbox=sandbox)
+    sandbox.files.read.side_effect = RuntimeError("Failed to read /SOUL.md: path '/SOUL.md' does not exist")
+    sandbox.commands.run.return_value = SimpleNamespace(stdout="", stderr="", exit_code=1)
+    assert remote.download_files(["/SOUL.md"])[0].error == FILE_NOT_FOUND
+
+
 def test_native_is_preferred_and_e2b_is_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     mocked = Mock(__name__="e2b")
     calls = []

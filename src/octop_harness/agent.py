@@ -1238,6 +1238,10 @@ class HarnessAgent:
         ``root_dir``, present it as a rootfs-absolute path so it matches
         the virtual ``/`` file tools use.
         """
+        guest_workspace = getattr(self._backend, "sandbox_workspace_dir", None)
+        if isinstance(guest_workspace, str):
+            return Path(guest_workspace)
+
         configured = Path(self._config.workspace_dir)
         text = configured.as_posix().replace("\\", "/").strip()
         if text == "/" or text.startswith("/.octop/"):
@@ -1607,7 +1611,11 @@ class HarnessAgent:
             FilesystemGuardMiddleware(
                 fs_permissions,
                 root_dir=root_dir,
-                workspace_dir=cfg.workspace_dir,
+                workspace_dir=(
+                    self._agent_visible_workspace_dir()
+                    if isinstance(getattr(self._backend, "sandbox_workspace_dir", None), str)
+                    else cfg.workspace_dir
+                ),
                 workspace=self._workspace,
                 protect_user_memory=manual_documents_locked(
                     memory_enabled=cfg.memory_enabled,

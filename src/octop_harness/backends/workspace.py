@@ -221,6 +221,11 @@ def _present_workspace_path(
     raw = storage_path.strip().replace("\\", "/")
     if not raw:
         return "."
+    guest_workspace = getattr(backend, "sandbox_workspace_dir", None)
+    if isinstance(guest_workspace, str):
+        relative = relative_virtual_path(raw, guest_workspace)
+        if relative is not None:
+            return relative or "."
     if backend is not None and is_cloud_storage_backend(backend):
         virt = remote_workspace_virtual_root(workspace_dir)
         rel = relative_virtual_path(raw, virt)
@@ -438,7 +443,8 @@ class BackendWorkspace:
         """Resolve a workspace-relative fragment without system-path remapping."""
         text = _strip_relative_prefix(fragment.replace("\\", "/"))
         if getattr(self._backend, "sandbox_fs", False):
-            return "/" if not text or text == "." else f"/{text}"
+            root = getattr(self._backend, "sandbox_workspace_dir", "/")
+            return root if not text or text == "." else root.rstrip("/") + "/" + text
         resolved = str((self._workspace_dir / text).resolve())
         Path(resolved).relative_to(self._workspace_dir.resolve())
         return resolved

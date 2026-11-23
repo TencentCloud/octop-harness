@@ -116,6 +116,9 @@ class CubeSandbox(BaseSandbox):
         options = {"api_url": endpoint, "api_key": api_key}
         connection = {name: value for name, value in options.items() if value is not None}
         if self._sdk.__name__ == "cubesandbox":
+            # The native SDK documents CUBE_PROXY_NODE_IP; honour it so a host
+            # reached over a tunnel needs no per-agent spec keys.
+            proxy_node_ip = proxy_node_ip or os.environ.get("CUBE_PROXY_NODE_IP")
             if sandbox_domain is not None:
                 connection["sandbox_domain"] = sandbox_domain
             if proxy_node_ip is not None:
@@ -204,6 +207,11 @@ class CubeSandbox(BaseSandbox):
             if not self._sdk_error(exc, "SandboxNotFoundError", "SandboxNotFoundException"):
                 raise
             return None
+
+    @property
+    def sandbox_workspace_dir(self) -> str:
+        """Return the persistent workspace path inside the guest."""
+        return self._workspace_backup.sandbox_dir if self._workspace_backup is not None else "/workspace"
 
     @property
     def id(self) -> str:
@@ -316,6 +324,7 @@ class CubeSandbox(BaseSandbox):
             or self._sdk_error(exc, "FilesystemNotFoundError", "FileNotFoundException")
             or "no such file" in lower
             or "file not found" in lower
+            or ("does not exist" in lower and str(path).lower() in lower)
         ):
             # Some envd versions report a directory as not found when opened as a file.
             quoted = shlex.quote(str(path))
@@ -342,6 +351,11 @@ class CubeSandbox(BaseSandbox):
             if not self._sdk_error(exc, "SandboxNotFoundError", "SandboxNotFoundException"):
                 raise
         self.close()
+
+    @property
+    def archives_workspace(self) -> bool:
+        """Whether a workspace mirror is configured for this sandbox."""
+        return self._workspace_backup is not None
 
     def archive_workspace(self) -> int:
         """Copy the sandbox workspace to object storage; return the file count.
