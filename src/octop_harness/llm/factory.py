@@ -40,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import zlib
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -574,10 +575,14 @@ def _gemini_thought_signature(call: Any) -> str | None:
 def _copy_gemini_tool_call_metadata(message: Any, tool_calls: Any) -> None:
     """Keep call IDs and thought signatures on the parsed message.
 
-    Entries are keyed by the streamed tool-call ``index`` rather than by list
-    position: a later delta may repeat only one call, and merging the chunks
-    must not bind its signature to a neighbour. ``id`` is stored alongside so
-    replay can match on identity instead of order.
+    Gemini streams **one tool call per delta and omits ``index`` entirely**, so
+    the position inside the delta is always 0 and cannot identify a call: two
+    calls would land under the same key, and LangChain concatenates string
+    values when it merges chunks (it does that to accumulate streamed text),
+    gluing their ids into a value that matches no call on replay. Key on the
+    call id whenever one is present — it is the only identifier that is both
+    unique and stable, and it is what the replay side matches on. The index
+    (or position) is only used when a call arrives without an id.
     """
     from langchain_core.messages import AIMessage, AIMessageChunk
 
@@ -591,17 +596,58 @@ def _copy_gemini_tool_call_metadata(message: Any, tool_calls: Any) -> None:
             call = raw.model_dump()
         else:
             continue
-        index = call.get("index")
-        key = str(index if isinstance(index, int) else position)
-        entry = entries.setdefault(key, {"index": int(key)})
         call_id = call.get("id")
-        if isinstance(call_id, str) and call_id:
-            entry["id"] = call_id
+        call_id = call_id if isinstance(call_id, str) and call_id else None
+        index = call.get("index")
+        if call_id:
+            key = call_id
+            entry = entries.setdefault(key, {"id": call_id})
+        elif isinstance(index, int):
+            key = str(index)
+            entry = entries.setdefault(key, {"index": index})
+        else:
+            key = f"#{position}"
+            entry = entries.setdefault(key, {})
         signature = _gemini_thought_signature(call)
         if signature is not None:
             entry["signature"] = signature
     if entries:
         message.additional_kwargs[_GEMINI_TOOL_CALLS_KEY] = entries
+
+
+def _gemini_tool_call_slot(call: dict[str, Any]) -> int:
+    """Derive a stable stream slot for an index-less Gemini tool call.
+
+    ``langchain-openai`` reads ``delta.tool_calls[*]["index"]`` unconditionally
+    and lets the resulting ``KeyError`` discard the whole list, so a streamed
+    call silently disappears and the turn has to be repeated without streaming
+    to get its tool calls back. Deriving the slot from the call id keeps a call
+    on one slot across deltas without shared state, so concurrent streams on
+    the same instance cannot interfere with each other.
+    """
+    call_id = call.get("id")
+    if isinstance(call_id, str) and call_id:
+        return zlib.crc32(call_id.encode()) & 0x7FFFFFFF
+    return 0
+
+
+def _backfill_gemini_tool_call_indexes(chunk: Any) -> None:
+    """Add the missing ``index`` to Gemini's streamed tool calls, in place."""
+    if not isinstance(chunk, dict):
+        return
+    choices = chunk.get("choices") or (chunk.get("chunk") or {}).get("choices") or []
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        delta = choice.get("delta") if isinstance(choice, dict) else None
+        if not isinstance(delta, dict):
+            continue
+        calls = delta.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if isinstance(call, dict) and not isinstance(call.get("index"), int):
+                call["index"] = _gemini_tool_call_slot(call)
 
 
 def _restore_gemini_tool_calls(msg_dict: dict[str, Any], source: Any) -> None:
@@ -614,30 +660,27 @@ def _restore_gemini_tool_calls(msg_dict: dict[str, Any], source: Any) -> None:
     calls = msg_dict.get("tool_calls")
     if not isinstance(metadata, dict) or not metadata or not isinstance(calls, list):
         return
-    ids_by_index: dict[str, str] = {}
-    signatures_by_index: dict[str, str] = {}
+    signatures_by_id: dict[str, str] = {}
+    signatures_by_key: dict[str, str] = {}
     for key, entry in metadata.items():
         if not isinstance(entry, dict):
             continue
+        signature = entry.get("signature")
+        if not isinstance(signature, str) or not signature:
+            continue
+        signatures_by_key[key] = signature
         call_id = entry.get("id")
         if isinstance(call_id, str) and call_id:
-            ids_by_index[key] = call_id
-        signature = entry.get("signature")
-        if isinstance(signature, str) and signature:
-            signatures_by_index[key] = signature
-    if not signatures_by_index:
+            signatures_by_id[call_id] = signature
+    if not signatures_by_key:
         return
-    signatures_by_id = {
-        ids_by_index[key]: signature for key, signature in signatures_by_index.items() if key in ids_by_index
-    }
     for position, call in enumerate(calls):
         if not isinstance(call, dict):
             continue
         call_id = call.get("id")
-        if isinstance(call_id, str) and call_id:
-            signature = signatures_by_id.get(call_id)
-        else:
-            signature = signatures_by_index.get(str(position))
+        signature = signatures_by_id.get(call_id) if isinstance(call_id, str) and call_id else None
+        if signature is None:
+            signature = signatures_by_key.get(str(position)) or signatures_by_key.get(f"#{position}")
         if signature is None:
             continue
         extra = call.get("extra_content")
@@ -891,10 +934,15 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             default_chunk_class: type[Any],
             base_generation_info: dict[str, Any] | None,
         ) -> Any:
+            gemini = self._needs_gemini_tool_signatures()
+            if gemini:
+                # LangChain drops the whole ``tool_calls`` list when ``index`` is
+                # missing, so repair it before the parent parses the delta.
+                _backfill_gemini_tool_call_indexes(chunk)
             return _copy_reasoning_from_chunk(
                 super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info),
                 chunk,
-                gemini=self._needs_gemini_tool_signatures(),
+                gemini=gemini,
             )
 
         def _get_request_payload(self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:

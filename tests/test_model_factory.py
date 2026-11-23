@@ -663,6 +663,65 @@ class TestGeminiToolCallSignatures:
         assert calls["call-signed"]["extra_content"] == {"google": {"thought_signature": "opaque-test-signature"}}
         assert "extra_content" not in calls["call-unsigned"]
 
+    def test_stream_without_index_keeps_calls_apart(self) -> None:
+        """Gemini streams one call per delta and omits ``index`` entirely.
+
+        Keying on the delta position merges both calls into one entry, and
+        LangChain concatenates string values when merging chunks, which glues
+        the ids into a value that matches no outgoing call.
+        """
+        from langchain_core.messages import AIMessageChunk, message_chunk_to_message
+
+        instance = self._build()
+        first = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-first",
+                                "type": "function",
+                                "function": {"name": "weather", "arguments": '{"city":"Paris"}'},
+                                "extra_content": {"google": {"thought_signature": "opaque-test-signature"}},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+        second = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "id": "call-second",
+                                "type": "function",
+                                "function": {"name": "weather", "arguments": '{"city":"London"}'},
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+        chunks = [instance._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, None) for chunk in (first, second)]
+        assert chunks[0] is not None and chunks[1] is not None
+        merged = chunks[0].message + chunks[1].message
+        # Without a repaired ``index`` LangChain drops the deltas and neither
+        # call survives the stream, which forces a non-streaming retry.
+        assert [call["id"] for call in merged.tool_calls] == ["call-first", "call-second"]
+        stored = merged.additional_kwargs.get("_harness_gemini_tool_calls") or {}
+        assert "call-first" in stored and "call-second" in stored
+
+        message = message_chunk_to_message(merged)
+        payload = instance._get_request_payload([message])
+        calls = {call["id"]: call for call in payload["messages"][0]["tool_calls"]}
+        assert calls["call-first"]["extra_content"] == {"google": {"thought_signature": "opaque-test-signature"}}
+        assert "extra_content" not in calls["call-second"]
+
 
 class TestCodexResponses:
     @staticmethod
