@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any
 from .utils import (
     BACKEND_CALL_ERRORS,
     BackendOperationNotSupportedError,
-    backend_file_exists,
+    backend_file_exists_strict,
     backend_write_force,
     delete_local_path,
     materialize_storage_path,
@@ -706,13 +706,37 @@ class BackendWorkspace:
     # ----- Sync I/O -----
 
     def exists(self, path: str) -> bool:
+        # Delegate so the write path and the snapshot/rewind path can never
+        # disagree about traversal semantics.
+        return self.exists_strict(path) is True
+
+    def exists_strict(self, path: str) -> bool | None:
+        """Tri-state :meth:`exists` for fail-closed callers.
+
+        ``None`` means at least one backend probe failed, so absence could
+        not be positively confirmed; callers must treat unknown as "cannot
+        snapshot", never as "absent".
+        """
+        verdicts: list[bool | None] = []
         for fragment in self._read_fragments(path):
             for candidate in self._iter_materialize_candidates(fragment, map_system_paths=False):
-                if candidate.exists():
+                try:
+                    candidate.stat()
+                except FileNotFoundError:
+                    verdicts.append(False)
+                except (OSError, ValueError):
+                    verdicts.append(None)
+                else:
+                    # A positively confirmed local file wins over any later
+                    # backend probe (same semantics as ``exists``).
                     return True
             for key in self._candidate_storage_keys(fragment, map_system_paths=False):
-                if backend_file_exists(self._backend, key):
+                verdict = backend_file_exists_strict(self._backend, key)
+                if verdict is True:
                     return True
+                verdicts.append(verdict)
+        if None in verdicts:
+            return None
         return False
 
     def read_text(self, path: str, *, limit: int = 10_000_000) -> str | None:
