@@ -10,6 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - 修复决策模型开启时 `generate_image`、`generate_video` 等工具被误判为 `tool_not_authorized` 的问题：决策调度器把长尾工具移出模型请求后，该工具不会进入 ToolSearchMiddleware 的每线程目录；现在只要调用携带已解析的真实工具对象就放行，未解析的空 schema 延迟引用与无工具对象的调用仍按原样拒绝。
+- 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
+- 华为云 OBS 客户端改为传入单个秒级超时。原先传入 `(connect, read)` 元组，探测和浏览会在 `socket.settimeout` 上报 `'tuple' object cannot be interpreted as an integer`（Octop#2971）。
+- 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。
+- `browser_use` 打开页面时使用与 `web_fetch` 相同的地址检查，并拒绝用配置名或截图路径跳出目录。
+
+## [1.0.11] - 2026-11-17
+
+### 新增
+
+- 托管 ACP 回合可以带上本轮的 MCP 服务器、会话模式和附加提示。YOLO 会切到代理公布的免审批模式，并自动放行未被硬拦截的权限请求。代理拒绝这批 MCP 时，会话改为不带这些工具继续。
+
+### 修复
+
+- Memory 支持活动锁时，checkpoint 的执行、恢复和读写会避开宿主裁剪；取消或提前结束也会等图退出再放锁。直接改图（如分叉）可调用 `HarnessAgent.checkpoint_activity(thread_id)`。
+- 最低依赖 octop-memory 1.0.5。定时裁剪跳过 PostgreSQL 共享表；宿主确认线程归属并暂停该线程后，可用离线接口按线程裁剪。SQLite 会把保留边界仍需要的旧消息并入边界 checkpoint，再删掉更早的父链。
+
+## [1.0.10] - 2026-11-15
+
+### 新增
+
+- 每个 agent 可单独配置自动压缩的触发、保留和截断，也可关闭自动触发。`/compact` 和上下文溢出仍可摘要。
+- 配置 `managed_runner` 后，该 agent 把每一轮转发给指定 ACP runner，不再进入模型循环。
+
+### 修复
+
+- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage，避免累计 usage 被重复累加。
 
 ## [1.0.9] - 2026-11-10
 

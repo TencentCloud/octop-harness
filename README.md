@@ -137,6 +137,15 @@ are retried. SDK retries are disabled on separate cached model instances, so
 main-chat retry settings are unaffected. `ChatModelFactory.get_chat_model(ref,
 max_retries=0)` exposes that isolated construction path.
 
+Automatic context compaction follows deepagents' defaults (trigger at 85% of
+the context window and keep 10% when the model profile exposes
+`max_input_tokens`). Override it on `HarnessAgentConfig` with
+`summarization_trigger`, `summarization_keep`, and `summarization_trim_tokens`.
+`summarization_enabled=False` turns off that automatic trigger and tool-argument
+truncation. The middleware stays installed, so `/compact` and a real
+context-window overflow can still summarize, and an earlier summary stays
+applied on later turns. `/compact` keeps its own recent-message tail.
+
 `memory_aux_thinking="auto"` or `"off"` disables thinking for known Qwen3/QwQ
 chat-template models; unsupported models keep their defaults. `"on"` keeps the
 model default. `memory_aux_extra_body` can supply vendor-specific settings such
@@ -224,7 +233,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 ## How to Use
 
-Current release: **1.0.9**. See the [release notes](CHANGELOG.md).
+Current release: **1.0.11**. See the [release notes](CHANGELOG.md).
 
 ### Prerequisites
 - **Python 3.12+**
@@ -342,6 +351,22 @@ authorize the resume caller. This context is process-local, isolated by thread,
 and released when the resumed stream finishes or the agent closes.
 
 ### Scheduled SQLite checkpoint backups
+
+PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
+With octop-memory 1.0.5, hosts can prune a verified thread offline after
+pausing its execution, resumption and forks across all hosts.
+
+With a Memory version exposing `acheckpoint_activity(thread_id)`, Harness holds
+that activity scope through calls, streams, HITL resumes, history reads and state
+updates. Cancellation drains accepted saver I/O before releasing the lease, and
+late saver tasks are rejected. The v3 stream keeps its scope across pull tasks
+until it finishes or is aborted. Hosts
+using `agent.graph` directly must guard the entire operation with
+`async with agent.checkpoint_activity(thread_id)`; the equivalent helper is
+`octop_harness.memory.checkpoint_activity(checkpointer, thread_id)`. This also
+applies to history forks and their source reads. All runtimes sharing those
+threads must participate before a host enables coordinated PostgreSQL retention.
+Older Memory versions remain compatible, but provide no coordination guarantee.
 
 With checkpoint retention enabled, `OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE`
 defaults to `first`. The first cleanup with eligible checkpoints attempts to
