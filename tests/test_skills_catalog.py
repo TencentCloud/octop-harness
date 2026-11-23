@@ -237,3 +237,110 @@ class TestSkillCatalog:
 
         rows = await list_skill_summaries(ws)
         assert [row["slug"] for row in rows] == ["good"]
+
+
+class TestSkillPlatformCompatibility:
+    def test_parses_known_compatibility_strings(self) -> None:
+        from octop_harness.skills.catalog import skill_compatible_platforms
+
+        assert skill_compatible_platforms(None) is None
+        assert skill_compatible_platforms("") is None
+        assert skill_compatible_platforms("Python 3.10+") is None
+        assert skill_compatible_platforms("macos only") == frozenset({"Darwin"})
+        assert skill_compatible_platforms("macos only \u2014 requires Reminders.app and remindctl CLI") == frozenset(
+            {"Darwin"}
+        )
+        assert skill_compatible_platforms("linux, macos") == frozenset({"Linux", "Darwin"})
+        assert skill_compatible_platforms("linux, macos, windows") == frozenset({"Linux", "Darwin", "Windows"})
+
+    def test_platform_predicate(self) -> None:
+        from octop_harness.skills.catalog import is_skill_platform_compatible
+
+        assert is_skill_platform_compatible("macos only", system="Linux") is False
+        assert is_skill_platform_compatible("macos only", system="Darwin") is True
+        assert is_skill_platform_compatible("linux, macos", system="Windows") is False
+        assert is_skill_platform_compatible("linux, macos", system="Linux") is True
+        assert is_skill_platform_compatible(None, system="Linux") is True
+        assert is_skill_platform_compatible("Python 3.10+", system="Windows") is True
+
+    async def test_catalog_omits_macos_only_on_linux(
+        self, fs_backend: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from octop_harness.skills import catalog as catalog_mod
+
+        monkeypatch.setattr(catalog_mod.platform, "system", lambda: "Linux")
+        ws = BackendWorkspace(fs_backend, tmp_path)
+        await ws.aupload_many(
+            [
+                (
+                    "_builtin_skills/apple-notes/SKILL.md",
+                    b"---\nname: apple-notes\ndescription: notes\ncompatibility: macos only\n---\n",
+                ),
+                (
+                    "_builtin_skills/apple-reminders/SKILL.md",
+                    (
+                        "---\n"
+                        "name: apple-reminders\n"
+                        "description: reminders\n"
+                        "compatibility: macos only \u2014 requires Reminders.app and remindctl CLI\n"
+                        "---\n"
+                    ).encode(),
+                ),
+                (
+                    "_builtin_skills/watchers/SKILL.md",
+                    b"---\nname: watchers\ndescription: poll\ncompatibility: linux, macos\n---\n",
+                ),
+                (
+                    "_builtin_skills/plan/SKILL.md",
+                    b"---\nname: plan\ndescription: plan\ncompatibility: linux, macos, windows\n---\n",
+                ),
+                (
+                    "skills/custom-one/SKILL.md",
+                    b"---\nname: custom-one\ndescription: custom\n---\n",
+                ),
+            ]
+        )
+
+        rows = await list_skill_summaries(ws)
+        assert [row["slug"] for row in rows] == ["plan", "watchers", "custom-one"]
+        assert all(row["enabled"] is True for row in rows)
+
+    async def test_catalog_keeps_macos_only_on_darwin(
+        self, fs_backend: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from octop_harness.skills import catalog as catalog_mod
+
+        monkeypatch.setattr(catalog_mod.platform, "system", lambda: "Darwin")
+        ws = BackendWorkspace(fs_backend, tmp_path)
+        await ws.awrite_text(
+            "_builtin_skills/apple-notes/SKILL.md",
+            "---\nname: apple-notes\ndescription: notes\ncompatibility: macos only\n---\n",
+            force=True,
+        )
+
+        rows = await list_skill_summaries(ws)
+        assert [row["slug"] for row in rows] == ["apple-notes"]
+        assert rows[0]["enabled"] is True
+
+    async def test_catalog_omits_non_windows_skill_on_windows(
+        self, fs_backend: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from octop_harness.skills import catalog as catalog_mod
+
+        monkeypatch.setattr(catalog_mod.platform, "system", lambda: "Windows")
+        ws = BackendWorkspace(fs_backend, tmp_path)
+        await ws.aupload_many(
+            [
+                (
+                    "_builtin_skills/watchers/SKILL.md",
+                    b"---\nname: watchers\ndescription: poll\ncompatibility: linux, macos\n---\n",
+                ),
+                (
+                    "_builtin_skills/plan/SKILL.md",
+                    b"---\nname: plan\ndescription: plan\ncompatibility: linux, macos, windows\n---\n",
+                ),
+            ]
+        )
+
+        rows = await list_skill_summaries(ws)
+        assert [row["slug"] for row in rows] == ["plan"]
