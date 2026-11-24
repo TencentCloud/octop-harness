@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 华为云 OBS 客户端改为传入单个秒级超时。原先传入 `(connect, read)` 元组，探测和浏览会在 `socket.settimeout` 上报 `'tuple' object cannot be interpreted as an integer`（Octop#2971）。
 - 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。
 - `browser_use` 打开页面时使用与 `web_fetch` 相同的地址检查，并拒绝用配置名或截图路径跳出目录。
+- Gemini 的 OpenAI 兼容端点要求工具调用回传思考签名（thought signature）。签名现在在响应解析、流式分块聚合和历史回放中都保留，并且只发给该端点（Octop#2499）。
+- Gemini 的流式分块不带工具调用的 `index`，LangChain 会因此丢掉整段调用列表。现在按调用 id 归档并补齐 `index`：同一轮的多个工具调用不再挤进同一个条目，也不会在合并分块时把两个 id 拼成一串。
 
 ## [1.0.11] - 2026-11-17
 

@@ -23,6 +23,16 @@ We solve that with a small ``ChatOpenAI`` subclass that captures
 ``reasoning_content`` into ``AIMessage.additional_kwargs`` on parse and
 re-attaches it on serialize. The behaviour is no-op for providers that don't
 emit the field, so it's always-on for ``protocol="openai"``.
+
+Gemini thought signatures
+-------------------------
+Google's OpenAI-compatible endpoint marks each tool call with an opaque
+``extra_content.google.thought_signature`` and rejects the follow-up turn when
+it is missing. ``langchain-openai`` drops the field while normalising tool
+calls, and the signature sometimes arrives in a later stream delta than the
+call id. The same subclass therefore keeps the signatures as message metadata
+and replays them into outgoing ``tool_calls`` — only for that endpoint, so no
+other provider ever sees the Google-specific field.
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import zlib
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -280,6 +291,20 @@ def _is_codex_base_url(base_url: str | None) -> bool:
     )
 
 
+_GEMINI_HOSTS: frozenset[str] = frozenset(
+    {
+        "generativelanguage.googleapis.com",  # AI Studio / Gemini API
+        "aiplatform.googleapis.com",  # Vertex AI, same Gemini backend
+    }
+)
+
+
+def _is_gemini_base_url(base_url: str | None) -> bool:
+    """Match Google's OpenAI-compatible endpoints, ignoring look-alike hosts."""
+    endpoint = urlsplit(base_url or "")
+    return endpoint.scheme == "https" and (endpoint.hostname or "").lower() in _GEMINI_HOSTS
+
+
 def _build_openai(provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None) -> BaseChatModel:
     try:
         from langchain_openai import ChatOpenAI
@@ -526,7 +551,147 @@ def _fallback_model_for(instance: Any, exc: BaseException, kwargs: Mapping[str, 
     return fallback
 
 
-def _copy_reasoning_from_response(result: Any, response: Any) -> Any:
+_GEMINI_TOOL_CALLS_KEY = "_harness_gemini_tool_calls"
+
+
+def _gemini_thought_signature(call: Any) -> str | None:
+    """Return the opaque signature a Gemini tool call carries, if any."""
+    if isinstance(call, dict):
+        extra = call.get("extra_content")
+    else:
+        extra = getattr(call, "extra_content", None)
+        if extra is None:
+            # The OpenAI SDK parks fields it does not model on ``model_extra``.
+            extra = (getattr(call, "model_extra", None) or {}).get("extra_content")
+    if not isinstance(extra, dict):
+        return None
+    google = extra.get("google")
+    if not isinstance(google, dict):
+        return None
+    signature = google.get("thought_signature")
+    return signature if isinstance(signature, str) and signature else None
+
+
+def _copy_gemini_tool_call_metadata(message: Any, tool_calls: Any) -> None:
+    """Keep call IDs and thought signatures on the parsed message.
+
+    Gemini streams **one tool call per delta and omits ``index`` entirely**, so
+    the position inside the delta is always 0 and cannot identify a call: two
+    calls would land under the same key, and LangChain concatenates string
+    values when it merges chunks (it does that to accumulate streamed text),
+    gluing their ids into a value that matches no call on replay. Key on the
+    call id whenever one is present — it is the only identifier that is both
+    unique and stable, and it is what the replay side matches on. The index
+    (or position) is only used when a call arrives without an id.
+    """
+    from langchain_core.messages import AIMessage, AIMessageChunk
+
+    if not isinstance(message, (AIMessage, AIMessageChunk)) or not tool_calls:
+        return
+    entries: dict[str, dict[str, Any]] = {}
+    for position, raw in enumerate(tool_calls):
+        if isinstance(raw, dict):
+            call = raw
+        elif hasattr(raw, "model_dump"):
+            call = raw.model_dump()
+        else:
+            continue
+        call_id = call.get("id")
+        call_id = call_id if isinstance(call_id, str) and call_id else None
+        index = call.get("index")
+        if call_id:
+            key = call_id
+            entry = entries.setdefault(key, {"id": call_id})
+        elif isinstance(index, int):
+            key = str(index)
+            entry = entries.setdefault(key, {"index": index})
+        else:
+            key = f"#{position}"
+            entry = entries.setdefault(key, {})
+        signature = _gemini_thought_signature(call)
+        if signature is not None:
+            entry["signature"] = signature
+    if entries:
+        message.additional_kwargs[_GEMINI_TOOL_CALLS_KEY] = entries
+
+
+def _gemini_tool_call_slot(call: dict[str, Any]) -> int:
+    """Derive a stable stream slot for an index-less Gemini tool call.
+
+    ``langchain-openai`` reads ``delta.tool_calls[*]["index"]`` unconditionally
+    and lets the resulting ``KeyError`` discard the whole list, so a streamed
+    call silently disappears and the turn has to be repeated without streaming
+    to get its tool calls back. Deriving the slot from the call id keeps a call
+    on one slot across deltas without shared state, so concurrent streams on
+    the same instance cannot interfere with each other.
+    """
+    call_id = call.get("id")
+    if isinstance(call_id, str) and call_id:
+        return zlib.crc32(call_id.encode()) & 0x7FFFFFFF
+    return 0
+
+
+def _backfill_gemini_tool_call_indexes(chunk: Any) -> None:
+    """Add the missing ``index`` to Gemini's streamed tool calls, in place."""
+    if not isinstance(chunk, dict):
+        return
+    choices = chunk.get("choices") or (chunk.get("chunk") or {}).get("choices") or []
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        delta = choice.get("delta") if isinstance(choice, dict) else None
+        if not isinstance(delta, dict):
+            continue
+        calls = delta.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if isinstance(call, dict) and not isinstance(call.get("index"), int):
+                call["index"] = _gemini_tool_call_slot(call)
+
+
+def _restore_gemini_tool_calls(msg_dict: dict[str, Any], source: Any) -> None:
+    """Replay stored signatures onto the outgoing ``tool_calls`` entries."""
+    from langchain_core.messages import AIMessage
+
+    if not isinstance(source, AIMessage):
+        return
+    metadata = source.additional_kwargs.get(_GEMINI_TOOL_CALLS_KEY)
+    calls = msg_dict.get("tool_calls")
+    if not isinstance(metadata, dict) or not metadata or not isinstance(calls, list):
+        return
+    signatures_by_id: dict[str, str] = {}
+    signatures_by_key: dict[str, str] = {}
+    for key, entry in metadata.items():
+        if not isinstance(entry, dict):
+            continue
+        signature = entry.get("signature")
+        if not isinstance(signature, str) or not signature:
+            continue
+        signatures_by_key[key] = signature
+        call_id = entry.get("id")
+        if isinstance(call_id, str) and call_id:
+            signatures_by_id[call_id] = signature
+    if not signatures_by_key:
+        return
+    for position, call in enumerate(calls):
+        if not isinstance(call, dict):
+            continue
+        call_id = call.get("id")
+        signature = signatures_by_id.get(call_id) if isinstance(call_id, str) and call_id else None
+        if signature is None:
+            signature = signatures_by_key.get(str(position)) or signatures_by_key.get(f"#{position}")
+        if signature is None:
+            continue
+        extra = call.get("extra_content")
+        extra = dict(extra) if isinstance(extra, dict) else {}
+        google = extra.get("google")
+        google = dict(google) if isinstance(google, dict) else {}
+        google["thought_signature"] = signature
+        call["extra_content"] = {**extra, "google": google}
+
+
+def _copy_reasoning_from_response(result: Any, response: Any, *, gemini: bool = False) -> Any:
     from langchain_core.messages import AIMessage
 
     if isinstance(response, dict):
@@ -537,6 +702,8 @@ def _copy_reasoning_from_response(result: Any, response: Any) -> Any:
                 continue
             reasoning = msg_dict.get("reasoning_content")
             message = getattr(gen, "message", None)
+            if gemini:
+                _copy_gemini_tool_call_metadata(message, msg_dict.get("tool_calls"))
             if reasoning and isinstance(message, AIMessage):
                 message.additional_kwargs.setdefault("reasoning_content", reasoning)
         return result
@@ -550,12 +717,14 @@ def _copy_reasoning_from_response(result: Any, response: Any) -> Any:
             extras = getattr(msg, "model_extra", None) or {}
             reasoning = extras.get("reasoning_content")
         message = getattr(gen, "message", None)
+        if gemini:
+            _copy_gemini_tool_call_metadata(message, getattr(msg, "tool_calls", None))
         if reasoning and isinstance(message, AIMessage):
             message.additional_kwargs.setdefault("reasoning_content", reasoning)
     return result
 
 
-def _copy_reasoning_from_chunk(gen_chunk: Any, chunk: dict[str, Any]) -> Any:
+def _copy_reasoning_from_chunk(gen_chunk: Any, chunk: dict[str, Any], *, gemini: bool = False) -> Any:
     from langchain_core.messages import AIMessageChunk
 
     if gen_chunk is None:
@@ -568,6 +737,8 @@ def _copy_reasoning_from_chunk(gen_chunk: Any, chunk: dict[str, Any]) -> Any:
         return gen_chunk
     reasoning = delta.get("reasoning_content")
     message = getattr(gen_chunk, "message", None)
+    if gemini:
+        _copy_gemini_tool_call_metadata(message, delta.get("tool_calls"))
     if reasoning and isinstance(message, AIMessageChunk):
         message.additional_kwargs.setdefault("reasoning_content", "")
         message.additional_kwargs["reasoning_content"] += reasoning
@@ -591,12 +762,13 @@ def _source_messages_for_payload(input_: Any, kwargs: dict[str, Any], convert_in
     return messages
 
 
-def _attach_reasoning_to_payload(payload: dict[str, Any], source_messages: list[Any]) -> dict[str, Any]:
+def _iter_assistant_pairs(
+    messages_out: list[Any],
+    source_messages: list[Any],
+) -> Iterator[tuple[dict[str, Any], Any]]:
+    """Pair each outgoing assistant entry with the source message it came from."""
     from langchain_core.messages import AIMessage
 
-    messages_out = payload.get("messages")
-    if not isinstance(messages_out, list):
-        return payload
     ai_index = 0
     for msg_dict in messages_out:
         if not isinstance(msg_dict, dict) or msg_dict.get("role") != "assistant":
@@ -605,11 +777,29 @@ def _attach_reasoning_to_payload(payload: dict[str, Any], source_messages: list[
             ai_index += 1
         if ai_index >= len(source_messages):
             break
-        src = source_messages[ai_index]
+        yield msg_dict, source_messages[ai_index]
         ai_index += 1
+
+
+def _attach_reasoning_to_payload(payload: dict[str, Any], source_messages: list[Any]) -> dict[str, Any]:
+    from langchain_core.messages import AIMessage
+
+    messages_out = payload.get("messages")
+    if not isinstance(messages_out, list):
+        return payload
+    for msg_dict, src in _iter_assistant_pairs(messages_out, source_messages):
         reasoning = src.additional_kwargs.get("reasoning_content") if isinstance(src, AIMessage) else None
         if reasoning:
             msg_dict["reasoning_content"] = reasoning
+    return payload
+
+
+def _attach_gemini_tool_signatures(payload: dict[str, Any], source_messages: list[Any]) -> dict[str, Any]:
+    messages_out = payload.get("messages")
+    if not isinstance(messages_out, list):
+        return payload
+    for msg_dict, src in _iter_assistant_pairs(messages_out, source_messages):
+        _restore_gemini_tool_calls(msg_dict, src)
     return payload
 
 
@@ -727,8 +917,16 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
                 async for chunk in fallback._astream(*args, **kwargs):
                     yield _mark_api_fallback_chunk(chunk)
 
+        def _needs_gemini_tool_signatures(self) -> bool:
+            """Google is the only OpenAI-compatible backend that wants the field."""
+            return _is_gemini_base_url(getattr(self, "openai_api_base", None))
+
         def _create_chat_result(self, response: Any, generation_info: dict[str, Any] | None = None) -> Any:
-            return _copy_reasoning_from_response(super()._create_chat_result(response, generation_info), response)
+            return _copy_reasoning_from_response(
+                super()._create_chat_result(response, generation_info),
+                response,
+                gemini=self._needs_gemini_tool_signatures(),
+            )
 
         def _convert_chunk_to_generation_chunk(
             self,
@@ -736,9 +934,15 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             default_chunk_class: type[Any],
             base_generation_info: dict[str, Any] | None,
         ) -> Any:
+            gemini = self._needs_gemini_tool_signatures()
+            if gemini:
+                # LangChain drops the whole ``tool_calls`` list when ``index`` is
+                # missing, so repair it before the parent parses the delta.
+                _backfill_gemini_tool_call_indexes(chunk)
             return _copy_reasoning_from_chunk(
                 super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info),
                 chunk,
+                gemini=gemini,
             )
 
         def _get_request_payload(self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
@@ -762,7 +966,10 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
             if not source_messages:
                 return payload
-            return _attach_reasoning_to_payload(payload, source_messages)
+            payload = _attach_reasoning_to_payload(payload, source_messages)
+            if self._needs_gemini_tool_signatures():
+                payload = _attach_gemini_tool_signatures(payload, source_messages)
+            return payload
 
     _REASONING_AWARE_CHAT_OPENAI[id(base_cls)] = _ReasoningAwareChatOpenAI
     return _ReasoningAwareChatOpenAI
