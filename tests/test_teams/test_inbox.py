@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from collections.abc import Callable
 from typing import Any
 
@@ -419,3 +420,44 @@ async def test_inbox_marks_model_retry_failure_prompt_as_failed() -> None:
     assert msg.error_text == prompt
     assert proc.events[0].status == "failed"
     assert "boom" in (proc.events[0].error_text or "")
+
+
+_CALLER_TURN = contextvars.ContextVar("inbox_caller_turn", default=None)
+
+
+@pytest.mark.asyncio
+async def test_inbox_worker_does_not_inherit_caller_context() -> None:
+    """The first enqueue() must not donate the calling turn's ContextVars.
+
+    Inbox jobs run on a long-lived worker. If that worker inherits the
+    caller's LangGraph/LangChain run context, later jobs leak tokens into
+    the original turn's stream and the objects are never freed.
+    """
+    seen: list[object] = []
+
+    class _ContextCaller:
+        async def call(self, agent_id: str, request: ChatRequest) -> dict[str, Any]:
+            seen.append(_CALLER_TURN.get())
+            return {"messages": [{"role": "assistant", "content": f"{agent_id}:ok"}]}
+
+    caller = _ContextCaller()
+    proc = _Processor()
+    inbox = HarnessAgentInboxManager(call_agent=caller.call, processor=proc)
+    token = _CALLER_TURN.set("lead-turn")
+    try:
+        mid = inbox.enqueue(
+            target_agent_id="child",
+            source_agent_id="main",
+            source_thread_id="T-main",
+            message="do research",
+            user_id=1,
+        )
+        await _wait_until(lambda: len(proc.events) == 1)
+    finally:
+        _CALLER_TURN.reset(token)
+
+    # target.call then source follow-up; neither should see the lead turn.
+    assert seen == [None, None]
+    assert proc.events[0].inbox_id == mid
+    assert proc.events[0].status == "done"
+    await inbox.shutdown()
