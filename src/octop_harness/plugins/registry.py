@@ -76,6 +76,8 @@ class LoadedPlugin:
     skills_dir: Path | None = None
     diagnostics: list[str] = field(default_factory=list)
     context: Any | None = None
+    # Host-defined capabilities: name -> objects passed to ``ctx.provide``.
+    provided: dict[str, list[Any]] = field(default_factory=dict)
 
 
 class PluginRegistry:
@@ -134,7 +136,7 @@ class PluginRegistry:
         out: list[ChannelRegistration] = []
         seen: set[str] = set()
         for plugin in self._plugins.values():
-            if plugin.manifest.kind != "channel":
+            if not plugin.manifest.has("channel"):
                 continue
             for reg in plugin.channels:
                 if reg.kind in seen:
