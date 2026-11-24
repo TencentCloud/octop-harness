@@ -43,6 +43,12 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 from wcmatch import glob as wcglob
 
+from octop_harness.middleware.tool_paths import (
+    path_from_tool_args,
+    tool_base_name,
+    tool_call_meta,
+)
+
 if TYPE_CHECKING:
     from octop_harness.backends.workspace import BackendWorkspace
 
@@ -56,6 +62,7 @@ _FS_TOOL_OPS: dict[str, Literal["read", "write"]] = {
     "glob": "read",
     "grep": "read",
     "write_file": "write",
+    "append_file": "write",
     "edit_file": "write",
     "delete": "write",
 }
@@ -141,29 +148,8 @@ def _virtual_path_if_under_base(windows_path: str, base: str | Path | None) -> s
     return "/" if not rel or rel == "." else f"/{rel}"
 
 
-def _tool_base_name(name: str) -> str:
-    trimmed = name.strip()
-    slash = trimmed.rfind("/")
-    return trimmed[slash + 1 :] if slash >= 0 else trimmed
-
-
 def _normalized_memory_path(path: str) -> str:
     return posixpath.normpath(path.strip().replace("\\", "/")).casefold()
-
-
-def _path_from_tool_args(tool_name: str, params: dict[str, Any]) -> str | None:
-    base = _tool_base_name(tool_name)
-    if base in {"read_file", "write_file", "edit_file", "delete"}:
-        for key in ("file_path", "path"):
-            raw = params.get(key)
-            if isinstance(raw, str) and raw.strip():
-                return raw.strip()
-        return None
-    if base in {"ls", "glob", "grep"}:
-        raw = params.get("path")
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip()
-    return None
 
 
 def _is_absolute_path(raw: str) -> bool:
@@ -274,7 +260,7 @@ def _call_schema_for(tool_name: str, schema: Any) -> type[BaseModel] | None:
         return None
     if schema in _ANNOTATED_SCHEMAS:
         return None
-    base = _tool_base_name(tool_name)
+    base = tool_base_name(tool_name)
     if base == "read_file" and issubclass(schema, ReadVideoFileSchema):
         return _ReadVideoFileCallSchema
     source = _SOURCE_SCHEMAS.get(base)
@@ -417,7 +403,7 @@ def unbounded_glob_block_reason(
     to the backend.
     """
     pattern = params.get("pattern")
-    if _tool_base_name(tool_name) != "glob" or not isinstance(pattern, str):
+    if tool_base_name(tool_name) != "glob" or not isinstance(pattern, str):
         return None
     normalized = pattern.strip()
     if not _basename_wide_glob(normalized):
@@ -445,11 +431,11 @@ def filesystem_guard_block_reason(
     """
     if not permissions:
         return None
-    base = _tool_base_name(tool_name)
+    base = tool_base_name(tool_name)
     operation = _FS_TOOL_OPS.get(base)
     if operation is None:
         return None
-    raw_path = _path_from_tool_args(tool_name, params)
+    raw_path = path_from_tool_args(tool_name, params)
     if raw_path is None:
         return None
     try:
@@ -482,11 +468,6 @@ def path_outside_root_tool_message(
         tool_call_id=tool_call_id,
         status="error",
     )
-
-
-def _tool_call_meta(request: ToolCallRequest) -> tuple[str, str]:
-    tool_call = request.tool_call
-    return str(tool_call.get("name") or ""), str(tool_call.get("id") or "")
 
 
 class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
@@ -536,6 +517,9 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         return bool(getattr(backend, "sandbox_fs", False) or getattr(backend, "virtual_tool_root", False))
 
     def _relative_root(self) -> str:
+        guest_workspace = getattr(self._execution_backend(), "sandbox_workspace_dir", None)
+        if isinstance(guest_workspace, str):
+            return guest_workspace
         if self._uses_virtual_tool_root():
             return "/"
         return str(self._workspace_dir or ".")
@@ -552,11 +536,11 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         return path
 
     def _rewrite_legacy_windows_request(self, request: ToolCallRequest) -> ToolCallRequest:
-        tool_name, _ = _tool_call_meta(request)
+        tool_name, _ = tool_call_meta(request)
         raw_args: Any = request.tool_call.get("args") or {}
         path = (
-            _path_from_tool_args(tool_name, raw_args)
-            if _tool_base_name(tool_name) in _FS_TOOL_OPS and isinstance(raw_args, dict)
+            path_from_tool_args(tool_name, raw_args)
+            if tool_base_name(tool_name) in _FS_TOOL_OPS and isinstance(raw_args, dict)
             else None
         )
         rewritten = (
@@ -602,8 +586,8 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         semantics.  This opt-in layer provides an unambiguous document-relative
         alternative without mutable session cwd state.
         """
-        tool_name, call_id = _tool_call_meta(request)
-        base = _tool_base_name(tool_name)
+        tool_name, call_id = tool_call_meta(request)
+        base = tool_base_name(tool_name)
         raw_args: Any = request.tool_call.get("args") or {}
         if not isinstance(raw_args, dict):
             return request
@@ -685,7 +669,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
 
     def _memory_write_block_reason(self, tool_name: str, params: dict[str, Any]) -> str | None:
         workspace = self._workspace
-        if workspace is None or _tool_base_name(tool_name) not in _MEMORY_WRITE_TOOLS:
+        if workspace is None or tool_base_name(tool_name) not in _MEMORY_WRITE_TOOLS:
             return None
         protected: dict[str, str] = {}
         for filename in ("MEMORY.md", "USER.md"):
@@ -703,7 +687,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
                 except (OSError, ValueError, PermissionError):
                     continue
             if matched_filename is not None:
-                if not self._protect_user_memory and _tool_base_name(tool_name) in _MEMORY_CONTENT_TOOLS:
+                if not self._protect_user_memory and tool_base_name(tool_name) in _MEMORY_CONTENT_TOOLS:
                     return None
                 if not self._protect_user_memory:
                     return _MEMORY_KEEP_PATH_MESSAGE.format(filename=matched_filename)
@@ -711,7 +695,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         return None
 
     def _blocked_message(self, request: ToolCallRequest) -> ToolMessage | None:
-        tool_name, call_id = _tool_call_meta(request)
+        tool_name, call_id = tool_call_meta(request)
         raw_args: Any = request.tool_call.get("args") or {}
         params: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
         reason = (
@@ -740,8 +724,8 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
     ) -> ToolMessage | None:
         if not is_path_outside_root_error(exc):
             return None
-        tool_name, call_id = _tool_call_meta(request)
-        if _tool_base_name(tool_name) not in _FS_TOOL_OPS:
+        tool_name, call_id = tool_call_meta(request)
+        if tool_base_name(tool_name) not in _FS_TOOL_OPS:
             return None
         logger.info("FilesystemGuard softened outside-root %s: %s", tool_name, exc)
         return path_outside_root_tool_message(
