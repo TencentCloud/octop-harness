@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- Memory checkpoint 的 messages 通道改为直接使用 LangGraph 的 `_messages_delta_reducer`。`deepagents` 0.7.41 删除了 `deepagents._messages_reducer`，原先导入会在安装校验时失败。
 - 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
 - 华为云 OBS 客户端改为传入单个秒级超时。原先传入 `(connect, read)` 元组，探测和浏览会在 `socket.settimeout` 上报 `'tuple' object cannot be interpreted as an integer`（Octop#2971）。
 - 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。

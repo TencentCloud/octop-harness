@@ -14,8 +14,10 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from deepagents._messages_reducer import _messages_delta_reducer
+# deepagents 0.7.41 removed ``deepagents._messages_reducer`` and now imports
+# LangGraph's reducer directly; keep the same source so both pin ranges work.
 from langgraph.channels.delta import DeltaChannel
+from langgraph.graph.message import _messages_delta_reducer
 from octop_memory import Memory, MemoryService
 
 from octop_harness.builtin.tools.memory_tools import build_memory_tools
