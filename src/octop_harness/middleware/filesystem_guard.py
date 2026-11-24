@@ -517,6 +517,9 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         return bool(getattr(backend, "sandbox_fs", False) or getattr(backend, "virtual_tool_root", False))
 
     def _relative_root(self) -> str:
+        guest_workspace = getattr(self._execution_backend(), "sandbox_workspace_dir", None)
+        if isinstance(guest_workspace, str):
+            return guest_workspace
         if self._uses_virtual_tool_root():
             return "/"
         return str(self._workspace_dir or ".")
