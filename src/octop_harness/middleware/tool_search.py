@@ -404,6 +404,16 @@ class ToolSearchMiddleware(AgentMiddleware[ClientToolSearchState, Any]):
                     ],
                 }
             )
+        # A preceding middleware (for example the decision dispatcher) may
+        # relocate the real tool out of the model request while still
+        # authorizing its execution. Such calls carry the resolved tool object
+        # and never appear in the per-thread catalog, so only gate unresolved
+        # deferred references, which carry the empty _DeferredToolInput schema.
+        if (
+            request.tool is not None
+            and getattr(request.tool, "args_schema", None) is not _DeferredToolInput
+        ):
+            return None
         payload = {
             "schema_version": 1,
             "type": "tool_activation_error",

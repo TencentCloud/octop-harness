@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- 修复决策模型开启时 `generate_image`、`generate_video` 等工具被误判为 `tool_not_authorized` 的问题：决策调度器把长尾工具移出模型请求后，该工具不会进入 ToolSearchMiddleware 的每线程目录；现在只要调用携带已解析的真实工具对象就放行，未解析的空 schema 延迟引用与无工具对象的调用仍按原样拒绝。
 - 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
 - 华为云 OBS 客户端改为传入单个秒级超时。原先传入 `(connect, read)` 元组，探测和浏览会在 `socket.settimeout` 上报 `'tuple' object cannot be interpreted as an integer`（Octop#2971）。
 - 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。
