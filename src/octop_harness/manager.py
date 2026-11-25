@@ -151,6 +151,7 @@ class HarnessAgentManager:
         tags: list[str] | None = None,
         agent_id: str,
         init_workspace: bool = True,
+        include_skills: bool = True,
     ) -> AgentEntry:
         effective_config = replace(
             config,
@@ -164,7 +165,7 @@ class HarnessAgentManager:
             agent_id=agent_id,
         )
         if init_workspace:
-            seeded = agent.init_workspace()
+            seeded = agent.init_workspace(include_skills=include_skills)
             # Templates, skills and subagent manifests are read while compiling
             # the graph, so only a seed that actually wrote something
             # invalidates the graph built in ``HarnessAgent.__init__``.
@@ -254,6 +255,7 @@ class HarnessAgentManager:
         tags: list[str] | None = None,
         agent_id: str | None = None,
         init_workspace: bool = True,
+        include_skills: bool = True,
     ) -> AgentEntry:
         aid = agent_id or generate_agent_id(occupied=set(self._registry.agent_ids()))
         return self._register_agent(
@@ -262,6 +264,7 @@ class HarnessAgentManager:
             tags=tags,
             agent_id=aid,
             init_workspace=init_workspace,
+            include_skills=include_skills,
         )
 
     def get_agent(self, agent_id: str) -> AgentEntry:
@@ -279,6 +282,7 @@ class HarnessAgentManager:
         tags: list[str] | None = None,
         agent_id: str | None = None,
         init_workspace: bool = True,
+        include_skills: bool = True,
     ) -> AgentEntry:
         """Off-loop wrapper around :meth:`create_agent` (graph compile blocks the event loop)."""
         return await asyncio.to_thread(
@@ -288,6 +292,7 @@ class HarnessAgentManager:
             tags=tags,
             agent_id=agent_id,
             init_workspace=init_workspace,
+            include_skills=include_skills,
         )
 
     async def aremove_agent(self, agent_id: str) -> None:

@@ -19,6 +19,28 @@ class MountedCompositeBackend(CompositeBackend):
     """
 
     @property
+    def workspace_uses_cloud_keys(self) -> bool:
+        """Preserve the default backend's workspace addressing."""
+        return getattr(self.default, "workspace_uses_cloud_keys", False) is True
+
+    @property
+    def sandbox_fs(self) -> bool:
+        """Preserve the default backend's sandbox addressing."""
+        return getattr(self.default, "sandbox_fs", False) is True
+
+    @property
+    def sandbox_workspace_dir(self) -> str:
+        """Expose the default sandbox workspace root."""
+        root = getattr(self.default, "sandbox_workspace_dir", None)
+        if not isinstance(root, str):
+            raise AttributeError("Default backend has no sandbox workspace directory")
+        return root
+
+    def _to_virtual_path(self, path: str) -> str:
+        to_virtual = getattr(self.default, "_to_virtual_path", None)
+        return str(to_virtual(path)) if callable(to_virtual) else path
+
+    @property
     def cwd(self) -> Path | None:
         mount = getattr(self.default, "cwd", None) or getattr(self.default, "root_dir", None)
         if mount is None:

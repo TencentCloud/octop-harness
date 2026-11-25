@@ -647,6 +647,7 @@ __all__ = [
     "HarnessLocalShellBackend",
     "MountedCompositeBackend",
     "ProbeResult",
+    "ReadOnlyResourceBackend",
     "anchor_at_backend_root",
     "cos_spec_to_s3_compat",
     "probe_backend",
@@ -658,6 +659,7 @@ from octop_harness.backends.bwrap_shell import BubbledLocalShellBackend
 from octop_harness.backends.cube_sandbox import CubeSandbox
 from octop_harness.backends.local_shell import HarnessLocalShellBackend
 from octop_harness.backends.probe import ProbeResult, probe_backend
+from octop_harness.backends.read_only_resource import ReadOnlyResourceBackend
 from octop_harness.backends.s3_backend import cos_spec_to_s3_compat
 from octop_harness.backends.utils import anchor_at_backend_root
 from octop_harness.backends.workspace import BackendWorkspace

@@ -41,6 +41,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .composite import MountedCompositeBackend
 from .utils import (
     BACKEND_CALL_ERRORS,
     BackendOperationNotSupportedError,
@@ -330,11 +331,7 @@ def _has_backend_mount(backend: object) -> bool:
 
 def is_cloud_storage_backend(backend: object) -> bool:
     """True for COS/S3/OSS/OBS/Postgres — object stores with a shared virtual ``/``."""
-    try:
-        from octop_harness.backends.cloud_storage_base import CloudStorageBackend
-    except ImportError:  # pragma: no cover
-        return False
-    return isinstance(backend, CloudStorageBackend)
+    return getattr(backend, "workspace_uses_cloud_keys", False) is True
 
 
 def remote_workspace_virtual_root(workspace_dir: Path) -> str:
@@ -1039,8 +1036,32 @@ class BackendWorkspace:
 
     # ----- Mkdir / delete / move -----
 
+    def _mutation_target(self, path: str) -> tuple[BackendWorkspace, str]:
+        """Dispatch workspace-only operations through the same mounts as file I/O."""
+        if not isinstance(self._backend, MountedCompositeBackend):
+            return self, path
+        key = self._backend_storage_key(path)
+        if key is not None:
+            backend, routed = self._backend._get_backend_and_key(key)
+            if backend is not self._backend.default or routed != key:
+                return BackendWorkspace(backend, self._workspace_dir), routed
+        return BackendWorkspace(
+            self._backend.default, self._workspace_dir, system_files_path=self._system_files_path
+        ), path
+
+    def _move_target(self, src: str, dest: str) -> tuple[BackendWorkspace, str, str]:
+        source, src_path = self._mutation_target(src)
+        target, dest_path = self._mutation_target(dest)
+        if source.backend is not target.backend:
+            raise PermissionError("Cannot move between backend mounts")
+        return source, src_path, dest_path
+
     def mkdir(self, path: str) -> None:
         """Create a directory (and parents) at *path*."""
+        target, path = self._mutation_target(path)
+        if target is not self:
+            target.mkdir(path)
+            return
         key = self._mutation_storage_key(path)
         if key is None:
             fragment = self._stored_relative(_normalize_workspace_fragment(path))
@@ -1055,6 +1076,10 @@ class BackendWorkspace:
         mkdir_local_path(self._disk_path_for_mutation(path))
 
     async def amkdir(self, path: str) -> None:
+        target, path = self._mutation_target(path)
+        if target is not self:
+            await target.amkdir(path)
+            return
         key = self._mutation_storage_key(path)
         if key is None:
             await asyncio.to_thread(self.mkdir, path)
@@ -1067,6 +1092,10 @@ class BackendWorkspace:
 
     def delete(self, path: str) -> None:
         """Delete a workspace file or directory tree."""
+        target, path = self._mutation_target(path)
+        if target is not self:
+            target.delete(path)
+            return
         key = self._mutation_storage_key(path)
         if key is None:
             fragment = self._stored_relative(_normalize_workspace_fragment(path))
@@ -1081,6 +1110,10 @@ class BackendWorkspace:
         delete_local_path(self._disk_path_for_mutation(path))
 
     async def adelete(self, path: str) -> None:
+        target, path = self._mutation_target(path)
+        if target is not self:
+            await target.adelete(path)
+            return
         key = self._mutation_storage_key(path)
         if key is None:
             await asyncio.to_thread(self.delete, path)
@@ -1093,6 +1126,10 @@ class BackendWorkspace:
 
     def move(self, src: str, dest: str) -> None:
         """Move or rename a workspace file or directory tree."""
+        target, src, dest = self._move_target(src, dest)
+        if target is not self:
+            target.move(src, dest)
+            return
         src_key = self._mutation_storage_key(src)
         dest_key = self._mutation_storage_key(dest)
         if src_key is None or dest_key is None:
@@ -1122,6 +1159,10 @@ class BackendWorkspace:
         move_local_path(self._disk_path_for_mutation(src), dest_path)
 
     async def amove(self, src: str, dest: str) -> None:
+        target, src, dest = self._move_target(src, dest)
+        if target is not self:
+            await target.amove(src, dest)
+            return
         src_key = self._mutation_storage_key(src)
         dest_key = self._mutation_storage_key(dest)
         if src_key is None or dest_key is None:
