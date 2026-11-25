@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 修复
 
 - 定时 checkpoint 裁剪备份检测到源 SQLite 库损坏（`database disk image is malformed`、`file is not a database` 或 `PRAGMA quick_check` 失败）时，即使在默认的 `first` 备份模式下也会中止裁剪且不写入完成标记，避免在损坏库上继续删除行；同时为裁剪备份连接、`reclaimable` 检查及可选 `VACUUM` 补齐 `busy_timeout=30000`，并在 `VACUUM` 前校验 `PRAGMA quick_check`（Octop#2998）。
+- 修复记忆运行时依赖已从 `deepagents` 移除的私有消息 reducer，兼容 `deepagents` 0.7.41。
 - 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
 - 华为云 OBS 客户端改为传入单个秒级超时。原先传入 `(connect, read)` 元组，探测和浏览会在 `socket.settimeout` 上报 `'tuple' object cannot be interpreted as an integer`（Octop#2971）。
 - 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。

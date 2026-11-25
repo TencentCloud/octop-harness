@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from deepagents._messages_reducer import _messages_delta_reducer
+from langgraph.graph.message import _messages_delta_reducer
 from langgraph.channels.delta import DeltaChannel
 from octop_memory import Memory, MemoryService
 
@@ -36,8 +36,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Match the reducer used by DeepAgentState. DeltaChannel creates a fresh
-# instance on restore, so graph rebuilds and the maintenance timer can share it.
 _CHECKPOINT_MESSAGES_CHANNEL = DeltaChannel(lambda state, writes: _messages_delta_reducer(state, list(writes)), list)
 
 
