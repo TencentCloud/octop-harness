@@ -115,6 +115,7 @@ _TOOLS_ALWAYS_KEPT = frozenset(
         "tool_search",
         "memory_search",
         "memory_get",
+        "memory_save",
         "agent_list",
         "ask_agent",
         "web_fetch",
