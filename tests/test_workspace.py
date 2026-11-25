@@ -245,9 +245,9 @@ class TestBackendWorkspaceAsync:
         assert ws._backend_storage_key(".octop/avatar.png") == "/.octop/avatar.png"
         assert str(workspace_dir) not in (ws._backend_storage_key("SOUL.md") or "")
 
-    def test_cloud_storage_nests_under_virtual_workspace_folder(self, tmp_path: Path) -> None:
+    @pytest.fixture
+    def stub_cloud(self) -> Any:
         from octop_harness.backends.cloud_storage_base import CloudStorageBackend
-        from octop_harness.backends.workspace import remote_workspace_virtual_root
 
         class _StubCloud(CloudStorageBackend):
             def _prefix(self) -> str:
@@ -283,9 +283,14 @@ class TestBackendWorkspaceAsync:
             def delete_prefix(self, path: str) -> int:
                 return 0
 
+        return _StubCloud()
+
+    def test_cloud_storage_nests_under_virtual_workspace_folder(self, tmp_path: Path, stub_cloud: Any) -> None:
+        from octop_harness.backends.workspace import remote_workspace_virtual_root
+
         workspace_dir = tmp_path / "AGT1B2"
         workspace_dir.mkdir()
-        ws = BackendWorkspace(_StubCloud(), workspace_dir)
+        ws = BackendWorkspace(stub_cloud, workspace_dir)
         virt = remote_workspace_virtual_root(workspace_dir)
         assert virt == "/.octop/workspaces/AGT1B2"
         assert ws._backend_storage_key("SOUL.md") == f"{virt}/SOUL.md"
@@ -295,6 +300,56 @@ class TestBackendWorkspaceAsync:
         assert ws._backend_storage_key(str(workspace_dir / "SOUL.md")) == f"{virt}/SOUL.md"
         assert ws._mutation_storage_key("skills") == f"{virt}/skills"
         assert ws.present_path(f"{virt}/SOUL.md") == "SOUL.md"
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_composite_mount_preserves_cloud_workspace(
+        self, tmp_path: Path, stub_cloud: Any, use_async: bool
+    ) -> None:
+        from unittest.mock import patch
+
+        from octop_harness.backends import MountedCompositeBackend, ReadOnlyResourceBackend
+        from octop_harness.backends.workspace import remote_workspace_virtual_root
+
+        workspace_dir = tmp_path / "agent"
+        workspace_dir.mkdir()
+        resources = tmp_path / "resources"
+        resources.mkdir()
+        (resources / "SKILL.md").write_text("shared", encoding="utf-8")
+        route = f"/.octop/workspaces/{workspace_dir.name}/.octop/_builtin_skills/"
+        mounted = MountedCompositeBackend(default=stub_cloud, routes={route: ReadOnlyResourceBackend(resources)})
+        composite = BackendWorkspace(mounted, workspace_dir, system_files_path=".octop")
+        ws = BackendWorkspace(stub_cloud, workspace_dir, system_files_path=".octop")
+        for path in ("SOUL.md", ".", "skills/demo/SKILL.md", str(workspace_dir / "SOUL.md")):
+            assert composite._backend_storage_key(path) == ws._backend_storage_key(path)
+            assert composite.resolve_path(path) == ws.resolve_path(path)
+        assert composite._mutation_storage_key("skills") == ws._mutation_storage_key("skills")
+        assert composite.read_text("_builtin_skills/SKILL.md") == "shared"
+        assert mounted.write(f"{route}SKILL.md", "changed").error
+        assert mounted.delete(f"{route}SKILL.md").error
+
+        with (
+            patch.object(stub_cloud, "mkdir_path") as mkdir,
+            patch.object(stub_cloud, "move_path") as move,
+            patch.object(stub_cloud, "delete_path") as delete,
+        ):
+            if use_async:
+                await composite.amkdir("drafts")
+                await composite.amove("drafts", "notes")
+                await composite.adelete("notes")
+            else:
+                composite.mkdir("drafts")
+                composite.move("drafts", "notes")
+                composite.delete("notes")
+            root = remote_workspace_virtual_root(workspace_dir)
+            mkdir.assert_called_once_with(f"{root}/drafts")
+            move.assert_called_once_with(f"{root}/drafts", f"{root}/notes")
+            delete.assert_called_once_with(f"{root}/notes")
+            with pytest.raises(PermissionError):
+                composite.mkdir("_builtin_skills/new")
+            with pytest.raises(PermissionError):
+                composite.move("notes", "_builtin_skills/new")
+            with pytest.raises(PermissionError):
+                composite.delete("_builtin_skills/SKILL.md")
 
     async def test_aupload_many_sync_fallback_reports_upload_files(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock

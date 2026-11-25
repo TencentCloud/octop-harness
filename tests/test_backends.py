@@ -398,3 +398,45 @@ class TestRemoteBackendsImportError:
         )
         assert isinstance(backend, PostgresBackend)
         assert backend._config.host == "127.0.0.1"
+
+
+async def test_read_only_resource_backend(tmp_path: Path) -> None:
+    from octop_harness.backends import ReadOnlyResourceBackend
+
+    (tmp_path / "skill").mkdir()
+    (tmp_path / "skill" / "SKILL.md").write_text("hello resource", encoding="utf-8")
+    backend = ReadOnlyResourceBackend(tmp_path)
+    assert backend.read("/skill/SKILL.md").file_data["content"] == "hello resource"
+    assert (await backend.aread("/skill/SKILL.md")).error is None
+    assert backend.ls("/skill").entries[0]["path"] == "/skill/SKILL.md"
+    assert (await backend.als("/skill")).entries
+    assert backend.ls_info("/skill") == await backend.als_info("/skill")
+    assert backend.glob("**/*.md", "/").matches
+    assert (await backend.aglob("**/*.md", "/")).matches
+    assert backend.grep("resource", "/").matches
+    assert (await backend.agrep("resource", "/")).matches
+    assert backend.download_files(["/skill/SKILL.md"])[0].content == b"hello resource"
+    assert (await backend.adownload_files(["/skill/SKILL.md"]))[0].content == b"hello resource"
+    assert backend.write("/skill/SKILL.md", "x").error
+    assert (await backend.awrite("/new", "x")).error
+    assert backend.edit("/skill/SKILL.md", "hello", "x").error
+    assert (await backend.aedit("/skill/SKILL.md", "hello", "x")).error
+    assert backend.delete("/skill").error
+    assert (await backend.adelete("/skill")).error
+    assert backend.upload_files([("/new", b"x")])[0].error == "permission_denied"
+    assert (await backend.aupload_files([("/new", b"x")]))[0].error == "permission_denied"
+    for method, args in (
+        (backend.mkdir_path, ("/new",)),
+        (backend.delete_path, ("/skill",)),
+        (backend.move_path, ("/skill", "/new")),
+    ):
+        with pytest.raises(PermissionError):
+            method(*args)
+    for method, args in (
+        (backend.amkdir_path, ("/new",)),
+        (backend.adelete_path, ("/skill",)),
+        (backend.amove_path, ("/skill", "/new")),
+    ):
+        with pytest.raises(PermissionError):
+            await method(*args)
+    assert (tmp_path / "skill" / "SKILL.md").read_text(encoding="utf-8") == "hello resource"

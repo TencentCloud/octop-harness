@@ -106,6 +106,8 @@ class CloudStorageBackend(BackendProtocol, ABC):
     - ``delete_prefix(path)`` → ``int``
     """
 
+    workspace_uses_cloud_keys = True
+
     def _storage_error_types(self) -> tuple[type[BaseException], ...]:
         """Exception types that SDK primitives may raise into public methods."""
         return _BASE_STORAGE_ERRORS

@@ -872,3 +872,15 @@ class TestARemoveAgentReleasesOnThisLoop:
 
         with pytest.raises(KeyError):
             mgr.get_agent("aid")
+
+
+async def test_manager_passes_include_skills(tmp_path: Path) -> None:
+    with patch("octop_harness.manager.HarnessAgent") as mock_cls:
+        agent = _mock_agent()
+        mock_cls.return_value = agent
+        manager = HarnessAgentManager()
+        manager.create_agent(_config(tmp_path), include_skills=False)
+        agent.init_workspace.assert_called_once_with(include_skills=False)
+        agent.init_workspace.reset_mock()
+        await manager.acreate_agent(_config(tmp_path), include_skills=False)
+        agent.init_workspace.assert_called_once_with(include_skills=False)

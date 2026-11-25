@@ -47,6 +47,8 @@
 | 💬 | **Teams** | Peer inbox; `peer_invoke_mode` selects sync / async / both |
 | ⌨️ | **Terminal CLI** | Interactive chat, provider/skill config, and agent management |
 
+A host can mount `ReadOnlyResourceBackend(path)` in `MountedCompositeBackend` to share local resources, and pass `include_skills=False` to `HarnessAgentManager.create_agent` or `acreate_agent` to skip copying built-in skills.
+
 ### CubeSandbox backend
 
 Install `octop-harness[cubesandbox-native,remote-backends]` for the native
