@@ -546,10 +546,10 @@ def test_host_middleware_observes_candidates_and_dedups_across_tool_continuation
     memory = _open_memory(tmp_path, "sqlite", namespace)
     config = {"configurable": {"thread_id": namespace, "session_id": namespace}}
     try:
-        memory.store("ALPHA release requires gray-release flag check", topic="ALPHA release")
-        memory.store("ALPHA rollout happens every Tuesday", topic="ALPHA rollout")
         service = MemoryService(memory, host="candidate-obs-test")
-        direct = service.recall("ALPHA release checklist?", thread_id=namespace)
+        service.save("ALPHA release requires gray-release flag check", topic="ALPHA release", kind="Fact")
+        service.save("ALPHA rollout happens every Tuesday", topic="ALPHA rollout", kind="Fact")
+        direct = service.recall("ALPHA", thread_id=namespace)
         expected_ids = [s.source_id for s in direct.snippets]
         assert len(expected_ids) == 2
 
@@ -589,7 +589,7 @@ def test_host_middleware_observes_candidates_and_dedups_across_tool_continuation
             middleware=[middleware(service), HostExternalRecallMiddleware()],
             checkpointer=memory,
         )
-        graph.invoke({"messages": [HumanMessage("ALPHA release checklist?")]}, config=config)
+        graph.invoke({"messages": [HumanMessage("ALPHA")]}, config=config)
 
         # Two model calls (initial + tool continuation); both observe the same frozen candidates.
         assert len(observed_per_call) == 2

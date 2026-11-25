@@ -643,8 +643,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                     promote=promote,
                     regen_pages=regen_pages,
                 )
-                result_dict = result if isinstance(result, dict) else None
-                failure_reason = result_dict.get("failure_reason") if result_dict else None
+                failure_reason = result.get("failure_reason")
                 if failure_reason:
                     logger.info(
                         "MemoryMiddleware.end_session(%s) degraded: %s",
@@ -652,10 +651,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                         failure_reason,
                     )
                 else:
-                    if result_dict is not None:
-                        summary: object = {k: result_dict[k] for k in ("candidates", "promoted") if k in result_dict}
-                    else:
-                        summary = result
+                    summary: object = {k: result[k] for k in ("candidates", "promoted") if k in result}
                     logger.info(
                         "memory.trigger end_session->extract done session=%s result=%s",
                         session_id,

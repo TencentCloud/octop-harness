@@ -378,7 +378,7 @@ and released when the resumed stream finishes or the agent closes.
 ### Scheduled SQLite checkpoint backups
 
 PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
-With octop-memory 1.0.5, hosts can prune a verified thread offline after
+Hosts can prune a verified thread offline after
 pausing its execution, resumption and forks across all hosts.
 
 With a Memory version exposing `acheckpoint_activity(thread_id)`, Harness holds

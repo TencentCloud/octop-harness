@@ -2185,7 +2185,7 @@ requires-dist = [
     { name = "mss", marker = "extra == 'all'", specifier = ">=9.0" },
     { name = "mss", marker = "extra == 'desktop'", specifier = ">=9.0" },
     { name = "octop-browser", specifier = ">=0.9.9" },
-    { name = "octop-memory", specifier = ">=1.0.5" },
+    { name = "octop-memory", specifier = ">=1.0.6" },
     { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=0.1.16,<1.2" },
     { name = "oss2", marker = "extra == 'all'", specifier = ">=2.18" },
     { name = "oss2", marker = "extra == 'object-storage'", specifier = ">=2.18" },
@@ -2226,11 +2226,11 @@ dev = [
 
 [[package]]
 name = "octop-memory"
-version = "1.0.5"
+version = "1.0.6"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/64/b6/d9f3bd989aea1fd799ad026338d662c59f65aeaa8e687b94b3f6e50c1080/octop_memory-1.0.5.tar.gz", hash = "sha256:c406870d598cd38bc9424817b51c4d69832e36c89c83d1b8c80698eef57ca55f", size = 647402, upload-time = "2026-11-17T12:15:12.763Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7f/4d/94596f9c3ca229c6b5755b20847798560900c4413aa474a3f34c82fd6671/octop_memory-1.0.6.tar.gz", hash = "sha256:0a09cf924fd33f4ea0d4746e165c66394ed60dce5466755dbf3cae9ee2eda0aa", size = 670258, upload-time = "2026-11-25T11:37:56.049Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/26/c95a66fe2d925391102d0b17fc8353e265dffc5f587bcdd83c76305b6388/octop_memory-1.0.5-py3-none-any.whl", hash = "sha256:aa17fa4c2576cc2f9bef15f61f2a8e103233bc86fd479d2c50208b11e2fc1ca9", size = 405810, upload-time = "2026-11-17T12:15:11.121Z" },
+    { url = "https://files.pythonhosted.org/packages/22/fa/af9848b3b15575878352fa387bd30f598dec62e0b1643a51595bc9395066/octop_memory-1.0.6-py3-none-any.whl", hash = "sha256:ce04dbbfe433f8bb626bc95c429e143573c836197d87a4842b9d41bae9babc19", size = 422332, upload-time = "2026-11-25T11:37:54.902Z" },
 ]
 
 [[package]]
