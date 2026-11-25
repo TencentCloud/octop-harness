@@ -47,8 +47,8 @@ def sync_builtin_skills_to_backend(
             and records the fallback paths.
 
             When *language* is not ``"en"``, implements **file-level
-            fallback**: the ``"en"`` tree is copied first, then
-            *language* files are overlaid on top.  This allows
+            fallback**: *language* files replace matching files in the
+            ``"en"`` tree before copying. This allows
             ``zh/`` to contain only translated ``SKILL.md`` files while
             inheriting supplemental files (``templates/``,
             ``references/``, ``.sh`` scripts, etc.) from ``en/``.
@@ -68,37 +68,31 @@ def sync_builtin_skills_to_backend(
     root = target_dir or DEFAULT_BUILTIN_SKILLS_DIR
     fallback_paths: list[str] = []
     try:
-        if _is_up_to_date(workspace, root, agent_version):
+        version_path = f"{root}/{VERSION_FILE}"
+        has_marker = workspace.exists(version_path)
+        existing = workspace.read_text(version_path) if has_marker else None
+        if existing is not None and existing.strip() == agent_version:
             return False, []
 
         package_root: Traversable = resources.files(BUILTIN_SKILLS_PACKAGE)
-
-        if language == "en":
-            # Simple case: just copy "en".
-            _copy_tree_to_workspace(workspace, package_root.joinpath("en"), root)
-            workspace.write_text(f"{root}/{VERSION_FILE}", agent_version, force=True)
-            return True, []
-
-        # File-level merge: copy "en" first, then overlay "language".
-        lang_dir = package_root.joinpath(language)
-        try:
-            list(lang_dir.iterdir())
-            has_language = True
-        except (FileNotFoundError, TypeError, OSError):
-            has_language = False
-
-        # Always start with "en" as the base.
         en_dir = package_root.joinpath("en")
-        _copy_tree_to_workspace(workspace, en_dir, root)
+        files: dict[str, Traversable] = {}
+        _collect_tree(en_dir, root, files)
+        if language != "en":
+            lang_dir = package_root.joinpath(language)
+            try:
+                list(lang_dir.iterdir())
+            except (FileNotFoundError, TypeError, OSError):
+                fallback_paths.extend(_collect_skill_paths(en_dir, root))
+            else:
+                _collect_tree(lang_dir, root, files)
 
-        if has_language:
-            # Overlay "language" files on top of "en".
-            _copy_tree_to_workspace(workspace, lang_dir, root)
-        else:
-            # No language directory at all -> record all paths as fallback.
-            fallback_paths.extend(_collect_skill_paths(en_dir, root))
-
-        workspace.write_text(f"{root}/{VERSION_FILE}", agent_version, force=True)
+        for path, source in files.items():
+            if has_marker:
+                workspace.write_text(path, source.read_text(encoding="utf-8"), force=True)
+            else:
+                workspace.upload_bytes(path, source.read_text(encoding="utf-8").encode("utf-8"))
+        workspace.write_text(version_path, agent_version, force=True)
         return True, fallback_paths
     except (OSError, ModuleNotFoundError):
         logger.warning(
@@ -132,30 +126,20 @@ def _collect_paths_recursive(source: Traversable, dest_prefix: str, out: list[st
             out.append(f"{dest_prefix}/{entry.name}")
 
 
-def _is_up_to_date(workspace: BackendWorkspace, target_dir: str, agent_version: str) -> bool:
-    version_path = f"{target_dir}/{VERSION_FILE}"
-    if not workspace.exists(version_path):
-        return False
-    existing = workspace.read_text(version_path)
-    if existing is None:
-        return False
-    return existing.strip() == agent_version
-
-
-def _copy_tree_to_workspace(
-    workspace: BackendWorkspace,
+def _collect_tree(
     source: Traversable,
     dest_dir: str,
+    files: dict[str, Traversable],
 ) -> None:
-    """Recursively write a packaged Traversable tree through *workspace*."""
+    """Collect files by target path, replacing earlier language variants."""
     for entry in source.iterdir():
         if entry.name.startswith(("__", ".")):
             continue
         entry_path = f"{dest_dir}/{entry.name}"
         if entry.is_dir():
-            _copy_tree_to_workspace(workspace, entry, entry_path)
+            _collect_tree(entry, entry_path, files)
         else:
-            workspace.write_text(entry_path, entry.read_text(encoding="utf-8"), force=True)
+            files[entry_path] = entry
 
 
 def seed_builtin_agents_to_workspace(
