@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from octop_harness.plugins.manifest import PluginManifest
+from octop_harness.plugins.manifest import PLUGIN_KINDS, PluginManifest
 from octop_harness.plugins.registry import (
     ChannelRegistration,
     LoadedPlugin,
@@ -27,6 +27,7 @@ class PluginContext:
         self._skills_dir: Path | None = None
         self._model_factory: Any | None = None
         self._get_protocol: Any | None = None
+        self._provided: dict[str, list[Any]] = {}
 
     @property
     def plugin_id(self) -> str:
@@ -36,6 +37,28 @@ class PluginContext:
     def source_path(self) -> Path:
         return self._source_path
 
+    def _require(self, capability: str) -> None:
+        if not self._manifest.has(capability):
+            declared = ", ".join(self._manifest.capabilities)
+            raise ValueError(
+                f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not {capability} "
+                f"(capabilities: {declared})"
+            )
+
+    def provide(self, capability: str, value: Any) -> None:
+        """Hand an object for a host-defined capability to the host application.
+
+        ``capability`` must be listed in ``plugin.yaml`` ``capabilities`` and
+        must not be a built-in kind (those have their own methods). The host
+        reads the objects from :attr:`LoadedPlugin.provided` and decides what
+        they mean; the harness only carries them.
+        """
+        name = str(capability).strip().lower()
+        if name in PLUGIN_KINDS:
+            raise ValueError(f"use the dedicated method for the built-in {name!r} capability")
+        self._require(name)
+        self._provided.setdefault(name, []).append(value)
+
     def tool(
         self,
         name: str,
@@ -44,8 +67,7 @@ class PluginContext:
         description: str = "",
         config_fields: list[dict[str, Any]] | None = None,
     ) -> None:
-        if self._manifest.kind != "tool":
-            raise ValueError(f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not tool")
+        self._require("tool")
         tool_name = str(name).strip()
         if not tool_name:
             raise ValueError("tool name must not be empty")
@@ -60,8 +82,7 @@ class PluginContext:
         )
 
     def middleware(self, instance: Any, *, priority: int = 100) -> None:
-        if self._manifest.kind != "hook":
-            raise ValueError(f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not hook")
+        self._require("hook")
         self._middleware.append(
             MiddlewareRegistration(
                 plugin_id=self._manifest.id,
@@ -97,8 +118,7 @@ class PluginContext:
                 ``required``/``helpKey``). When omitted the dashboard falls
                 back to a raw-JSON config textarea.
         """
-        if self._manifest.kind != "channel":
-            raise ValueError(f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not channel")
+        self._require("channel")
         normalized_label = str(label or "").strip() or str(kind).strip()
         self._channels.append(
             ChannelRegistration(
@@ -113,8 +133,7 @@ class PluginContext:
         )
 
     def skills(self, relative_path: str) -> None:
-        if self._manifest.kind != "skill":
-            raise ValueError(f"plugin {self._manifest.id!r} is kind={self._manifest.kind!r}, not skill")
+        self._require("skill")
         skills_dir = (self._source_path / relative_path).resolve()
         if not skills_dir.is_dir():
             raise FileNotFoundError(f"skills directory not found: {skills_dir}")
@@ -157,6 +176,7 @@ class PluginContext:
             middleware=list(self._middleware),
             channels=list(self._channels),
             skills_dir=self._skills_dir,
+            provided={name: list(values) for name, values in self._provided.items()},
         )
 
 

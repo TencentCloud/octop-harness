@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 新增
 
+- 插件清单新增 `capabilities` 列表，一个插件可以同时注册工具、技能、中间件和通道。只写 `kind` 的老清单等价于只声明这一项能力。宿主自定义的能力（如 Octop 的 `server`）通过 `ctx.provide(name, obj)` 交给宿主，宿主从 `LoadedPlugin.provided` 读取。
 - 新增 CubeSandbox 后端，支持远程命令、虚拟文件系统，以及基于 PostgreSQL 锁的沙箱复用。
 - CubeSandbox 工作区可镜像到对象存储：新建沙箱自动回灌，`archive_workspace()` 负责归档。
 - 文件系统中间件按回合记录文件写入：每个文件保留本轮首次写入前与最后一次写入后的内容，主代理和子代理共用同一条捕获链路；宿主可据此生成回合级 diff，并在文件未被后续改动时回滚。

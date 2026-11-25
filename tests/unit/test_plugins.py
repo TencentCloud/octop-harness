@@ -202,3 +202,76 @@ def test_channel_registry_update_and_unload(tmp_path: Path) -> None:
     assert [reg.kind for reg in registry.all_channels()] == ["new-kind"]
     registry.unregister("owner")
     assert registry.all_channels() == []
+
+
+def _write(tmp_path: Path, body: str) -> Path:
+    (tmp_path / "plugin.yaml").write_text("id: multi\nversion: 1\n" + body, encoding="utf-8")
+    return tmp_path / "plugin.yaml"
+
+
+def test_capabilities_default_to_kind(tmp_path: Path) -> None:
+    manifest = PluginManifest.load(_write(tmp_path, "kind: hook\n"))
+    assert manifest.capabilities == ("hook",)
+    assert manifest.has("hook")
+    assert not manifest.has("tool")
+    legacy = PluginManifest(id="x", version="1", name="x", kind="skill", entry="main.py")
+    assert legacy.capabilities == ("skill",)
+
+
+def test_capabilities_list_sets_kind_from_first_built_in(tmp_path: Path) -> None:
+    manifest = PluginManifest.load(_write(tmp_path, "capabilities: [server, Tool, skill, tool]\n"))
+    assert manifest.capabilities == ("server", "tool", "skill")
+    assert manifest.kind == "tool"
+    host_only = PluginManifest.load(_write(tmp_path, "capabilities: [server]\n"))
+    assert host_only.kind == "tool"
+    assert host_only.capabilities == ("server",)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "capabilities: tool\n",
+        "capabilities: []\n",
+        "capabilities: ['has space']\n",
+        "kind: hook\ncapabilities: [tool]\n",
+    ],
+)
+def test_capabilities_validation(tmp_path: Path, body: str) -> None:
+    with pytest.raises(ValueError):
+        PluginManifest.load(_write(tmp_path, body))
+
+
+def test_one_plugin_registers_several_capabilities(tmp_path: Path) -> None:
+    (tmp_path / "skills" / "hello").mkdir(parents=True)
+    (tmp_path / "skills" / "hello" / "SKILL.md").write_text("# hello\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text(
+        "def ping() -> str:\n"
+        "    return 'pong'\n\n"
+        "class Server:\n"
+        "    pass\n\n"
+        "def setup(ctx):\n"
+        "    ctx.tool('ping', ping)\n"
+        "    ctx.skills('skills')\n"
+        "    ctx.provide('server', Server())\n",
+        encoding="utf-8",
+    )
+    _write(tmp_path, "capabilities: [tool, skill, server]\n")
+    loaded = load_plugin_dir(tmp_path, install_deps=False)
+    assert [t.name for t in loaded.tools] == ["ping"]
+    assert loaded.skills_dir == (tmp_path / "skills").resolve()
+    assert [type(obj).__name__ for obj in loaded.provided["server"]] == ["Server"]
+    assert PluginRegistry().get("multi") is loaded
+
+
+def test_provide_requires_a_declared_host_capability(tmp_path: Path) -> None:
+    manifest = PluginManifest(
+        id="x", version="1", name="x", kind="tool", entry="main.py", capabilities=("tool", "server")
+    )
+    ctx = PluginContext(manifest=manifest, source_path=tmp_path)
+    ctx.provide("server", object())
+    with pytest.raises(ValueError, match="not ui"):
+        ctx.provide("ui", object())
+    with pytest.raises(ValueError, match="dedicated method"):
+        ctx.provide("tool", object())
+    with pytest.raises(ValueError, match="not hook"):
+        ctx.middleware(object())
