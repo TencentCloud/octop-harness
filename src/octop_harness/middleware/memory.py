@@ -194,8 +194,9 @@ def _checkpoint_sqlite_path(memory: Any) -> Path | None:
 def _reclaimable_checkpoint_bytes(path: Path) -> int:
     import sqlite3
 
-    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=30.0)
     try:
+        conn.execute("PRAGMA busy_timeout=30000")
         page = int(conn.execute("PRAGMA page_size").fetchone()[0])
         free = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
     finally:
@@ -274,8 +275,17 @@ def _vacuum_checkpoint_if_needed(path: Path) -> None:
     import sqlite3
 
     try:
-        conn = sqlite3.connect(path)
+        conn = sqlite3.connect(path, timeout=30.0)
         try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            check = conn.execute("PRAGMA quick_check").fetchone()
+            if check != ("ok",):
+                logger.error(
+                    "skipping checkpoint VACUUM for %s: SQLite integrity check failed (%r)",
+                    path,
+                    check,
+                )
+                return
             conn.execute("VACUUM")
         finally:
             conn.close()
