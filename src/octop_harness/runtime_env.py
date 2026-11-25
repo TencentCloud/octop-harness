@@ -11,7 +11,8 @@ Spawn surfaces are intentionally not identical:
 - Docker sandbox starts from a minimal ``PATH``/``HOME`` and never copies the
   full host environment.
 - ACP child processes inherit full ``os.environ`` (runners need PATH/display),
-  then cwd ``.env`` (protected keys skipped), then runner-config env.
+  then cwd ``.env`` (protected keys skipped), then runner-config env, then
+  user CLI install directories (``~/.opencode/bin`` and the like) are prepended.
 - MCP stdio uses the SDK default subset, then spec ``env`` — not full
   ``os.environ``.
 """
@@ -128,6 +129,44 @@ def _workspace_dotenv(
             logger.debug("workspace dotenv reader failed", exc_info=True)
             return {}
     return load_dotenv_path(None if host_dir is None else Path(host_dir) / ".env")
+
+
+# User-level CLI installers drop binaries here, not on the service PATH.
+_USER_CLI_RELATIVE_DIRS = (
+    Path(".local") / "bin",
+    Path(".opencode") / "bin",
+    Path(".claude") / "bin",
+    Path(".codebuddy") / "bin",
+    Path(".kimi") / "bin",
+    Path(".pi") / "bin",
+    Path("bin"),
+    Path(".cursor") / "bin",
+)
+
+
+def prepend_user_cli_path(env: Mapping[str, str]) -> dict[str, str]:
+    """Search home installer bins before the inherited PATH.
+
+    Official CLIs such as OpenCode install into ``~/.opencode/bin``. A service
+    started without that directory on PATH otherwise fails with
+    ``FileNotFoundError: 'opencode'``.
+    """
+    out = {str(key): str(value) for key, value in env.items()}
+    home_raw = out.get("HOME") or str(Path.home())
+    home = Path(home_raw)
+    extras = [str(home / rel) for rel in _USER_CLI_RELATIVE_DIRS if (home / rel).is_dir()]
+    if os.name == "nt":
+        local = Path(os.environ.get("LOCALAPPDATA") or (home / "AppData" / "Local"))
+        for rel in (Path("codebuddy") / "bin", Path("cursor-agent")):
+            candidate = local / rel
+            if candidate.is_dir():
+                extras.append(str(candidate))
+    if not extras:
+        return out
+    current = out.get("PATH", "")
+    parts = [*extras, current] if current else extras
+    out["PATH"] = os.pathsep.join(parts)
+    return out
 
 
 def overlay_env(

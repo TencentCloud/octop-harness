@@ -51,4 +51,36 @@ def runtime_config(request: ModelRequest[ContextT]) -> dict[str, Any]:
     return {}
 
 
-__all__ = ["runtime_config"]
+def current_configurable(request: Any = None) -> dict[str, Any]:
+    """Resolve the current graph ``configurable`` mapping for middleware.
+
+    Precedence shared by consumers that only need ``configurable`` keys
+    (e.g. ``thread_id``): ``langgraph.config.get_config()`` first — LangGraph
+    v0.6+ no longer exposes ``runtime.config`` — then ``runtime.config``'s
+    ``configurable``, then ``runtime.configurable``. Accepts any middleware
+    request exposing ``runtime`` (``ModelRequest`` and ``ToolCallRequest``
+    both do); pass ``None`` to read only the contextvar.
+    """
+    try:
+        config = get_config()
+        if isinstance(config, dict):
+            configurable = config.get("configurable")
+            if isinstance(configurable, dict) and configurable:
+                return configurable
+    except RuntimeError:
+        pass
+
+    runtime = getattr(request, "runtime", None) if request is not None else None
+    if runtime is not None:
+        runtime_config_value = getattr(runtime, "config", None)
+        if isinstance(runtime_config_value, dict):
+            configurable = runtime_config_value.get("configurable")
+            if isinstance(configurable, dict):
+                return configurable
+        configurable = getattr(runtime, "configurable", None)
+        if isinstance(configurable, dict):
+            return configurable
+    return {}
+
+
+__all__ = ["current_configurable", "runtime_config"]

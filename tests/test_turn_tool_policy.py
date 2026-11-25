@@ -50,7 +50,16 @@ class ForcedToolModel(BaseChatModel):
                 tool_calls=[
                     {
                         "name": "read_file",
-                        "args": {"path": str(messages[-1].content)},
+                        "args": {
+                            "path": next(
+                                (
+                                    str(m.content)
+                                    for m in reversed(messages)
+                                    if isinstance(m, HumanMessage) and not str(m.content).startswith("[turn note]")
+                                ),
+                                str(messages[-1].content),
+                            )
+                        },
                         "id": "read-1",
                         "type": "tool_call",
                     }

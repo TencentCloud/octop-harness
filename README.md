@@ -47,6 +47,22 @@
 | 💬 | **Teams** | Peer inbox; `peer_invoke_mode` selects sync / async / both |
 | ⌨️ | **Terminal CLI** | Interactive chat, provider/skill config, and agent management |
 
+### CubeSandbox backend
+
+Install `octop-harness[cubesandbox-native,remote-backends]` for the native
+SDK and PostgreSQL locking, or use `[cubesandbox,remote-backends]` for the E2B
+compatibility SDK. Resolve a backend with
+`{"type": "cubesandbox", "template": "...", "octop_user": "...", "octop_agent": "..."}`.
+Set `CUBE_API_URL`, the SDK's API key environment variable, and
+`OCTOP_CUBESANDBOX_LOCK_DSN` on the harness host. Managed hosts must share the
+lock database. The default `octop_scope` of `agent` reuses a sandbox per agent.
+Use `user` to share the workspace across that user's agents. Closing a backend
+releases its connection. Call `destroy()` to terminate the sandbox explicitly.
+Add `workspace_backup` (a nested backend spec such as `{"type": "cos", "bucket": "..."}`)
+to mirror the sandbox workspace into object storage: it is copied into every freshly
+created sandbox, and `archive_workspace()` pushes it back before the sandbox goes away.
+
+
 ## Why Octop Harness?
 
 octop-harness is a library (not an app) that turns deepagents into a deployable runtime. A single `HarnessAgentManager` owns a registry of agents; each agent wires together a model, a set of tools/skills, a memory backend, and a LangGraph checkpoint — all assembled through the `harness` layering discipline (L0 I/O helpers → L1 workspace facade → L2 business logic → L3 assembly).
@@ -98,14 +114,43 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
   `memory_save` reports conflicts or incomplete checks. Duplicates remain stored
   and are suppressed against matching session context. Uncertain checks leave facts
   active. File-tool guards complement the host's shell/OS permissions.
-- Remember requests use `memory_save(content, topic)` to persist directly through
-  octop-memory; `memory_search` / `memory_get` retrieve additional history.
+- Remember requests use `memory_save(content, topic, kind)` to persist directly through
+  octop-memory; the current model chooses Fact, Preference, Decision or Task without
+  an extra classification call. Omitted kind remains Fact; topic/entity type is separate.
+  Typed saves require the companion unreleased memory `save(kind=...)` API: old versions
+  return an upgrade error rather than silently saving a Fact. Release/adopt memory first;
+  dependency declarations remain on the existing release until a supporting release exists.
+  Historical facts are unchanged and saving a Task does not schedule a reminder.
+  `memory_search` / `memory_get` retrieve additional history.
+  CI checks released-library compatibility separately from the classified-save
+  source contract pinned to the companion memory PR revision.
 - Eligible conversation content is captured as **L0 raw events**, then distilled asynchronously into **L2 atoms** (`AtomCard`s) and **L3 entity pages**. Runtime failures are excluded; normal troubleshooting knowledge and explicit remember requests remain eligible.
 - Model failures raise after retries; retry eligibility follows LangChain's defaults, with the existing retry budget and backoff settings. Callers must handle exceptions from `call()` / streaming. Checkpoints retain failed tasks without adding a synthetic assistant reply. Hosts display errors separately; automatic team failure notifications use `configurable.octop_memory_capture_exclude=true` to keep diagnostics out of memory.
 - Powered by the octop-memory middleware; memory travels with the workspace.
-- Recall is frozen once per user turn and appended to the model-facing user message,
-  keeping the system prompt stable. Checkpoints preserve recall snapshots for exact
-  replay while chat history and capture retain the original user text.
+- Recall is frozen once per user turn as a quoted historical reference appended
+  **after** the original user text and attachments, with explicit source/role
+  markers. This keeps the shared request prefix intact through the current user
+  input. The system policy forbids treating recalled questions as new requests.
+  The system prompt stays stable across turns and old v1 snapshots replay exactly;
+  history and capture retain the original user text. Tool continuations and later
+  turns reuse each historical snapshot instead of refreshing earlier recall.
+- For recall diagnostics, enable DEBUG on `octop_harness.middleware.memory`.
+  `recall_inject` logs `query_chars` and `query_sha256` (the first 16 hex digits of
+  SHA-256 over the complete UTF-8 query passed to recall, after stripping outer
+  whitespace). Compute the same fingerprint from a suspected query to search and
+  correlate logs; long queries are not truncated before hashing, and raw query
+  text is not logged.
+  Set `memory_recall_inject_enabled=False` on `HarnessAgentConfig` to disable
+  fresh automatic recall while retaining memory tools and exact replay of old turns.
+- Host middlewares registered via `HarnessAgentConfig(middleware=[...])` run
+  after `MemoryMiddleware` and can call `get_recall_candidates(message)` (from
+  `octop_harness.middleware`) in `before_model` to inspect a read-only tuple of
+  `RecallCandidate` records (`atom_id`, 1-based `rank`, `layer`, `role_hint`,
+  `timestamp_iso`) stamped for the turn. It returns `()` when recall ran with no
+  hits, and `None` when recall is disabled, unsupported, or invalidated by a
+  content rewrite. Read it in `before_model` rather than `wrap_model_call`,
+  because `MemoryMiddleware` replays and strips private snapshot metadata before
+  forwarding API copies.
 
 Memory extraction can be configured independently of main chat:
 `memory_extract_max_tokens` sets the candidate/episode output budget (default
@@ -116,6 +161,15 @@ to 1 second and doubles up to 60 seconds. Only transport/transient HTTP failures
 are retried. SDK retries are disabled on separate cached model instances, so
 main-chat retry settings are unaffected. `ChatModelFactory.get_chat_model(ref,
 max_retries=0)` exposes that isolated construction path.
+
+Automatic context compaction follows deepagents' defaults (trigger at 85% of
+the context window and keep 10% when the model profile exposes
+`max_input_tokens`). Override it on `HarnessAgentConfig` with
+`summarization_trigger`, `summarization_keep`, and `summarization_trim_tokens`.
+`summarization_enabled=False` turns off that automatic trigger and tool-argument
+truncation. The middleware stays installed, so `/compact` and a real
+context-window overflow can still summarize, and an earlier summary stays
+applied on later turns. `/compact` keeps its own recent-message tail.
 
 `memory_aux_thinking="auto"` or `"off"` disables thinking for known Qwen3/QwQ
 chat-template models; unsupported models keep their defaults. `"on"` keeps the
@@ -129,6 +183,8 @@ beyond a single request timeout.
 #### Host-owned memory restore
 
 Hosts can use `MemoryMiddleware.pause_background(timeout=120)` as a context manager after pausing graph admission. It drains capture, extraction and maintenance workers for that middleware only, skips new background submissions while paused, and resumes admission on exit or timeout. Keep it held while closing and recreating the memory runtime; other experts remain independent.
+
+Ordinary memory runtime shutdown stops accepting background work immediately and returns without waiting. The runtime retains its shared database claim until all accepted workers finish, including workers from middleware replaced during configuration changes. With no pending work, resources are released immediately. `MemoryMiddleware.shutdown(on_idle=callback)` lets resource owners receive the same completion signal; the callback runs once outside the worker lock, immediately when idle or on the last worker's thread. Shutdown does not keep the process alive; hosts that need to await workers should drain them before exiting.
 
 #### Tools & skills
 - Built-in tools: browser (octop-browser), web search, files, ``ask_user_question`` for
@@ -201,6 +257,8 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 `octop-harness` provides: `init`, `chat`, `agent`, `config` (e.g. `config provider add`), `skill`, and `update`.
 
 ## How to Use
+
+Current release: **1.0.11**. See the [release notes](CHANGELOG.md).
 
 ### Prerequisites
 - **Python 3.12+**
@@ -328,6 +386,39 @@ HITL `resume_hitl(thread_id, decisions)` retains the paused stream's user, tool
 selections and other request configuration across nested approvals. The host must
 authorize the resume caller. This context is process-local, isolated by thread,
 and released when the resumed stream finishes or the agent closes.
+
+### Scheduled SQLite checkpoint backups
+
+PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
+Hosts can prune a verified thread offline after
+pausing its execution, resumption and forks across all hosts.
+
+With a Memory version exposing `acheckpoint_activity(thread_id)`, Harness holds
+that activity scope through calls, streams, HITL resumes, history reads and state
+updates. Cancellation drains accepted saver I/O before releasing the lease, and
+late saver tasks are rejected. The v3 stream keeps its scope across pull tasks
+until it finishes or is aborted. Hosts
+using `agent.graph` directly must guard the entire operation with
+`async with agent.checkpoint_activity(thread_id)`; the equivalent helper is
+`octop_harness.memory.checkpoint_activity(checkpointer, thread_id)`. This also
+applies to history forks and their source reads. All runtimes sharing those
+threads must participate before a host enables coordinated PostgreSQL retention.
+Older Memory versions remain compatible, but provide no coordination guarantee.
+
+With checkpoint retention enabled, `OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE`
+defaults to `first`. The first cleanup with eligible checkpoints attempts to
+write `memory.sqlite.pre-prune.bak`. If the database plus WAL and 10% headroom
+do not fit, or if the copy fails, maintenance warns and continues pruning.
+`memory.sqlite.pre-prune.done` records the attempt and its outcome so later
+cleanups do not retry. Remove the marker to allow one more attempt the next
+time there are eligible checkpoints.
+
+Set the mode to `always` to replace the backup before every cleanup and defer
+checkpoint pruning if the backup cannot be written. Legacy values `1`,
+`true`, `on`, and `yes` also select `always`. Set `off` (or `0`, `false`,
+or `no`) to disable backups. Maintenance expires the backup after 7 days
+by default. Set `OCTOP_CHECKPOINT_BACKUP_KEEP_DAYS=0` to keep it indefinitely.
+Expiration leaves the marker in place.
 
 ## Documentation
 

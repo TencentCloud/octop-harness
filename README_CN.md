@@ -99,10 +99,17 @@
 - `MEMORY.md` 是强记忆，`USER.md` 是用户档案。每个会话首次加载全文快照，后续复用 checkpoint 中的快照；修改对新会话生效。结构化记忆开启时，这两份文档由用户手动维护，Agent 文件工具只读，「记住」走 `memory_save`。结构化记忆关闭时，Agent 用文件工具直接修改这两份文档，删除和移动仍被拦住。`manual_document_policy` 默认 `auto`，跟随这个开关；设为 `user` 时始终由用户维护，设为 `agent` 时即使记忆开启也允许 Agent 修改。规则由编译进系统提示的记忆段决定，并优先于工作区 `AGENTS.md` 里的旧写法。
 - 工作区上下文的统一读取、session 快照、提示词格式和缓存断点复用 deepagents 原生 `MemoryMiddleware`。模板更新不覆盖已有用户文档。
 - 普通记忆写入和自动晋升后，通过 `BackendWorkspace` 读取当前手动文档做核对，不刷新聊天快照。明确冲突以手动文档为准：旧 Atom 软停用，替代事实转 candidate，原证据保留；`memory_save` 会提示冲突或检查未完成。重复 Atom 保留，仅对已包含相同信息的会话快照抑制召回。语义不确定/模型不可用时不强制停用，宿主应展示待核对状态。文件工具防护不替代宿主的 shell/OS 权限策略。
-- 用户说「记住」时，Agent 使用 `memory_save(content, topic)` 直接保存到 octop-memory；`memory_search` / `memory_get` 用于补充历史召回。
+- 用户说「记住」时，Agent 使用 `memory_save(content, topic, kind)` 直接保存到 octop-memory；当前对话模型选择 Fact、Preference、Decision 或 Task，不增加分类模型调用。省略仍为 Fact，类别与主题、实体类型分别处理。分类保存依赖配套且尚未发布的 memory `save(kind=...)` API；连接旧版时会明确提示升级，不静默降级为事实。应先发布并接入 memory；在支持该 API 的版本发布前，依赖声明保留现有正式版。历史事实不变，保存 Task 不创建定时提醒。`memory_search` / `memory_get` 用于补充历史召回。
+  CI 分别验证已发布记忆库的兼容行为，以及固定到配套 memory PR 源码 revision 的分类契约。
+- 自动召回在每轮首次调用模型前冻结，以带 source/role 标记的历史引用追加在当前用户原文和附件之后，让公共请求前缀尽可能延伸到完整用户输入。系统规则禁止把引用里的旧问题当成新请求；系统提示在各轮保持稳定，工具续跑和后续轮次复用历史快照，不刷新先前的召回。checkpoint 精确重放已有 v1 快照，聊天历史和记忆采集仍保留用户原文。
+- 排查召回时，将 `octop_harness.middleware.memory` 日志级别设为 DEBUG。`recall_inject` 会记录 `query_chars` 和 `query_sha256`：对实际传入 recall 的完整查询去除首尾空白后，以 UTF-8 计算 SHA-256，取前 16 位十六进制字符。按同样方法计算疑似查询的指纹即可检索、对账；长查询不会在计算前被截断，日志不输出查询原文。
+- `HarnessAgentConfig(memory_recall_inject_enabled=False)` 可关闭新的自动召回，保留记忆工具和旧回合快照的精确重放。
+- 通过 `HarnessAgentConfig(middleware=[...])` 注册的宿主中间件位于 `MemoryMiddleware` 之后，可在 `before_model` 中调用 `octop_harness.middleware.get_recall_candidates(message)`，以只读形式获取本轮私有自动召回的 `RecallCandidate` 元组（含 `atom_id`、1-based `rank`、`layer`、`role_hint`、`timestamp_iso`），便于宿主在外挂共享知识源时做同源去重与预算控制。本轮召回为空时返回 `()`，未启用自动召回、旧版快照或消息被改写失效时返回 `None`。注意应在 `before_model` 而非 `wrap_model_call` 中读取，因为 `MemoryMiddleware` 会在 `wrap_model_call` 重放并剥离私有快照元数据。
 
 - 对话经采集策略过滤后记录为 **L0 原始事件**，再异步蒸馏为 **L2 原子**（`AtomCard`）与 **L3 实体页**。系统运行报错不进入记忆，正常排障经验和用户明确记忆请求仍可保存。
 - 模型重试耗尽后抛出异常；重试范围沿用 LangChain 默认判断，次数与退避参数保持原配置。调用方需处理 `call()` / 流式调用的异常；checkpoint 保留失败任务，不添加合成助手回复。宿主单独展示错误；团队自动失败通知设置 `configurable.octop_memory_capture_exclude=true`，避免诊断信息被采集为记忆。
+- 定时 checkpoint 裁剪只用于 SQLite。PostgreSQL 的 checkpoint 表由多个 agent 和宿主共用。宿主在核实线程归属、暂停该线程在所有宿主上的执行、恢复和分叉后，可以离线裁剪该线程。
+- 配套 Memory 提供 `acheckpoint_activity(thread_id)` 时，Harness 会在调用、流式执行、HITL 恢复、历史读取和状态更新的完整期间持有活动锁；取消时先等已接受的保存操作结束，拒绝晚到的保存任务；v3 流跨多次拉取保持同一作用域，直到结束或中止。宿主直接使用 `agent.graph` 时，应以 `async with agent.checkpoint_activity(thread_id)` 包住完整读写（包括分叉的源历史读取），也可调用 `octop_harness.memory.checkpoint_activity(checkpointer, thread_id)`。共享这些线程的全部运行实例升级并参与协调后，宿主才能启用 PG 定时裁剪；旧 Memory 保持兼容，但不提供此协调保证。
 - 由 octop-memory 中间件驱动，记忆随工作区一同迁移。
 
 
@@ -134,6 +141,8 @@
 `octop-harness` 提供：`init`、`chat`、`agent`、`config`（如 `config provider add`）、`skill`、`update`。
 
 ## 如何使用
+
+当前版本：**1.0.11**。更新内容见[发布说明](CHANGELOG.md)。
 
 
 
