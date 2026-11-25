@@ -14,8 +14,8 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from langgraph.graph.message import _messages_delta_reducer
 from langgraph.channels.delta import DeltaChannel
+from langgraph.graph.message import _messages_delta_reducer
 from octop_memory import Memory, MemoryService
 
 from octop_harness.builtin.tools.memory_tools import build_memory_tools
