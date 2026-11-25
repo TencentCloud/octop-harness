@@ -142,6 +142,15 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
   text is not logged.
   Set `memory_recall_inject_enabled=False` on `HarnessAgentConfig` to disable
   fresh automatic recall while retaining memory tools and exact replay of old turns.
+- Host middlewares registered via `HarnessAgentConfig(middleware=[...])` run
+  after `MemoryMiddleware` and can call `get_recall_candidates(message)` (from
+  `octop_harness.middleware`) in `before_model` to inspect a read-only tuple of
+  `RecallCandidate` records (`atom_id`, 1-based `rank`, `layer`, `role_hint`,
+  `timestamp_iso`) stamped for the turn. It returns `()` when recall ran with no
+  hits, and `None` when recall is disabled, unsupported, or invalidated by a
+  content rewrite. Read it in `before_model` rather than `wrap_model_call`,
+  because `MemoryMiddleware` replays and strips private snapshot metadata before
+  forwarding API copies.
 
 Memory extraction can be configured independently of main chat:
 `memory_extract_max_tokens` sets the candidate/episode output budget (default

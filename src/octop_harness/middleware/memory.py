@@ -43,6 +43,8 @@ from octop_harness.middleware.checkpoint_backup import (
     prepare_checkpoint_backup,
 )
 from octop_harness.middleware.memory_recall import (
+    RecallCandidate,
+    extract_recall_candidates,
     has_recall_snapshot,
     replay_recall_snapshots,
     stamp_recall_snapshot,
@@ -670,6 +672,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
     ) -> HumanMessage:
         """Freeze success, empty recall, maintenance skip, or failure for this turn."""
         rendered = ""
+        candidates: tuple[RecallCandidate, ...] | None = ()
         try:
             query = _stringify_content(message.content).strip()
             configurable = _get_configurable(runtime)
@@ -684,6 +687,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                     query, thread_id=thread_id, session_id=session_id, limit=self._recall_limit, **context_options
                 )
                 rendered = getattr(result, "rendered", None) or ""
+                candidates = extract_recall_candidates(result, rendered=rendered)
                 logger.debug(
                     "memory.trigger recall_inject thread=%s session=%s query_chars=%d query_sha256=%s limit=%d hit=%s",
                     thread_id,
@@ -695,7 +699,9 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 )
         except Exception:  # recall injection is best-effort; pylint: disable=broad-except
             logger.warning("MemoryMiddleware recall injection failed", exc_info=True)
-        return stamp_recall_snapshot(message, rendered)
+            rendered = ""
+            candidates = ()
+        return stamp_recall_snapshot(message, rendered, candidates=candidates)
 
     # ------------------------------------------------------------------
     # Write-path helpers

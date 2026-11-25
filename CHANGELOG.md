@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 新增
 
+- 聊天自动召回快照新增只读候选元数据接口：`octop_harness.middleware.get_recall_candidates(message)` 与 `RecallCandidate`。宿主自定义中间件可在 `before_model` 读取本轮私有召回的 `atom_id`、排序位次 `rank` 等轻量元数据，用于外挂外部召回源时的同源去重与预算控制；重放发给模型前仍自动剥离全部私有字段，无消费者时发包行为完全不变（#260 / Octop#2966）。
 - 新增 CubeSandbox 后端，支持远程命令、虚拟文件系统，以及基于 PostgreSQL 锁的沙箱复用。
 - CubeSandbox 工作区可镜像到对象存储：新建沙箱自动回灌，`archive_workspace()` 负责归档。
 - 文件系统中间件按回合记录文件写入：每个文件保留本轮首次写入前与最后一次写入后的内容，主代理和子代理共用同一条捕获链路；宿主可据此生成回合级 diff，并在文件未被后续改动时回滚。
