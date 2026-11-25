@@ -47,6 +47,22 @@
 | 💬 | **Teams** | Peer inbox; `peer_invoke_mode` selects sync / async / both |
 | ⌨️ | **Terminal CLI** | Interactive chat, provider/skill config, and agent management |
 
+### CubeSandbox backend
+
+Install `octop-harness[cubesandbox-native,remote-backends]` for the native
+SDK and PostgreSQL locking, or use `[cubesandbox,remote-backends]` for the E2B
+compatibility SDK. Resolve a backend with
+`{"type": "cubesandbox", "template": "...", "octop_user": "...", "octop_agent": "..."}`.
+Set `CUBE_API_URL`, the SDK's API key environment variable, and
+`OCTOP_CUBESANDBOX_LOCK_DSN` on the harness host. Managed hosts must share the
+lock database. The default `octop_scope` of `agent` reuses a sandbox per agent.
+Use `user` to share the workspace across that user's agents. Closing a backend
+releases its connection. Call `destroy()` to terminate the sandbox explicitly.
+Add `workspace_backup` (a nested backend spec such as `{"type": "cos", "bucket": "..."}`)
+to mirror the sandbox workspace into object storage: it is copied into every freshly
+created sandbox, and `archive_workspace()` pushes it back before the sandbox goes away.
+
+
 ## Why Octop Harness?
 
 octop-harness is a library (not an app) that turns deepagents into a deployable runtime. A single `HarnessAgentManager` owns a registry of agents; each agent wires together a model, a set of tools/skills, a memory backend, and a LangGraph checkpoint — all assembled through the `harness` layering discipline (L0 I/O helpers → L1 workspace facade → L2 business logic → L3 assembly).
@@ -233,7 +249,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 ## How to Use
 
-Current release: **1.0.10**. See the [release notes](CHANGELOG.md).
+Current release: **1.0.11**. See the [release notes](CHANGELOG.md).
 
 ### Prerequisites
 - **Python 3.12+**
@@ -351,6 +367,22 @@ authorize the resume caller. This context is process-local, isolated by thread,
 and released when the resumed stream finishes or the agent closes.
 
 ### Scheduled SQLite checkpoint backups
+
+PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
+With octop-memory 1.0.5, hosts can prune a verified thread offline after
+pausing its execution, resumption and forks across all hosts.
+
+With a Memory version exposing `acheckpoint_activity(thread_id)`, Harness holds
+that activity scope through calls, streams, HITL resumes, history reads and state
+updates. Cancellation drains accepted saver I/O before releasing the lease, and
+late saver tasks are rejected. The v3 stream keeps its scope across pull tasks
+until it finishes or is aborted. Hosts
+using `agent.graph` directly must guard the entire operation with
+`async with agent.checkpoint_activity(thread_id)`; the equivalent helper is
+`octop_harness.memory.checkpoint_activity(checkpointer, thread_id)`. This also
+applies to history forks and their source reads. All runtimes sharing those
+threads must participate before a host enables coordinated PostgreSQL retention.
+Older Memory versions remain compatible, but provide no coordination guarantee.
 
 With checkpoint retention enabled, `OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE`
 defaults to `first`. The first cleanup with eligible checkpoints attempts to

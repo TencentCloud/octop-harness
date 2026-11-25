@@ -5,17 +5,27 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
 from octop_harness.acp.client import ACPHostedClient
+from octop_harness.acp.mcp_servers import acp_mcp_servers_from_specs, mcp_fingerprint
 from octop_harness.acp.models import ACPConfig, ACPConfigurationError, ACPRunnerConfig, ACPSessionError
-from octop_harness.acp.session_index import AcpSessionIndex, resume_or_create_session, session_index_path
+from octop_harness.acp.permission_mode import select_session_mode
+from octop_harness.acp.session_index import (
+    AcpSessionIndex,
+    collaboration_notice,
+    resume_or_create_session,
+    session_index_path,
+)
 from octop_harness.backends.utils import ASYNC_DEFENSIVE_OP_ERRORS
 from octop_harness.runtime_env import load_dotenv_path, overlay_env, prepend_user_cli_path
+
+logger = logging.getLogger(__name__)
 
 MessageHandler = Callable[[dict[str, Any], bool], Awaitable[None]]
 
@@ -48,6 +58,13 @@ class _Conversation:
     exit_stack: AsyncExitStack
     turn_lock: asyncio.Lock
     prompt_task: asyncio.Task[Any] | None = None
+    load_supported: bool = False
+    mcp_key: str = ""
+    mcp_degraded: bool = False
+    mcp_notice_sent: bool = False
+    current_mode_id: str | None = None
+    available_modes: tuple[Any, ...] = ()
+    default_mode_id: str | None = None
 
 
 class ACPService:
@@ -66,15 +83,27 @@ class ACPService:
         on_message: MessageHandler,
         restart: bool = False,
         require_existing: bool = False,
+        mcp_servers: Mapping[str, Any] | None = None,
+        locale: str = "",
+        permission_mode: str = "ask",
+        session_mode: str = "",
     ) -> dict[str, Any]:
+        attached = None if mcp_servers is None else acp_mcp_servers_from_specs(mcp_servers)
+        reopened = False
         if restart:
             await self.close_thread_session(thread_id=thread_id, runner=runner, cwd=cwd, forget=True)
+        elif attached is not None:
+            existing = await self.get_session(thread_id, runner)
+            if existing is not None and await self._reload_mcp(existing, attached):
+                await self.close_thread_session(thread_id=thread_id, runner=runner, cwd=cwd, forget=True)
+                reopened = True
 
         conversation = await self._get_or_create_session(
             thread_id=thread_id,
             runner=runner,
             cwd=cwd,
             require_existing=require_existing,
+            mcp_servers=attached,
         )
         async with conversation.turn_lock:
             if conversation.client.pending_permission is not None:
@@ -88,7 +117,17 @@ class ACPService:
 
             conversation.cwd = cwd or conversation.cwd
             conversation.client.update_cwd(conversation.cwd)
+            await self._apply_permission_mode(conversation, permission_mode, session_mode=session_mode)
             conversation.client.start_prompt(on_message)
+            if not conversation.mcp_notice_sent:
+                notice = collaboration_notice(
+                    degraded=conversation.mcp_degraded,
+                    reopened=reopened,
+                    locale=locale,
+                )
+                if notice:
+                    await on_message({"type": "text_delta", "text": notice + "\n\n"}, False)
+                    conversation.mcp_notice_sent = True
             conversation.prompt_task = asyncio.create_task(
                 conversation.conn.prompt(
                     session_id=conversation.acp_session_id,
@@ -180,6 +219,29 @@ class ACPService:
             raise ACPConfigurationError(f"ACP runner '{runner}' is disabled", runner=runner)
         return runner_config
 
+    async def _reload_mcp(self, conversation: _Conversation, servers: Sequence[Any]) -> bool:
+        """Attach ``servers`` when they differ. True means the session must be reopened."""
+        key = mcp_fingerprint(servers)
+        if conversation.mcp_key == key:
+            return False
+        if conversation.load_supported:
+            try:
+                await conversation.conn.load_session(
+                    cwd=conversation.cwd,
+                    session_id=conversation.acp_session_id,
+                    mcp_servers=list(servers),
+                )
+            except Exception:
+                logger.warning(
+                    "ACP could not refresh MCP servers for %s",
+                    conversation.acp_session_id,
+                    exc_info=True,
+                )
+            else:
+                conversation.mcp_key = key
+                return False
+        return True
+
     async def _get_or_create_session(
         self,
         *,
@@ -187,6 +249,7 @@ class ACPService:
         runner: str,
         cwd: str,
         require_existing: bool,
+        mcp_servers: Sequence[Any] | None = None,
     ) -> _Conversation:
         runner_config = self._get_runner_config(runner)
         async with self._lock:
@@ -210,6 +273,7 @@ class ACPService:
             runner=runner,
             cwd=cwd or ".",
             runner_config=runner_config,
+            mcp_servers=mcp_servers,
         )
         async with self._lock:
             self._sessions[(thread_id, runner)] = conversation
@@ -229,6 +293,7 @@ class ACPService:
         runner: str,
         cwd: str,
         runner_config: ACPRunnerConfig,
+        mcp_servers: Sequence[Any] | None = None,
     ) -> _Conversation:
         from acp import PROTOCOL_VERSION, spawn_agent_process
         from acp.schema import ClientCapabilities, Implementation
@@ -259,27 +324,60 @@ class ACPService:
             capabilities = getattr(initialized, "agent_capabilities", None)
             load_supported = bool(getattr(capabilities, "load_session", False))
             index = AcpSessionIndex(session_index_path(cwd))
-            session_id = await resume_or_create_session(
+            opened = await resume_or_create_session(
                 conn,
                 cwd=cwd,
                 session_id=index.get(thread_id, runner),
                 load_supported=load_supported,
+                mcp_servers=mcp_servers,
             )
-            index.put(thread_id, runner, session_id)
+            index.put(thread_id, runner, opened.session_id)
             return _Conversation(
                 thread_id=thread_id,
                 runner=runner,
-                acp_session_id=session_id,
+                acp_session_id=opened.session_id,
                 cwd=cwd,
                 conn=conn,
                 process=process,
                 client=client,
                 exit_stack=exit_stack,
                 turn_lock=asyncio.Lock(),
+                load_supported=load_supported,
+                mcp_key="" if mcp_servers is None else mcp_fingerprint(mcp_servers),
+                mcp_degraded=opened.mcp_degraded,
+                current_mode_id=opened.current_mode_id,
+                available_modes=opened.available_modes,
+                default_mode_id=opened.default_mode_id,
             )
         except ASYNC_DEFENSIVE_OP_ERRORS:
             await exit_stack.aclose()
             raise
+
+    async def _apply_permission_mode(self, conversation: _Conversation, mode: str, *, session_mode: str = "") -> None:
+        """Switch the agent to the requested session mode, then auto-allow YOLO."""
+        selected, target = select_session_mode(
+            list(conversation.available_modes),
+            mode,
+            session_mode,
+            conversation.default_mode_id,
+        )
+        conversation.client.set_permission_mode(selected)
+        if not target or target == conversation.current_mode_id:
+            return
+        try:
+            await conversation.conn.set_session_mode(
+                session_id=conversation.acp_session_id,
+                mode_id=target,
+            )
+        except Exception:
+            logger.warning(
+                "ACP set_session_mode %s failed for %s",
+                target,
+                conversation.acp_session_id,
+                exc_info=True,
+            )
+            return
+        conversation.current_mode_id = target
 
     async def _wait_for_prompt_outcome(self, *, conversation: _Conversation) -> dict[str, Any]:
         prompt_task = conversation.prompt_task
