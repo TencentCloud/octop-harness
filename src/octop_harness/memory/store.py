@@ -45,7 +45,7 @@ class MemoryIdentity:
 
 @dataclass
 class _Entry:
-    memory: Any
+    memory: Memory
     refs: int
 
 

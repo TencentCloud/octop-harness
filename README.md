@@ -47,6 +47,22 @@
 | 💬 | **Teams** | Peer inbox; `peer_invoke_mode` selects sync / async / both |
 | ⌨️ | **Terminal CLI** | Interactive chat, provider/skill config, and agent management |
 
+### CubeSandbox backend
+
+Install `octop-harness[cubesandbox-native,remote-backends]` for the native
+SDK and PostgreSQL locking, or use `[cubesandbox,remote-backends]` for the E2B
+compatibility SDK. Resolve a backend with
+`{"type": "cubesandbox", "template": "...", "octop_user": "...", "octop_agent": "..."}`.
+Set `CUBE_API_URL`, the SDK's API key environment variable, and
+`OCTOP_CUBESANDBOX_LOCK_DSN` on the harness host. Managed hosts must share the
+lock database. The default `octop_scope` of `agent` reuses a sandbox per agent.
+Use `user` to share the workspace across that user's agents. Closing a backend
+releases its connection. Call `destroy()` to terminate the sandbox explicitly.
+Add `workspace_backup` (a nested backend spec such as `{"type": "cos", "bucket": "..."}`)
+to mirror the sandbox workspace into object storage: it is copied into every freshly
+created sandbox, and `archive_workspace()` pushes it back before the sandbox goes away.
+
+
 ## Why Octop Harness?
 
 octop-harness is a library (not an app) that turns deepagents into a deployable runtime. A single `HarnessAgentManager` owns a registry of agents; each agent wires together a model, a set of tools/skills, a memory backend, and a LangGraph checkpoint — all assembled through the `harness` layering discipline (L0 I/O helpers → L1 workspace facade → L2 business logic → L3 assembly).
@@ -126,6 +142,15 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
   text is not logged.
   Set `memory_recall_inject_enabled=False` on `HarnessAgentConfig` to disable
   fresh automatic recall while retaining memory tools and exact replay of old turns.
+- Host middlewares registered via `HarnessAgentConfig(middleware=[...])` run
+  after `MemoryMiddleware` and can call `get_recall_candidates(message)` (from
+  `octop_harness.middleware`) in `before_model` to inspect a read-only tuple of
+  `RecallCandidate` records (`atom_id`, 1-based `rank`, `layer`, `role_hint`,
+  `timestamp_iso`) stamped for the turn. It returns `()` when recall ran with no
+  hits, and `None` when recall is disabled, unsupported, or invalidated by a
+  content rewrite. Read it in `before_model` rather than `wrap_model_call`,
+  because `MemoryMiddleware` replays and strips private snapshot metadata before
+  forwarding API copies.
 
 Memory extraction can be configured independently of main chat:
 `memory_extract_max_tokens` sets the candidate/episode output budget (default
@@ -233,7 +258,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 ## How to Use
 
-Current release: **1.0.11**. See the [release notes](CHANGELOG.md).
+Current release: **1.0.12**. See the [release notes](CHANGELOG.md).
 
 ### Prerequisites
 - **Python 3.12+**
@@ -296,6 +321,18 @@ async for chunk in agent.stream(request):
     print(chunk.delta, end="")
 ```
 
+### Per-invocation tool permissions
+
+Pass `ChatRequest(messages="Hello", allowed_tools=[])` for a chat-only turn, or
+an exact tool-name list such as `["web_fetch"]` to narrow that invocation.
+`None` keeps existing behavior. This ceiling intersects configured permissions
+and Ask/Plan restrictions, filters the final tool catalog, and rejects forbidden
+tool calls before execution. Managed subagents and in-process HITL resumes retain
+the request scope; concurrent requests do not mutate the agent configuration.
+Hosts must derive the ceiling from trusted authorization data. Custom tools and
+precompiled subagents remain responsible for operations they perform internally.
+Tool permissions do not remove private memory already included in model context.
+
 ### Progressive tool loading
 
 Large, low-frequency tool sets can be hidden until the model needs them. The
@@ -353,7 +390,7 @@ and released when the resumed stream finishes or the agent closes.
 ### Scheduled SQLite checkpoint backups
 
 PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
-With octop-memory 1.0.5, hosts can prune a verified thread offline after
+Hosts can prune a verified thread offline after
 pausing its execution, resumption and forks across all hosts.
 
 With a Memory version exposing `acheckpoint_activity(thread_id)`, Harness holds
@@ -499,3 +536,9 @@ async with ManagedMCPClient({"transport": "stdio", "command": "my-mcp", "args": 
 Explicit `await client.aclose()` is also supported. Closed or disconnected clients
 must be replaced; writes are never retried automatically. Default MCP tool loading
 remains stateless.
+
+For Octop group-chat protection, deploy this capability together with a gateway
+that emits `InboundMessage.allowed_tools` and an Octop version that forwards it.
+The Octop release must upgrade both SDKs; older gateways silently lack the field,
+while older harness versions reject the new request parameter. Source integration
+tests are distinct from acceptance with the released, locked dependency set.

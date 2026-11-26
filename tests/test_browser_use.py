@@ -43,6 +43,17 @@ def _make_metrics(action: str, **overrides: Any) -> ActionMetrics:
 
 
 @pytest.fixture(autouse=True)
+def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hostnames in these tests are public. Private literals are still rejected."""
+    import socket
+
+    def fake_getaddrinfo(host: str, port: int, *_args: Any, **_kwargs: Any) -> list[Any]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port or 0))]
+
+    monkeypatch.setattr("octop_harness.security.ssrf.socket.getaddrinfo", fake_getaddrinfo)
+
+
+@pytest.fixture(autouse=True)
 def _reset_history() -> Iterator[None]:
     """Per-test isolation of the in-process action_history ring buffer."""
     _browser_use_pkg._reset_history_for_tests()
@@ -83,6 +94,40 @@ def install_fake() -> Iterator[
 
     for ctx in contexts:
         ctx.__exit__(None, None, None)
+
+
+class TestRequestGuards:
+    async def test_navigate_rejects_loopback(
+        self,
+        install_fake: Callable[..., list[dict[str, Any]]],
+    ) -> None:
+        captured = install_fake(lambda **_: ToolResult(success=True, content="nope"))
+        result = await browser_use.ainvoke(
+            {"action": "navigate", "url": "http://127.0.0.1/latest/meta-data/", "profile": "work"}
+        )
+        payload = json.loads(result)
+        assert payload["success"] is False
+        assert captured == []
+
+    async def test_profile_must_be_one_segment(
+        self,
+        install_fake: Callable[..., list[dict[str, Any]]],
+    ) -> None:
+        captured = install_fake(lambda **_: ToolResult(success=True, content="nope"))
+        result = await browser_use.ainvoke({"action": "navigate", "url": "https://example.com", "profile": "../other"})
+        payload = json.loads(result)
+        assert payload["success"] is False
+        assert captured == []
+
+    async def test_screenshot_path_rejects_parent_segments(
+        self,
+        install_fake: Callable[..., list[dict[str, Any]]],
+    ) -> None:
+        captured = install_fake(lambda **_: ToolResult(success=True, content="nope"))
+        result = await browser_use.ainvoke({"action": "screenshot", "path": "../shot.png"})
+        payload = json.loads(result)
+        assert payload["success"] is False
+        assert captured == []
 
 
 class TestArgumentForwarding:

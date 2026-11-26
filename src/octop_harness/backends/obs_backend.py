@@ -36,8 +36,10 @@ class ObsConfig:
         secret_access_key: SK (Secret Key).
         prefix: Key prefix applied to every virtual path. Empty by default.
         security_token: Optional STS temporary security token.
-        connect_timeout: Connection timeout in seconds. Default 30.
-        socket_timeout: Socket timeout in seconds. Default 60.
+        connect_timeout: Kept for compatibility. The OBS SDK has one socket
+            timeout, so this value is not sent on its own. Default 30.
+        socket_timeout: Socket timeout in seconds passed to ``ObsClient``.
+            Default 60.
     """
 
     bucket: str
@@ -94,7 +96,10 @@ class ObsBackend(CloudStorageBackend):
             "access_key_id": config.access_key_id,
             "secret_access_key": config.secret_access_key,
             "server": config.endpoint_url,
-            "timeout": (config.connect_timeout, config.socket_timeout),
+            # esdk-obs-python forwards timeout to http.client, which accepts
+            # one number of seconds. A (connect, read) tuple reaches
+            # socket.settimeout and raises TypeError on every request.
+            "timeout": config.socket_timeout,
         }
         if config.security_token:
             kwargs["security_token"] = config.security_token

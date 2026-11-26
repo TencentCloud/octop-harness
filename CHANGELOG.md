@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.12] - 2026-11-26
+
+### 新增
+
+- 新增按回合限制 `allowed_tools` 的能力，并在工具执行入口强制执行。
+- 新增只读记忆召回候选接口，宿主中间件可获取候选元数据。
+- 新增 CubeSandbox 后端及工作区恢复能力，支持远程命令、虚拟文件系统和沙箱复用。
+- 文件系统中间件按回合捕获文件写入前后状态，支持生成变更记录和恢复。
+
+### 修复
+
+- 将 `octop-memory` 最低依赖升级到 `1.0.6`。
+- 修复记忆运行时对已移除 LangGraph 消息 reducer 的依赖。
+- SQLite checkpoint 数据库损坏时，中止裁剪与 vacuum，避免继续破坏数据。
+- 修复浏览器导航目标和 profile 名称的路径安全检查。
+- 工具筛选时始终保留 `memory_save`。
+- OBS 客户端改用单个秒级超时，并跳过 agents 目录中缺少 YAML frontmatter 的普通 Markdown。
+- 托管 ACP 智能体初始化时保留 checkpointer，支持继续已有会话。
+
 ## [1.0.11] - 2026-11-17
 
 ### 新增
