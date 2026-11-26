@@ -162,7 +162,10 @@ class OpenAIProtocol(LangGraphProtocol):
         messages: list[BaseMessage] = []
         for msg in request.get("messages", []):
             role = msg.get("role", "user")
-            content = msg.get("content", "")
+            # Assistant tool-call turns are sent with "content": null; coerce
+            # to empty string so pydantic message validation does not reject
+            # the whole request.
+            content = msg.get("content") or ""
             cls = role_map.get(role, HumanMessage)
             messages.append(cls(content=content))
 
