@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.13] - 2026-11-26
+
+### 新增
+
+- 支持按专家配置记忆提取的保留规则和跳过规则。
+
 ### 变更
 
 - 将 `octop-memory` 的最低依赖版本从 `1.0.6` 提升至 `1.0.7`。

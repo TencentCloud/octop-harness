@@ -263,7 +263,7 @@ custom adapter without adding arbitrary protocol or authentication fields to dec
 
 ## How to Use
 
-Current release: **1.0.12**. See the [release notes](CHANGELOG.md).
+Current release: **1.0.13**. See the [release notes](CHANGELOG.md).
 
 ### Prerequisites
 - **Python 3.12+**
