@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import platform
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,53 @@ import yaml
 from octop_harness.backends.workspace import BackendWorkspace
 
 logger = logging.getLogger(__name__)
+
+# Map compatibility tokens from SKILL.md frontmatter to platform.system() values.
+_PLATFORM_ALIASES = {
+    "linux": "Linux",
+    "macos": "Darwin",
+    "mac": "Darwin",
+    "darwin": "Darwin",
+    "osx": "Darwin",
+    "windows": "Windows",
+    "win": "Windows",
+    "win32": "Windows",
+    "win64": "Windows",
+}
+_COMPAT_SPLIT_RE = re.compile(r"[\s,;/|]+|[\u2014\u2013]")
+
+
+def skill_compatible_platforms(compatibility: object) -> frozenset[str] | None:
+    """Return OS names declared in a skill compatibility field.
+
+    Returns None when the field is empty or does not name any known OS, so
+    entries such as 'Python 3.10+' stay unrestricted. Known tokens include
+    'macos only', 'linux, macos', and 'linux, macos, windows'.
+    """
+    if compatibility is None:
+        return None
+    text = str(compatibility).strip()
+    if not text:
+        return None
+    platforms: set[str] = set()
+    for raw in _COMPAT_SPLIT_RE.split(text.lower()):
+        token = raw.strip().removesuffix("-only").removeprefix("only-")
+        if not token:
+            continue
+        mapped = _PLATFORM_ALIASES.get(token)
+        if mapped is not None:
+            platforms.add(mapped)
+    return frozenset(platforms) or None
+
+
+def is_skill_platform_compatible(compatibility: object, *, system: str | None = None) -> bool:
+    """True when *compatibility* does not exclude the current operating system."""
+    platforms = skill_compatible_platforms(compatibility)
+    if platforms is None:
+        return True
+    current = system if system is not None else platform.system()
+    return current in platforms
+
 
 _BUILTIN_KIND = "builtin"
 _WORKSPACE_KIND = "workspace"
@@ -160,6 +209,8 @@ async def _collect_skills_from_root(
         meta, _body = _parse_skill_frontmatter(manifest)
         if meta.get("removed"):
             continue
+        if not is_skill_platform_compatible(meta.get("compatibility")):
+            continue
         display_name = str(meta.get("name") or slug)
         out[slug] = _summary_dict(
             slug,
@@ -210,7 +261,9 @@ async def list_skill_summaries(
 __all__ = [
     "SKILL_PRESENTATION_METADATA_VERSION",
     "is_skill_enabled",
+    "is_skill_platform_compatible",
     "list_skill_summaries",
+    "skill_compatible_platforms",
     "skill_identity_keys",
     "skill_slug_from_path",
 ]

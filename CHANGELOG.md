@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。
 - 决策模型筛选工具时始终保留 `memory_save`，避免用户要求记住内容时该工具被静默裁掉（Octop#3073）。
 - `browser_use` 打开页面时使用与 `web_fetch` 相同的地址检查，并拒绝用配置名或截图路径跳出目录。
+- 技能清单和系统提示只保留当前平台兼容的 skill：读取 SKILL.md 的 `compatibility`（如 `macos only`），不再把 macOS 专属内置技能默认暴露给 Linux/Windows。不会写入 `skills_disabled`，磁盘上的技能文件仍保留。
 
 ## [1.0.11] - 2026-11-17
 

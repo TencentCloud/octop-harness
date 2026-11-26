@@ -348,6 +348,73 @@ class TestSkillFilterMiddleware:
         assert captured["system_message"] is req.system_message
         assert captured["metadata"] == sample_skills_metadata
 
+    def test_platform_incompatible_skills_removed_from_metadata(self) -> None:
+        from octop_harness.skills import catalog as catalog_mod
+
+        metadata = [
+            {
+                "name": "apple-notes",
+                "description": "Notes",
+                "path": "/_builtin_skills/apple-notes/SKILL.md",
+                "license": "MIT",
+                "compatibility": "macos only",
+                "metadata": {},
+                "allowed_tools": [],
+            },
+            {
+                "name": "plan",
+                "description": "Plan",
+                "path": "/_builtin_skills/plan/SKILL.md",
+                "license": "MIT",
+                "compatibility": "linux, macos, windows",
+                "metadata": {},
+                "allowed_tools": [],
+            },
+        ]
+        mw = self._middleware()
+        with patch.object(catalog_mod.platform, "system", return_value="Linux"), self._runnable_config({}):
+            req = self._request(metadata)
+            captured: dict[str, object] = {}
+
+            def handler(r: ModelRequest) -> ModelResponse:
+                captured["metadata"] = r.state.get("skills_metadata")
+                return ModelResponse(result=[])
+
+            mw.wrap_model_call(req, handler)
+
+        result = captured["metadata"]
+        assert isinstance(result, list)
+        assert [s["name"] for s in result] == ["plan"]
+
+    def test_platform_filter_keeps_macos_skill_on_darwin(self) -> None:
+        from octop_harness.skills import catalog as catalog_mod
+
+        metadata = [
+            {
+                "name": "apple-notes",
+                "description": "Notes",
+                "path": "/_builtin_skills/apple-notes/SKILL.md",
+                "license": "MIT",
+                "compatibility": "macos only",
+                "metadata": {},
+                "allowed_tools": [],
+            },
+        ]
+        mw = self._middleware()
+        with patch.object(catalog_mod.platform, "system", return_value="Darwin"), self._runnable_config({}):
+            req = self._request(metadata)
+            captured: dict[str, object] = {}
+
+            def handler(r: ModelRequest) -> ModelResponse:
+                captured["metadata"] = r.state.get("skills_metadata")
+                return ModelResponse(result=[])
+
+            mw.wrap_model_call(req, handler)
+
+        result = captured["metadata"]
+        assert isinstance(result, list)
+        assert [s["name"] for s in result] == ["apple-notes"]
+
 
 def test_slash_skill_slug() -> None:
     assert slash_skill_slug("/web-search") == "web-search"
@@ -506,5 +573,17 @@ class TestDisabledSkillFilesystemBlock:
                 tool_name="read_file",
                 args={"file_path": "/generated/joke-mode/out.txt"},
             ),
+        )
+        assert result.content == "ok"
+
+    def test_platform_filter_does_not_block_filesystem(self) -> None:
+        mw = SkillFilterMiddleware(config=HarnessAgentConfig())
+        result = self._run(
+            mw,
+            self._request(
+                tool_name="read_file",
+                args={"file_path": "/_builtin_skills/apple-notes/SKILL.md"},
+            ),
+            allowed="ok",
         )
         assert result.content == "ok"

@@ -17,7 +17,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from octop_harness.middleware.runtime import runtime_config
-from octop_harness.skills.catalog import skill_identity_keys
+from octop_harness.skills.catalog import is_skill_platform_compatible, skill_identity_keys
 
 if TYPE_CHECKING:
     from octop_harness.config import HarnessAgentConfig
@@ -214,12 +214,14 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
     stable ``/name`` rule is compiled into the system prompt (not injected
     per turn).
 
-    Disabled skills are removed from ``skills_metadata`` so they do not
-    appear in the system prompt. Filesystem tools and ``execute``/``bash``
-    are blocked when any string argument names ``skills/<slug>`` or
-    ``_builtin_skills/<slug>`` for a disabled skill (including glob patterns
-    and shell command lines). Workspace-wide ``grep``/``glob`` with no skill
-    path in the args is not rewritten.
+    Disabled skills and skills whose ``compatibility`` field excludes the
+    current OS are removed from ``skills_metadata`` so they do not appear in
+    the system prompt. Platform filtering does not write ``skills_disabled``
+    and does not block filesystem access to the skill files. Filesystem tools
+    and ``execute``/``bash`` are blocked when any string argument names
+    ``skills/<slug>`` or ``_builtin_skills/<slug>`` for a disabled skill
+    (including glob patterns and shell command lines). Workspace-wide
+    ``grep``/``glob`` with no skill path in the args is not rewritten.
 
     System-prompt rendering is fully delegated to the downstream
     ``SkillsMiddleware`` added by :func:`deepagents.create_deep_agent`.
@@ -312,6 +314,12 @@ class SkillFilterMiddleware(AgentMiddleware[Any, Any]):
     def _apply_filter(self, request: ModelRequest) -> ModelRequest:
         raw_metadata = request.state.get("skills_metadata")
         metadata: list[SkillMetadata] = list(raw_metadata) if isinstance(raw_metadata, list) else []
+
+        metadata = [
+            skill
+            for skill in metadata
+            if is_skill_platform_compatible(skill.get("compatibility") if isinstance(skill, dict) else None)
+        ]
 
         disabled = self._config.skills_disabled
         if disabled:
