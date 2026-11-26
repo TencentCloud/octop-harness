@@ -810,7 +810,7 @@ class BackendWorkspace:
         if max_bytes < 0:
             raise ValueError("max_bytes must be nonnegative")
         for fragment in self._read_fragments(path):
-            local = self.materialize_local(fragment, map_system_paths=False)
+            local = self.materialize_local(fragment, map_system_paths=False, allow_download=False)
             if local is not None:
                 try:
                     with local.open("rb") as stream:
@@ -1136,8 +1136,13 @@ class BackendWorkspace:
 
     # ----- Local materialization -----
 
-    def materialize_local(self, path: str, *, map_system_paths: bool = True) -> Path | None:
+    def materialize_local(
+        self, path: str, *, map_system_paths: bool = True, allow_download: bool = True
+    ) -> Path | None:
         """Return a local filesystem path for *path* when bytes are available.
+
+        With ``allow_download=False``, only check local / mounted candidates;
+        never call a remote download or populate the delivery cache.
 
         Local / virtual mounts: failback candidates under ``root_dir`` /
         ``workspace_dir``. Sandbox / remote backends (no host mount): download
@@ -1153,7 +1158,7 @@ class BackendWorkspace:
         mounted = materialize_storage_path(key, backend=self._backend, must_exist=True)
         if mounted is not None:
             return mounted.resolve()
-        if _has_backend_mount(self._backend):
+        if not allow_download or _has_backend_mount(self._backend):
             return None
         return self._materialize_via_download(key, path)
 

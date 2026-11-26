@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 新增
 
-- Add bounded binary download APIs for workspace, composite and cloud storage; reject oversized streams before buffering complete objects.
+- Add bounded binary download APIs for workspace, composite and cloud storage; reject oversized streams before buffering complete objects. Capped workspace reads use local-only materialization and never invoke legacy remote downloads.
 
 ### 修复
 
