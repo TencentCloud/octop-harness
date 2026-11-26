@@ -230,6 +230,46 @@ class TestStream:
         assert [chunk["content"] for chunk in chunks if chunk["type"] == "token"] == ["VISIBLE ANSWER"]
 
     @pytest.mark.asyncio
+    async def test_real_graph_hides_aux_memory_model_call(self) -> None:
+        """Regression: an aux call from a worker thread never becomes a public token."""
+        import asyncio
+
+        from langchain_core.language_models.fake_chat_models import FakeListChatModel
+        from langgraph.graph import START, MessagesState, StateGraph
+
+        from octop_harness.memory.llm_client import HarnessAgentLLMClient
+
+        class _Model(FakeListChatModel):
+            def bind(self, **kwargs: Any) -> _Model:
+                del kwargs
+                return self
+
+        class _Factory:
+            def get_chat_model(self, ref: str, **kwargs: Any) -> Any:
+                del ref, kwargs
+                return model
+
+        model = _Model(responses=['{"matches": []}', "VISIBLE ANSWER"])
+        client = HarnessAgentLLMClient(_Factory(), default_model="fake/model")
+
+        async def node(state: MessagesState) -> dict[str, Any]:
+            del state
+            await asyncio.to_thread(client.call_llm, "compare against USER.md")
+            answer = await model.ainvoke([HumanMessage(content="hi")])
+            return {"messages": [answer]}
+
+        builder = StateGraph(MessagesState)
+        builder.add_node("model", node)
+        builder.add_edge(START, "model")
+        graph = builder.compile()
+
+        protocol = _make_protocol(graph)
+        chunks = [chunk async for chunk in protocol.stream([HumanMessage(content="hi")], {})]
+
+        public_text = "".join(str(chunk["content"]) for chunk in chunks if chunk["type"] == "token")
+        assert public_text == "VISIBLE ANSWER"
+
+    @pytest.mark.asyncio
     async def test_real_deepagents_compaction_only_streams_final_answer(self) -> None:
         """Regression: a real summary call runs, but only the main answer is public."""
         from deepagents import create_deep_agent

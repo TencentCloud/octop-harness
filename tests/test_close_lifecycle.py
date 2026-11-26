@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import gc
 import sqlite3
+import threading
 import warnings
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -73,20 +76,41 @@ class TestParseModelInput:
 
 
 class TestSyncCloseSqliteConnection:
-    @pytest.mark.asyncio
-    async def test_close_after_async_connect_leaves_no_raw_connection(self, tmp_path: Path) -> None:
-        """After the saver opens aiosqlite, sync close must drop the raw handle."""
+    def test_close_while_event_loop_shuts_down(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         import aiosqlite
 
-        db = tmp_path / "cp.sqlite"
-        conn = await aiosqlite.connect(str(db))
-        await conn.execute("select 1")
-        assert getattr(conn, "_connection", None) is not None
+        loop_closed = threading.Event()
+        worker_errors: list[BaseException] = []
+        monkeypatch.setattr(threading, "excepthook", lambda args: worker_errors.append(args.exc_value))
 
-        _sync_close_sqlite_connection(conn)
-        raw = getattr(conn, "_connection", None)
-        assert raw is not None
-        with pytest.raises(sqlite3.ProgrammingError):
+        async def open_and_close() -> tuple[aiosqlite.Connection, sqlite3.Connection]:
+            conn = await aiosqlite.connect(tmp_path / "cp.sqlite", check_same_thread=False)
+            await conn.execute("select 1")
+            raw = conn._connection
+            assert raw is not None
+            loop = asyncio.get_running_loop()
+            call_soon_threadsafe = loop.call_soon_threadsafe
+
+            def deliver_after_loop_closes(*args: Any, **kwargs: Any) -> asyncio.Handle:
+                # A stop callback tied to this loop can arrive after sync close returns.
+                assert loop_closed.wait(timeout=5)
+                return call_soon_threadsafe(*args, **kwargs)
+
+            monkeypatch.setattr(loop, "call_soon_threadsafe", deliver_after_loop_closes)
+            _sync_close_sqlite_connection(conn)
+            return conn, raw
+
+        try:
+            conn, raw = asyncio.run(open_and_close())
+        finally:
+            loop_closed.set()
+
+        worker: threading.Thread = getattr(conn, "_thread", conn)
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert worker_errors == []
+        assert conn._connection is None
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
             raw.execute("select 1")
 
     def test_close_without_connect_is_noop(self, tmp_path: Path) -> None:

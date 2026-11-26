@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.runnables.config import var_child_runnable_config
+from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import ValidationError
 
 from octop_harness.mcp import (
@@ -162,6 +164,35 @@ class TestAloadMcpToolPostprocess:
 
 
 class TestMcpArgsModel:
+    @pytest.mark.parametrize(
+        ("spec", "expected_annotation"),
+        [
+            ({"type": "array", "items": {"type": "string"}}, list[str]),
+            ({"type": "array", "items": {"type": "integer"}}, list[int]),
+            ({"type": "array", "items": {"type": "object"}}, list[dict[str, Any]]),
+            ({"type": "array"}, list[Any]),
+            ({"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "null"}]}}, list[Any]),
+            ({"type": "object"}, dict[str, Any]),
+            ({"type": "string"}, str),
+            ({"type": "integer"}, int),
+            ({"type": "number"}, float),
+            ({"type": "boolean"}, bool),
+        ],
+    )
+    def test_maps_json_schema_types_to_annotations(
+        self,
+        spec: dict[str, Any],
+        expected_annotation: Any,
+    ) -> None:
+        """``array``/``object`` must not be downgraded to ``str``.
+
+        A downgraded ``str`` makes the call unsatisfiable on both sides: the
+        MCP server rejects the downgraded shape, and the Pydantic model
+        rejects the correct one.
+        """
+        model = mcp_args_model("t", {"type": "object", "properties": {"value": spec}, "required": ["value"]})
+        assert model.model_fields["value"].annotation == expected_annotation
+
     def test_preserves_design_inputs(self) -> None:
         schema = {
             "type": "object",
@@ -333,6 +364,83 @@ class TestMcpArgsModel:
         assert "search_key" in schema.model_fields
         assert schema.model_fields["search_key"].is_required()
 
+    @pytest.mark.asyncio
+    async def test_keeps_array_and_object_params_unconverted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A tool taking an array/object keeps its raw JSON Schema.
+
+        Converting such a schema to a Pydantic model loses nested constraints
+        (``items``, ``additionalProperties``, ``$ref``) that the MCP server
+        still validates against. Keeping the raw schema is what lets the
+        model send the declared shape instead of a downgraded ``str``.
+        """
+
+        class _Client:
+            def __init__(self, configs: dict[str, object], **kwargs: object) -> None:
+                del configs, kwargs
+
+            async def get_tools(self) -> list[MagicMock]:
+                tool = MagicMock()
+                tool.name = "docs.create_document"
+                tool.coroutine = None
+                tool.args_schema = {
+                    "type": "object",
+                    "required": ["items"],
+                    "properties": {
+                        "items": {"type": "array", "items": {"type": "string"}},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "filters": {"type": "object", "additionalProperties": True},
+                    },
+                }
+                return [tool]
+
+        monkeypatch.setattr("octop_harness.mcp.MultiServerMCPClient", _Client)
+        tools = await aload_mcp_tools({"docs": {"transport": "http", "url": "http://docs"}})
+        schema = tools[0].args_schema
+        assert isinstance(schema, dict)
+        props = schema["properties"]
+        assert props["items"]["type"] == "array"
+        assert props["items"]["items"] == {"type": "string"}
+        assert props["filters"]["type"] == "object"
+
+    @pytest.mark.asyncio
+    async def test_array_param_reaches_the_mcp_server_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An array argument must arrive at the MCP server as an array.
+
+        Before the fix the argument was downgraded to ``str``, so binding the
+        array raised a validation error before the call ever reached the
+        server — while the server itself expects an array.
+        """
+        captured: dict[str, object] = {}
+
+        async def _run(**arguments: object) -> dict[str, object]:
+            captured["arguments"] = arguments
+            return arguments
+
+        class _Client:
+            def __init__(self, configs: dict[str, object], **kwargs: object) -> None:
+                del configs, kwargs
+
+            async def get_tools(self) -> list[BaseTool]:
+                return [
+                    StructuredTool(
+                        name="docs_create_document",
+                        description="create document",
+                        args_schema={
+                            "type": "object",
+                            "required": ["items"],
+                            "properties": {
+                                "items": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                        coroutine=_run,
+                    )
+                ]
+
+        monkeypatch.setattr("octop_harness.mcp.MultiServerMCPClient", _Client)
+        tools = await aload_mcp_tools({"docs": {"transport": "http", "url": "http://docs"}})
+        await tools[0].ainvoke({"items": ["a", "b"]})
+        assert captured["arguments"] == {"items": ["a", "b"]}
+
 
 class TestMergeMcpServerConfigs:
     def test_agent_overrides_shared(self) -> None:
@@ -487,3 +595,56 @@ class TestMCPToolMiddleware:
 
             mw.wrap_model_call(req, handler)
         assert captured["names"] == ["builtin", "math_add"]
+
+    def test_live_server_names_after_dynamic_append(self, sample_tools: list[MagicMock]) -> None:
+        """Servers mounted after construction (dict mutated in place) stay visible.
+
+        Regression test: the middleware used to snapshot ``frozenset(
+        cfg.mcp_server_configs)`` at construction, so a server attached at
+        runtime via ``append_mcp_tools`` + in-place ``mcp_server_configs[name]``
+        was treated as unknown and its tools were silently dropped every turn.
+        """
+        configs: dict[str, dict[str, Any]] = {"github": {}}
+        mw = MCPToolMiddleware(
+            server_names=configs,
+            mcp_tool_names=frozenset({"github_search", "math_add", "custom_srv_tool"}),
+            default_servers=None,
+        )
+        # Simulate the runtime mount: the caller's dict gains a new entry and
+        # the compiled tool list gains the new server's prefixed tools.
+        configs["custom_srv"] = {}
+        tools = [*sample_tools, _named_tool("custom_srv_tool")]
+        with self._runnable_config({"mcp_servers": ["custom_srv"]}):
+            req = self._request(tools)
+            captured: dict[str, list[str]] = {}
+
+            def handler(r: ModelRequest) -> ModelResponse:
+                captured["names"] = [t.name for t in r.tools]
+                return ModelResponse(result=[])
+
+            mw.wrap_model_call(req, handler)
+        assert captured["names"] == ["builtin", "custom_srv_tool"]
+
+    def test_default_path_with_dict_server_names_strips_mcp(self, sample_tools: list[MagicMock]) -> None:
+        """Default path (no ``mcp_servers``) works with a live dict and no opt-in.
+
+        Guards the scope of ``known``: it must be computed unconditionally in
+        ``_apply_filter`` — the ``filter_tools_for_mcp_servers`` call references
+        it even when ``active is None``, and an in-block definition used to
+        raise ``NameError`` on every turn without an MCP opt-in.
+        """
+        mw = MCPToolMiddleware(
+            server_names={"github": {}, "math": {}},
+            mcp_tool_names=frozenset({"github_search", "math_add"}),
+            default_servers=None,
+        )
+        with self._runnable_config({}):
+            req = self._request(list(sample_tools))
+            captured: dict[str, list[str]] = {}
+
+            def handler(r: ModelRequest) -> ModelResponse:
+                captured["names"] = [t.name for t in r.tools]
+                return ModelResponse(result=[])
+
+            mw.wrap_model_call(req, handler)
+        assert captured["names"] == ["builtin"]

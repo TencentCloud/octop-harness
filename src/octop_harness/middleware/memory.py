@@ -74,9 +74,15 @@ def _review_pending_manual_documents(service: Any) -> None:
 
 
 if TYPE_CHECKING:
+    from typing import TypedDict
+
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
     from langgraph.channels.delta import DeltaChannel
     from octop_memory import MemoryService
+
+    class _RecallContextOptions(TypedDict, total=False):
+        manual_context: dict[str, str]
+
 
 logger = logging.getLogger(__name__)
 
@@ -688,7 +694,9 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 logger.info("memory.recall skip: maintenance %s", self.maintenance_status()["phase"])
             elif query:
                 assert self._service is not None  # gated by caller
-                context_options = {"manual_context": manual_context} if manual_context is not None else {}
+                context_options: _RecallContextOptions = (
+                    {"manual_context": manual_context} if manual_context is not None else {}
+                )
                 result = self._service.recall(
                     query, thread_id=thread_id, session_id=session_id, limit=self._recall_limit, **context_options
                 )

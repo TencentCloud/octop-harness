@@ -1335,6 +1335,39 @@ class TestMcpIntegration:
         middleware_types = [type(m) for m in captured["middleware"]]
         assert MCPToolMiddleware in middleware_types
 
+    def test_first_runtime_server_obeys_turn_selection(
+        self,
+        cfg: HarnessAgentConfig,
+        mock_model_factory: Callable[[], Any],
+        stub_create_deep_agent: Any,
+    ) -> None:
+        from langchain.agents.middleware import ModelRequest
+        from langchain_core.tools import StructuredTool
+
+        from octop_harness.middleware.mcp_tools import MCPToolMiddleware
+
+        def recall(query: str) -> str:
+            """Look up a memory."""
+            return query
+
+        tool = StructuredTool.from_function(recall, name="memory_memory_search")
+        assert not cfg.mcp_server_configs
+        with mock_model_factory(), stub_create_deep_agent as build:
+            agent = HarnessAgent(cfg)
+            try:
+                agent.append_mcp_tools([tool])
+                agent.config.mcp_server_configs["memory"] = {"transport": "http", "url": "http://localhost/mcp/"}
+                middleware = next(m for m in build.call_args.kwargs["middleware"] if isinstance(m, MCPToolMiddleware))
+                for selection, expected in (([], []), (["memory"], [tool])):
+                    runtime = MagicMock()
+                    runtime.context = {"mcp_servers": selection}
+                    request = ModelRequest(model=MagicMock(), messages=[], tools=[tool], runtime=runtime)
+                    handler = MagicMock()
+                    middleware.wrap_model_call(request, handler)
+                    assert handler.call_args.args[0].tools == expected
+            finally:
+                agent.close()
+
     def test_mcp_default_servers_unknown_raises_at_init(
         self,
         tmp_path: Path,
