@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 变更
+
+- 将 `octop-memory` 的最低依赖版本从 `1.0.6` 提升至 `1.0.7`。
+
 ### 修复
 
 - 首次及后续动态挂载的 MCP 服务可在当轮显式选择；未选择的服务工具继续隐藏。
