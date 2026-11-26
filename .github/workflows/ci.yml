@@ -61,18 +61,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
-      - name: Install released dependencies
-        run: make install
-      # The ordinary quality job checks the released dependency contract.
-      # PR #42's additive API is not released yet. Keep this source test
-      # pinned and replace it with a released minimum after memory adoption.
-      - uses: actions/checkout@v7
-        with:
-          repository: TencentCloud/octop-memory
-          ref: be59cd2b969a57d2dbfa5bbd79254626a2899843
-          path: .ci/octop-memory
-      - name: Install companion memory source
-        run: uv pip install --python .venv/bin/python --no-deps -e .ci/octop-memory
+      - name: Install locked release dependencies
+        run: uv sync --locked --group dev
       - name: Verify classified save contract
         run: |
           uv run --no-sync python -c "from inspect import signature; from octop_memory import MemoryService; assert 'kind' in signature(MemoryService.save).parameters"

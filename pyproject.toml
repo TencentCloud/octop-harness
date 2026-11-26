@@ -43,7 +43,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "httpx>=0.27",
     "markdownify>=0.13",
-    "octop-memory>=1.0.6",
+    "octop-memory>=1.0.7",
     "octop-browser>=0.9.9",
     "langchain-mcp-adapters>=0.3.0",
     # mcp 2.x breaks langchain-mcp-adapters (RequestContext import); pin until adapters support it.
