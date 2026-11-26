@@ -201,6 +201,31 @@ class TestResolveAndLifecycle:
         assert downloads[0].content == b"content"
         backend.close()
 
+    def test_upload_files_writes_one_archive(self, tmp_path: Path, mock_docker: Any) -> None:
+        _docker_mod, _client, container = mock_docker
+        backend = resolve_backend({"type": "docker"}, workspace_dir=tmp_path)
+
+        uploads = backend.upload_files([("/docs/one.txt", b"1"), ("/docs/two.txt", b"2")])
+
+        assert [item.error for item in uploads] == [None, None]
+        assert container.put_archive.call_count == 1
+        _target, payload = container.put_archive.call_args.args
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r") as archive:
+            assert archive.getnames() == ["docs", "docs/one.txt", "docs/two.txt"]
+        backend.close()
+
+    def test_upload_files_falls_back_to_one_by_one(self, tmp_path: Path, mock_docker: Any) -> None:
+        _docker_mod, _client, container = mock_docker
+        # The archive is refused; the per-file uploads after it succeed.
+        container.put_archive.side_effect = [False, True, True]
+        backend = resolve_backend({"type": "docker"}, workspace_dir=tmp_path)
+
+        uploads = backend.upload_files([("/a.txt", b"1"), ("/b.txt", b"2")])
+
+        assert [item.error for item in uploads] == [None, None]
+        assert container.put_archive.call_count == 3
+        backend.close()
+
     def test_close_via_octop_harness(self, tmp_path: Path, mock_docker: Any) -> None:
         from octop_harness.agent import HarnessAgent
         from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig

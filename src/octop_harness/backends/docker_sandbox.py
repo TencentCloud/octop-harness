@@ -283,6 +283,10 @@ def _in_container_workspace_root(
     return _normalize_container_path(root.rstrip("/") or _DEFAULT_WORKSPACE_PATH)
 
 
+class _FilesNotInOneArchiveError(Exception):
+    """The files cannot be written as one archive; upload them one by one."""
+
+
 class DockerSandbox(BaseSandbox):
     """Docker sandbox implementing :class:`BaseSandbox`.
 
@@ -608,6 +612,26 @@ class DockerSandbox(BaseSandbox):
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         self._ensure_open()
+        if not files:
+            return []
+        try:
+            self._put_files_in_one_archive(files)
+        except _FilesNotInOneArchiveError:
+            pass
+        except Exception:  # docker SDK error types vary; pylint: disable=broad-except
+            logger.warning(
+                "%d files did not go into the sandbox as one archive; uploading them one by one",
+                len(files),
+                exc_info=True,
+            )
+        else:
+            return [FileUploadResponse(path=path) for path, _data in files]
+        return self._upload_files_one_by_one(files)
+
+    def _upload_files_one_by_one(
+        self,
+        files: list[tuple[str, bytes]],
+    ) -> list[FileUploadResponse]:
         responses: list[FileUploadResponse] = []
         for path, data in files:
             mapped = self._map_path(path)
@@ -624,6 +648,44 @@ class DockerSandbox(BaseSandbox):
                 logger.warning("upload_files failed for %s: %s", path, exc)
                 responses.append(FileUploadResponse(path=path, error="invalid_path"))
         return responses
+
+    def _put_files_in_one_archive(self, files: list[tuple[str, bytes]]) -> None:
+        """Write every file under the workspace root as one tar archive.
+
+        ``put_archive`` creates the parent directories from the archive, so a
+        batch replaces a ``mkdir -p`` exec, a write, and an upload per file
+        with one round trip. Raises :class:`_FilesNotInOneArchiveError` when a path
+        cannot be expressed this way, so the caller falls back.
+        """
+        root = PurePosixPath(self._workspace_root)
+        planned: dict[str, bytes] = {}
+        for path, data in files:
+            container_path = PurePosixPath(self._map_path(path))
+            if container_path == root or root not in container_path.parents:
+                raise _FilesNotInOneArchiveError
+            # A repeated target keeps the last payload, like writing in order.
+            planned[container_path.relative_to(root).as_posix()] = data
+
+        buffer = io.BytesIO()
+        directories: set[str] = set()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            for name, data in planned.items():
+                parts = PurePosixPath(name).parts
+                for depth in range(1, len(parts)):
+                    parent = PurePosixPath(*parts[:depth]).as_posix()
+                    if parent in directories:
+                        continue
+                    directories.add(parent)
+                    info = tarfile.TarInfo(parent)
+                    info.type = tarfile.DIRTYPE
+                    info.mode = 0o755
+                    archive.addfile(info)
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mode = 0o644
+                archive.addfile(info, io.BytesIO(data))
+        if not self._container.put_archive(str(root), buffer.getvalue()):
+            raise OSError(f"put_archive failed for {len(planned)} files")
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         self._ensure_open()
