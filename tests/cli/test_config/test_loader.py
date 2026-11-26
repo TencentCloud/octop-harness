@@ -135,3 +135,18 @@ class TestInjectCredentialsEnvCleanup:
         _inject_credentials(providers, credentials)
 
         assert providers["openai"]["api_key"] == "sk-from-creds-file"
+
+
+def test_load_config_ignores_non_utf8_json(tmp_path: Path, monkeypatch: object) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))  # type: ignore[arg-type]
+
+    global_dir = home / ".octop-harness"
+    global_dir.mkdir(parents=True)
+    (global_dir / "config.json").write_bytes(b"\xff\xfe{\x00}\x00")
+    (global_dir / "credentials.json").write_bytes(b"\xff\xfe{\x00}\x00")
+
+    cfg, cli_cfg = load_config(project_dir=tmp_path)
+
+    assert cfg is None
+    assert cli_cfg.theme == "dark"
