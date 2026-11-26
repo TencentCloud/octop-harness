@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from deepagents.backends.protocol import FileData, FileInfo
 
+from octop_harness.backends.bounded import read_capped
 from octop_harness.backends.cloud_storage_base import CloudStorageBackend
 
 if TYPE_CHECKING:
@@ -100,7 +101,7 @@ class OssBackend(CloudStorageBackend):
     # SDK primitives
     # ------------------------------------------------------------------
 
-    def _get_file_data(self, path: str) -> FileData | None:
+    def _get_file_data(self, path: str, *, max_bytes: int | None = None) -> FileData | None:
         import oss2 as _oss2
 
         key = self._key(path)
@@ -112,7 +113,12 @@ class OssBackend(CloudStorageBackend):
             if exc.status == 404:
                 return None
             raise
-        return self._parse_body(result.read())
+        if max_bytes is None:
+            return self._parse_body(result.read())
+        try:
+            return self._parse_body(read_capped(result, max_bytes))
+        finally:
+            result.close()
 
     def _put_file_data(self, path: str, file_data: FileData) -> None:
         self._bucket.put_object(self._key(path), self._encode_file_data(file_data))

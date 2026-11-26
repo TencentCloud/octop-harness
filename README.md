@@ -542,3 +542,7 @@ that emits `InboundMessage.allowed_tools` and an Octop version that forwards it.
 The Octop release must upgrade both SDKs; older gateways silently lack the field,
 while older harness versions reject the new request parameter. Source integration
 tests are distinct from acceptance with the released, locked dependency set.
+
+### Bounded binary downloads
+
+`BackendWorkspace.download_bytes_capped(path, max_bytes)` and its async counterpart `adownload_bytes_capped` stop local reads at the byte budget plus one. `octop_harness.backends.download_bytes_capped(backend, path, max_bytes)` also supports composite routes and S3/COS/OSS/OBS/PostgreSQL FileData storage. Cloud envelopes are bounded before decoding (up to six times the decoded budget plus 64 KiB of metadata); decoded bytes are checked separately. Overflow raises `DownloadTooLargeError`; unsupported transports raise `NotImplementedError` before downloading. These calls never fall back to an unbounded download.

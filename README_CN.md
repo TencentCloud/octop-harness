@@ -311,3 +311,7 @@ make all              # 格式化 + 类型检查 + 测试
 <a href="https://github.com/TencentCloud/octop-harness/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=TencentCloud/octop-harness" />
 </a>
+
+### 有界二进制下载
+
+`BackendWorkspace.download_bytes_capped(path, max_bytes)` 及异步版本 `adownload_bytes_capped` 在读取过程中限制字节数。`octop_harness.backends.download_bytes_capped` 还支持 composite、S3/COS/OSS/OBS/PostgreSQL；云端 FileData JSON 在解码前按最多六倍预算加 64 KiB 元数据限流，解码后再检查实际文件字节。超限抛出 `DownloadTooLargeError`，未支持的传输在下载前抛出 `NotImplementedError`，不会退回完整下载。

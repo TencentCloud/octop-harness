@@ -148,7 +148,7 @@ class CloudStorageBackend(BackendProtocol, ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def _get_file_data(self, path: str) -> FileData | None:
+    def _get_file_data(self, path: str, *, max_bytes: int | None = None) -> FileData | None:
         """Return ``FileData`` for ``path``, or ``None`` if missing."""
 
     @abstractmethod
