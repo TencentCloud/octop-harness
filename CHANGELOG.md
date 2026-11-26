@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 变更
+
+- Docker 沙箱上传文件改为整批一个归档写入：一次 `put_archive` 取代逐文件的建目录、写入和上传，归档不可用时回退到逐文件写入。
+- 内置技能同步改为一次批量上传整个技能树，Docker 沙箱因此只需一次归档写入。
+
 ## [1.0.13] - 2026-11-26
 
 ### 新增

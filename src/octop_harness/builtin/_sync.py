@@ -148,14 +148,26 @@ def _copy_tree_to_workspace(
     dest_dir: str,
 ) -> None:
     """Recursively write a packaged Traversable tree through *workspace*."""
+    pairs: list[tuple[str, bytes]] = []
+    _collect_tree_bytes(source, dest_dir, pairs)
+    # One upload call: backends that can batch (Docker's put_archive) write the
+    # whole tree in one round trip instead of one per file.
+    workspace.upload_many(pairs)
+
+
+def _collect_tree_bytes(
+    source: Traversable,
+    dest_prefix: str,
+    pairs: list[tuple[str, bytes]],
+) -> None:
     for entry in source.iterdir():
         if entry.name.startswith(("__", ".")):
             continue
-        entry_path = f"{dest_dir}/{entry.name}"
+        entry_path = f"{dest_prefix}/{entry.name}"
         if entry.is_dir():
-            _copy_tree_to_workspace(workspace, entry, entry_path)
+            _collect_tree_bytes(entry, entry_path, pairs)
         else:
-            workspace.write_text(entry_path, entry.read_text(encoding="utf-8"), force=True)
+            pairs.append((entry_path, entry.read_text(encoding="utf-8").encode("utf-8")))
 
 
 def seed_builtin_agents_to_workspace(
