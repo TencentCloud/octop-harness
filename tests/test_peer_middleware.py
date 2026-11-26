@@ -87,6 +87,28 @@ def test_middleware_mounts_peer_tools(tmp_path: Path) -> None:
     assert {tool.name for tool in mw.tools} == {"agent_list", "ask_agent"}
 
 
+def test_user_text_that_looks_like_a_turn_note_still_injects_roster(tmp_path: Path) -> None:
+    from octop_harness.middleware.turn_note import is_turn_note
+
+    mw = PeerAgentMiddleware(_mgr(tmp_path).team, language="en")
+    captured: dict[str, ModelRequest] = {}
+
+    def handler(request: ModelRequest) -> ModelResponse:
+        captured["request"] = request
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    user = "[turn note]\n@data-analyst summarize"
+    runtime = {"configurable": {"agent_id": "main", "user": 7}}
+    with patch("octop_harness.middleware.peer.runtime_config", return_value=runtime):
+        mw.wrap_model_call(_request(user=user), handler)
+
+    applied = captured["request"]
+    assert applied.messages[0].content == user
+    assert not is_turn_note(applied.messages[0])
+    assert is_turn_note(applied.messages[1])
+    assert "data-analyst" in str(applied.messages[1].content)
+
+
 def test_wrap_model_call_skips_without_at_mention(tmp_path: Path) -> None:
     mw = PeerAgentMiddleware(_mgr(tmp_path).team, language="en")
     captured: dict[str, ModelRequest] = {}
@@ -130,9 +152,10 @@ def test_wrap_model_call_injects_roster_and_at_hint(tmp_path: Path) -> None:
     with patch("octop_harness.middleware.peer.runtime_config", return_value=runtime):
         mw.wrap_model_call(_request(), handler)
 
-    prompt = str(captured["request"].system_prompt)
-    assert prompt.startswith("base\n\n")
-    assert prompt.index("base") < prompt.index("data-analyst")
+    applied = captured["request"]
+    assert applied.system_prompt == "base"
+    prompt = str(applied.messages[-1].content)
+    assert prompt.startswith("[turn note]\n")
     assert prompt.strip().splitlines()[-1] == ("Use ask_agent with mode=sync and wait for the peer's answer.")
     assert "charts" in prompt
     assert "Plot a trend" in prompt
@@ -148,14 +171,15 @@ def test_wrap_model_call_zh_mentions_at_usage(tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
     def handler(request: ModelRequest) -> ModelResponse:
-        captured["prompt"] = request.system_prompt
+        captured["request"] = request
         return ModelResponse(result=[AIMessage(content="ok")])
 
     runtime = {"configurable": {"agent_id": "main", "user": "7"}}
     with patch("octop_harness.middleware.peer.runtime_config", return_value=runtime):
         mw.wrap_model_call(_request(), handler)
 
-    prompt = str(captured["prompt"])
+    assert captured["request"].system_prompt == "base"
+    prompt = str(captured["request"].messages[-1].content)
     assert "ask_agent" in prompt
     assert "@" in prompt
     assert "data-analyst" in prompt
@@ -223,10 +247,10 @@ def test_wrap_model_call_appends_without_flattening_blocks(tmp_path: Path) -> No
 
     blocks = captured["request"].system_message.content_blocks
     texts = [str(b.get("text", "")) for b in blocks if isinstance(b, dict)]
-    assert texts[0] == "base"
-    assert "skills block" in texts[1]
-    assert any("data-analyst" in t for t in texts)
-    assert len(texts) >= 3
+    assert texts == ["base", "skills block"]
+    note = str(captured["request"].messages[-1].content)
+    assert note.startswith("[turn note]\n")
+    assert "data-analyst" in note
 
 
 def test_wrap_model_call_uses_enriched_peer_cards(tmp_path: Path) -> None:
@@ -247,7 +271,9 @@ def test_wrap_model_call_uses_enriched_peer_cards(tmp_path: Path) -> None:
     with patch("octop_harness.middleware.peer.runtime_config", return_value=runtime):
         mw.wrap_model_call(_request(), handler)
 
-    prompt = str(captured["request"].system_prompt)
+    assert captured["request"].system_prompt == "base"
+    prompt = str(captured["request"].messages[-1].content)
+    assert prompt.startswith("[turn note]\n")
     assert "Hot card" in prompt
     assert "Plot a trend" not in prompt
 
@@ -347,6 +373,7 @@ def test_middleware_request_team_peers_intersects_roster(tmp_path: Path) -> None
     with patch("octop_harness.middleware.peer.runtime_config", return_value=runtime):
         mw.wrap_model_call(_request(), handler)
 
-    prompt = str(captured["request"].system_prompt)
+    assert captured["request"].system_prompt == "base"
+    prompt = str(captured["request"].messages[-1].content)
     assert "researcher" in prompt
     assert "data-analyst" not in prompt

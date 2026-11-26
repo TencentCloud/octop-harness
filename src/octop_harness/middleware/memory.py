@@ -20,6 +20,7 @@ Fail-soft: any IO / RPC error during write or recall is logged at
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -36,7 +37,14 @@ from typing import TYPE_CHECKING, Any
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from octop_harness.middleware.checkpoint_backup import (
+    checkpoint_backup_policy_from_env,
+    expire_checkpoint_backups,
+    prepare_checkpoint_backup,
+)
 from octop_harness.middleware.memory_recall import (
+    RecallCandidate,
+    extract_recall_candidates,
     has_recall_snapshot,
     replay_recall_snapshots,
     stamp_recall_snapshot,
@@ -67,6 +75,7 @@ def _review_pending_manual_documents(service: Any) -> None:
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from langgraph.channels.delta import DeltaChannel
     from octop_memory import MemoryService
 
 logger = logging.getLogger(__name__)
@@ -114,6 +123,176 @@ def _claim_reclaim_slot(memory: Any, *, window: float) -> bool:
     except TypeError:  # pragma: no cover - exotic Memory without weakref/hash
         return True
     return True
+
+
+_DEFAULT_CHECKPOINT_KEEP_LAST = 20
+_VACUUM_RECOMMEND_BYTES = 32 * 1024 * 1024
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _optional_positive_int(name: str) -> int | None:
+    """Return a positive int, or ``None`` when the variable is unset, 0, or invalid."""
+    if name not in os.environ:
+        return None
+    raw = os.environ.get(name, "").strip()
+    if not raw or raw == "0":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("ignoring invalid %s=%r", name, raw)
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _checkpoint_retention_from_env() -> tuple[int | None, int | None]:
+    """Return ``(keep_last, keep_days)``.
+
+    The idle tick keeps the newest 20 checkpoints unless
+    ``OCTOP_CHECKPOINT_RETENTION=0``. ``OCTOP_CHECKPOINT_KEEP_LAST`` and
+    ``OCTOP_CHECKPOINT_KEEP_DAYS`` override that window. A checkpoint survives
+    when it matches either limit.
+    """
+    if not _env_flag("OCTOP_CHECKPOINT_RETENTION", default=True):
+        return None, None
+    keep_last = _optional_positive_int("OCTOP_CHECKPOINT_KEEP_LAST")
+    keep_days = _optional_positive_int("OCTOP_CHECKPOINT_KEEP_DAYS")
+    if "OCTOP_CHECKPOINT_KEEP_LAST" not in os.environ:
+        keep_last = _DEFAULT_CHECKPOINT_KEEP_LAST
+    return keep_last, keep_days
+
+
+def checkpoint_retention_policy() -> dict[str, Any]:
+    """Public view of the retention window used by idle maintenance."""
+    keep_last, keep_days = _checkpoint_retention_from_env()
+    backup_mode, backup_keep_days = checkpoint_backup_policy_from_env()
+    return {
+        "enabled": keep_last is not None or keep_days is not None,
+        "keep_last": keep_last,
+        "keep_days": keep_days,
+        "backup_before_prune": backup_mode,
+        "backup_keep_days": backup_keep_days,
+        "vacuum": _env_flag("OCTOP_CHECKPOINT_VACUUM", default=False),
+    }
+
+
+def _checkpoint_sqlite_path(memory: Any) -> Path | None:
+    backend = getattr(memory, "backend", None) or getattr(memory, "_backend", None)
+    raw = getattr(backend, "_db_path", None)
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path.resolve() if path.is_file() else None
+
+
+def _reclaimable_checkpoint_bytes(path: Path) -> int:
+    import sqlite3
+
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=30.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+        page = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        free = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+    finally:
+        conn.close()
+    return page * free
+
+
+def _prune_checkpoints_if_configured(memory: Any, *, messages_channel: DeltaChannel[list[Any]] | None = None) -> None:
+    """Keep the configured checkpoint window and snapshot replayed messages when supported."""
+    keep_last, keep_days = _checkpoint_retention_from_env()
+    try:
+        backend = getattr(memory, "backend", None)
+        if backend is not None:
+            try:
+                from octop_memory.storage.backends.postgres import PostgresMemoryBackend
+            except ImportError:
+                pass  # PostgreSQL is an optional octop-memory extra.
+            else:
+                if isinstance(backend, PostgresMemoryBackend):
+                    return
+        path = _checkpoint_sqlite_path(memory)
+        backup_mode, backup_keep_days = checkpoint_backup_policy_from_env()
+        if path is not None:
+            expire_checkpoint_backups(path, backup_keep_days)
+        if keep_last is None and keep_days is None:
+            return
+
+        from octop_memory.pipeline.lifecycle.checkpoint_gc import prune_checkpoints
+
+        options: dict[str, Any] = {"keep_last": keep_last, "keep_days": keep_days, "skip_pending": True}
+        if messages_channel is not None and "messages_channel" in inspect.signature(prune_checkpoints).parameters:
+            options["messages_channel"] = messages_channel
+        preview = prune_checkpoints(memory, **options, dry_run=True)
+        if int(getattr(preview, "checkpoints_deleted", 0) or 0) <= 0:
+            logger.debug(
+                "memory.maintenance prune_checkpoints keep_last=%s keep_days=%s deleted=0",
+                keep_last,
+                keep_days,
+            )
+            return
+        if path is not None and not prepare_checkpoint_backup(path, backup_mode, backup_keep_days):
+            return
+        stats = prune_checkpoints(memory, **options)
+    except Exception:  # maintenance runs off the user path; pylint: disable=broad-except
+        logger.warning("memory.maintenance prune_checkpoints failed", exc_info=True)
+        return
+    deleted = int(getattr(stats, "checkpoints_deleted", 0) or 0)
+    logger.info(
+        "memory.maintenance prune_checkpoints keep_last=%s keep_days=%s deleted=%s writes=%s",
+        keep_last,
+        keep_days,
+        deleted,
+        getattr(stats, "writes_deleted", None),
+    )
+    if deleted > 0 and path is not None:
+        _vacuum_checkpoint_if_needed(path)
+
+
+def _vacuum_checkpoint_if_needed(path: Path) -> None:
+    """Suggest VACUUM after a prune, and run it only when the switch is on."""
+    try:
+        reclaimable = _reclaimable_checkpoint_bytes(path)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("memory.maintenance checkpoint freelist check failed", exc_info=True)
+        return
+    if reclaimable < _VACUUM_RECOMMEND_BYTES:
+        return
+    logger.warning(
+        "checkpoint VACUUM recommended for %s (%d reclaimable bytes). "
+        "Deleting rows does not shrink the file until VACUUM.",
+        path,
+        reclaimable,
+    )
+    if not _env_flag("OCTOP_CHECKPOINT_VACUUM", default=False):
+        return
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(path, timeout=30.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            check = conn.execute("PRAGMA quick_check").fetchone()
+            if check != ("ok",):
+                logger.error(
+                    "skipping checkpoint VACUUM for %s: SQLite integrity check failed (%r)",
+                    path,
+                    check,
+                )
+                return
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        logger.warning("checkpoint VACUUM failed for %s", path, exc_info=True)
 
 
 class _BackgroundExecutor:
@@ -181,6 +360,8 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         maintenance_initial_delay_seconds: Delay before the first cheap
             maintenance tick. Hosts use ~1s so reclaim starts shortly after
             the service is bound.
+        checkpoint_messages_channel: The graph's messages reducer for
+            snapshotting at SQLite checkpoint retention boundaries.
     """
 
     @property
@@ -203,6 +384,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         on_chat_model: Callable[[str], None] | None = None,
         maintenance_interval_seconds: float = 0.0,
         maintenance_initial_delay_seconds: float = 60.0,
+        checkpoint_messages_channel: DeltaChannel[list[Any]] | None = None,
     ) -> None:
         super().__init__()
         if jsonl_max_bytes <= 0:
@@ -225,11 +407,13 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self._on_chat_model = on_chat_model
         self._maintenance_interval_seconds = maintenance_interval_seconds
         self._maintenance_initial_delay_seconds = maintenance_initial_delay_seconds
+        self._checkpoint_messages_channel = checkpoint_messages_channel
         self._lock = threading.Lock()
         self._background_condition = threading.Condition()
         self._background_active = 0
         self._background_paused = False
         self._background_shutdown = False
+        self._background_idle_callbacks: list[Callable[[], None]] = []
         self._manual_review_lock = threading.Lock()
         self._manual_review_running = False
         self._manual_review_again = False
@@ -459,8 +643,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                     promote=promote,
                     regen_pages=regen_pages,
                 )
-                result_dict = result if isinstance(result, dict) else None
-                failure_reason = result_dict.get("failure_reason") if result_dict else None
+                failure_reason = result.get("failure_reason")
                 if failure_reason:
                     logger.info(
                         "MemoryMiddleware.end_session(%s) degraded: %s",
@@ -468,10 +651,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                         failure_reason,
                     )
                 else:
-                    if result_dict is not None:
-                        summary: object = {k: result_dict[k] for k in ("candidates", "promoted") if k in result_dict}
-                    else:
-                        summary = result
+                    summary: object = {k: result[k] for k in ("candidates", "promoted") if k in result}
                     logger.info(
                         "memory.trigger end_session->extract done session=%s result=%s",
                         session_id,
@@ -498,6 +678,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
     ) -> HumanMessage:
         """Freeze success, empty recall, maintenance skip, or failure for this turn."""
         rendered = ""
+        candidates: tuple[RecallCandidate, ...] | None = ()
         try:
             query = _stringify_content(message.content).strip()
             configurable = _get_configurable(runtime)
@@ -512,16 +693,21 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                     query, thread_id=thread_id, session_id=session_id, limit=self._recall_limit, **context_options
                 )
                 rendered = getattr(result, "rendered", None) or ""
+                candidates = extract_recall_candidates(result, rendered=rendered)
                 logger.debug(
-                    "memory.trigger recall_inject thread=%s session=%s limit=%d hit=%s",
+                    "memory.trigger recall_inject thread=%s session=%s query_chars=%d query_sha256=%s limit=%d hit=%s",
                     thread_id,
                     session_id,
+                    len(query),
+                    hashlib.sha256(query.encode("utf-8")).hexdigest()[:16],
                     self._recall_limit,
                     bool(rendered),
                 )
         except Exception:  # recall injection is best-effort; pylint: disable=broad-except
             logger.warning("MemoryMiddleware recall injection failed", exc_info=True)
-        return stamp_recall_snapshot(message, rendered)
+            rendered = ""
+            candidates = ()
+        return stamp_recall_snapshot(message, rendered, candidates=candidates)
 
     # ------------------------------------------------------------------
     # Write-path helpers
@@ -676,8 +862,14 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         if timer is not None:
             timer.cancel()
 
-    def shutdown(self) -> None:
-        """Cancel all background timers. Safe to call multiple times."""
+    def shutdown(self, *, on_idle: Callable[[], None] | None = None) -> None:
+        """Stop timers and reject new work without waiting for accepted workers.
+
+        ``on_idle`` runs once after all accepted work finishes, or immediately
+        if already idle. It runs outside the worker lock, possibly on the last
+        worker's thread, so owners can safely defer releasing shared resources.
+        Safe to call multiple times; each supplied callback runs once.
+        """
         with self._background_condition:
             self._background_shutdown = True
         self._stop_interval_timer()
@@ -687,6 +879,29 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             self._idle_timers.clear()
         for timer in timers:
             timer.cancel()
+        if on_idle is not None:
+            with self._background_condition:
+                if self._background_active:
+                    self._background_idle_callbacks.append(on_idle)
+                    return
+            self._run_idle_callbacks([on_idle])
+
+    @staticmethod
+    def _run_idle_callbacks(callbacks: list[Callable[[], None]]) -> None:
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                logger.warning("MemoryMiddleware shutdown callback failed", exc_info=True)
+
+    def _finish_background(self) -> None:
+        callbacks: list[Callable[[], None]] = []
+        with self._background_condition:
+            self._background_active -= 1
+            if self._background_active == 0:
+                callbacks, self._background_idle_callbacks = self._background_idle_callbacks, []
+            self._background_condition.notify_all()
+        self._run_idle_callbacks(callbacks)
 
     def schedule_manual_review(self) -> None:
         """Ask the background worker to compare one batch of atoms with the owner documents.
@@ -747,17 +962,13 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             try:
                 fn()
             finally:
-                with self._background_condition:
-                    self._background_active -= 1
-                    self._background_condition.notify_all()
+                self._finish_background()
 
         if background:
             try:
                 _bg_pool().submit(run, label=label)
             except Exception:
-                with self._background_condition:
-                    self._background_active -= 1
-                    self._background_condition.notify_all()
+                self._finish_background()
                 raise
             return True
         run()
@@ -808,7 +1019,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             return self._status["phase"] in _IO_BLOCKING_PHASES
 
     # ------------------------------------------------------------------
-    # Idle DB maintenance (GC + nudge; no checkpoint prune, no compact)
+    # Idle DB maintenance (GC + nudge; checkpoint prune only when configured)
     # ------------------------------------------------------------------
 
     def _arm_maintenance(self, *, delay: float) -> None:
@@ -840,7 +1051,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             self._arm_maintenance(delay=self._maintenance_interval_seconds)
 
     def _submit_maintenance(self) -> None:
-        """Run one GC + nudge tick off-thread. Overlapping ticks skip."""
+        """Run one maintenance tick off-thread. Overlapping ticks skip."""
         if self._maintenance_interval_seconds <= 0 or self._service is None:
             return
         service = self._service
@@ -904,7 +1115,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self,
         service: Any,
     ) -> None:
-        """Run one cheap GC + incremental-vacuum tick.
+        """Run checkpoint retention, GC and incremental vacuum.
 
         Full compact/VACUUM is intentionally never scheduled by the agent;
         operators may still invoke octop-memory's explicit compact command.
@@ -914,11 +1125,10 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             return
         try:
             self._kick_manual_review(background=False)
-            # Deliberately NOT ``run_idle_maintenance``: its first step is
-            # ``prune_checkpoints`` and it has no switch to skip that, so the
-            # two reclaim steps are called directly. LangGraph checkpoint rows
-            # are never deleted from here — sealing a delta-omitted parent
-            # before dropping its ancestors could truncate a transcript.
+            # Deliberately NOT ``run_idle_maintenance``: that helper has no
+            # switch for the backup-before-delete step. This tick keeps the
+            # newest 20 checkpoints (override with OCTOP_CHECKPOINT_KEEP_*),
+            # applies the configured SQLite backup policy, then reclaims memory rows.
             from octop_memory.pipeline.lifecycle import nudge_vacuum, run_gc
 
             memory = getattr(service, "memory", None)
@@ -932,6 +1142,8 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             if not _claim_reclaim_slot(memory, window=self._maintenance_interval_seconds / 2):
                 logger.debug("memory.maintenance skip: another agent just reclaimed this store")
                 return
+
+            _prune_checkpoints_if_configured(memory, messages_channel=self._checkpoint_messages_channel)
 
             def _nudge(store: Any) -> Any:
                 return nudge_vacuum(store, pages=_MAINTENANCE_VACUUM_PAGES)

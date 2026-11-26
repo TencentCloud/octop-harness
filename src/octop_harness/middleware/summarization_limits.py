@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 SUMMARY_INPUT_TOKEN_LIMIT = 8000
 SUMMARY_INPUT_RETRY_TOKEN_LIMIT = 4000
+SUMMARY_FALLBACK_KEEP = 20
 SUMMARY_FALLBACK_TEXT = (
     "The earlier conversation was too large to summarize. "
     "Older messages were saved to the history file. "
@@ -28,8 +30,28 @@ SUMMARY_FALLBACK_TEXT = (
 )
 
 
+def summary_fallback_keep() -> int:
+    """How many recent messages to keep when a stored cutoff is past the list.
+
+    ``OCTOP_SUMMARY_FALLBACK_KEEP`` overrides the default of 20. Invalid or
+    non-positive values fall back to that default.
+    """
+    raw = os.environ.get("OCTOP_SUMMARY_FALLBACK_KEEP", "").strip()
+    if not raw:
+        return SUMMARY_FALLBACK_KEEP
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("ignoring invalid OCTOP_SUMMARY_FALLBACK_KEEP=%r", raw)
+        return SUMMARY_FALLBACK_KEEP
+    if value <= 0:
+        return SUMMARY_FALLBACK_KEEP
+    return value
+
+
 def harden_summarization_middleware(mw: Any) -> Any:
     """Cap summary input and degrade only when the summary still overflows."""
+    _install_cutoff_fallback(mw)
     helper = getattr(mw, "_lc_helper", None)
     if helper is not None and getattr(helper, "trim_tokens_to_summarize", None) is None:
         helper.trim_tokens_to_summarize = SUMMARY_INPUT_TOKEN_LIMIT
@@ -57,6 +79,72 @@ def harden_summarization_middleware(mw: Any) -> Any:
     mw._create_summary = _create_summary
     mw._acreate_summary = _acreate_summary
     return mw
+
+
+def _install_cutoff_fallback(mw: Any) -> None:
+    """Keep the summary plus the recent tail when ``cutoff_index`` is past the list.
+
+    deepagents returns only the summary in that case. The stored index drifts
+    after compaction rewrites the message list, and every later turn then sees
+    the same summary. ``cutoff_index == len(messages)`` still means the whole
+    list was summarized and is left unchanged.
+
+    Events written by deepagents 0.7.35+ and ``/compact`` also carry
+    ``cutoff_message_id``. When that message is still in the list, deepagents
+    locates the cutoff by id and returns the exact slice, so the index-based
+    approximation below is skipped.
+    """
+    original = getattr(mw, "_apply_event_to_messages", None)
+    if not callable(original) or getattr(mw, "_octop_cutoff_fallback", False):
+        return
+    mw._octop_cutoff_fallback = True
+
+    def _apply_event_to_messages(messages: Any, event: Any) -> list[Any]:
+        return _apply_with_cutoff_fallback(original, messages, event)
+
+    mw._apply_event_to_messages = _apply_event_to_messages
+
+
+def _apply_with_cutoff_fallback(original: Callable[..., list[Any]], messages: Any, event: Any) -> list[Any]:
+    if not isinstance(event, dict):
+        return original(messages, event)
+    try:
+        summary_msg = event["summary_message"]
+        cutoff_idx = event["cutoff_index"]
+    except (KeyError, TypeError):
+        return original(messages, event)
+    message_list = list(messages)
+    cutoff_id = event.get("cutoff_message_id")
+    if cutoff_id and any(getattr(message, "id", None) == cutoff_id for message in message_list):
+        return original(messages, event)
+    if isinstance(cutoff_idx, int) and not isinstance(cutoff_idx, bool) and cutoff_idx > len(message_list):
+        kept = _recent_messages(message_list, summary_fallback_keep())
+        logger.warning(
+            "Summarization cutoff_index %d exceeds message count %d; keeping summary plus %d recent messages",
+            cutoff_idx,
+            len(message_list),
+            len(kept),
+        )
+        if not kept:
+            return [summary_msg]
+        return [summary_msg, *kept]
+    return original(messages, event)
+
+
+def _recent_messages(messages: list[Any], keep: int) -> list[Any]:
+    """Return the last ``keep`` messages, extended backward to a non-tool turn."""
+    if keep <= 0 or not messages:
+        return []
+    start = max(0, len(messages) - keep)
+    while start > 0 and _is_tool_message(messages[start]):
+        start -= 1
+    return messages[start:]
+
+
+def _is_tool_message(message: Any) -> bool:
+    if getattr(message, "type", None) == "tool":
+        return True
+    return type(message).__name__ == "ToolMessage"
 
 
 def _summary_or_fallback(helper: Any, call: Callable[[Any], str], messages: Any) -> str:
@@ -115,6 +203,67 @@ def _placeholder_after_overflow(exc: Exception) -> str:
 def _use_smaller_window(helper: Any) -> bool:
     current = getattr(helper, "trim_tokens_to_summarize", None)
     return not isinstance(current, int) or current > SUMMARY_INPUT_RETRY_TOKEN_LIMIT
+
+
+def build_configured_summarization_middleware(
+    factory: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    config: Any,
+) -> Any:
+    """Build one summarization middleware and apply host compaction settings."""
+    from octop_harness.middleware.memory_recall import count_tokens_with_recall
+
+    kwargs.setdefault("token_counter", count_tokens_with_recall)
+    trim = getattr(config, "summarization_trim_tokens", None)
+    if isinstance(trim, int) and not isinstance(trim, bool):
+        kwargs["trim_tokens_to_summarize"] = trim
+    else:
+        kwargs.setdefault("trim_tokens_to_summarize", SUMMARY_INPUT_TOKEN_LIMIT)
+    middleware = harden_summarization_middleware(factory(*args, **kwargs))
+    apply_summarization_policy(middleware, config)
+    return middleware
+
+
+def apply_summarization_policy(middleware: Any, config: Any) -> None:
+    """Retune one deepagents summarization middleware from ``HarnessAgentConfig``.
+
+    deepagents' factory ignores caller trigger/keep and bakes in
+    ``compute_summarization_defaults``. Apply the host overrides after that
+    factory returns, including the tool-argument truncation thresholds.
+
+    Disabling clears the auto trigger. The middleware stays in the stack so a
+    stored summary is still applied, and ``/compact`` can reuse this instance.
+    """
+    helper = getattr(middleware, "_lc_helper", None)
+    if helper is None:
+        return
+    if getattr(config, "summarization_enabled", True) is False:
+        _install_trigger(helper, None)
+        if hasattr(middleware, "_truncate_args_trigger"):
+            middleware._truncate_args_trigger = None
+        return
+
+    trigger = getattr(config, "summarization_trigger", None)
+    keep = getattr(config, "summarization_keep", None)
+    if trigger is not None:
+        _install_trigger(helper, trigger)
+        if hasattr(middleware, "_truncate_args_trigger"):
+            middleware._truncate_args_trigger = trigger
+    if keep is not None:
+        helper.keep = helper._validate_context_size(keep, "keep")
+        if hasattr(middleware, "_truncate_args_keep"):
+            middleware._truncate_args_keep = keep
+    trim = getattr(config, "summarization_trim_tokens", None)
+    if isinstance(trim, int) and not isinstance(trim, bool):
+        helper.trim_tokens_to_summarize = trim
+
+
+def _install_trigger(helper: Any, trigger: Any) -> None:
+    copied = helper._copy_trigger(trigger)
+    helper.trigger = copied
+    helper._trigger_clauses = helper._normalize_trigger(copied)
+    helper._trigger_conditions = helper._legacy_trigger_conditions(copied)
 
 
 def _is_context_overflow(exc: Exception) -> bool:

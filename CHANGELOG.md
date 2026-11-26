@@ -7,24 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### 修复
 
-- Pin replies and visible thinking to the configured language, after workspace memory.
+- 首次及后续动态挂载的 MCP 服务可在当轮显式选择；未选择的服务工具继续隐藏。
 
-### Fixed
+## [1.0.12] - 2026-11-26
 
-- Retry memory model calls once without an explicit temperature when the provider rejects it, including auxiliary-model fallbacks, while preserving request options and bounded transport retries (TencentCloud/Octop#835).
-- Cap history sent to the summary model. Use a placeholder only when the smaller window still overflows the context window.
-- Basename globs (`*`, `*.md`, and similar) require an explicit path. A relative path searches the workspace; `/` searches from the backend root.
-- LLM HTTP calls pass an explicit timeout to the provider SDK (OpenAI/Anthropic/Bedrock; OpenAI shape 600s request / 5s connect), including the `session_header` path, so a hung upstream cannot stall a turn forever.
+### 新增
+
+- 新增按回合限制 `allowed_tools` 的能力，并在工具执行入口强制执行。
+- 新增只读记忆召回候选接口，宿主中间件可获取候选元数据。
+- 新增 CubeSandbox 后端及工作区恢复能力，支持远程命令、虚拟文件系统和沙箱复用。
+- 文件系统中间件按回合捕获文件写入前后状态，支持生成变更记录和恢复。
 
 ### 修复
 
-- 修复 `MCPToolMiddleware` 持有 server 名单构造期快照的问题：改为每轮实时读取 `mcp_server_configs`，运行时动态挂载（`append_mcp_tools` 后原地写入 config）的 MCP server 不再被每轮工具过滤清零；默认路径（未选 MCP 的 turn）行为不变。`server_names` 参数放宽为 `Mapping | AbstractSet` 以支持活引用（#93）。
+- 将 `octop-memory` 最低依赖升级到 `1.0.6`。
+- 修复记忆运行时对已移除 LangGraph 消息 reducer 的依赖。
+- SQLite checkpoint 数据库损坏时，中止裁剪与 vacuum，避免继续破坏数据。
+- 修复浏览器导航目标和 profile 名称的路径安全检查。
+- 工具筛选时始终保留 `memory_save`。
+- OBS 客户端改用单个秒级超时，并跳过 agents 目录中缺少 YAML frontmatter 的普通 Markdown。
+- 托管 ACP 智能体初始化时保留 checkpointer，支持继续已有会话。
+
+## [1.0.11] - 2026-11-17
+
+### 新增
+
+- 托管 ACP 回合可以带上本轮的 MCP 服务器、会话模式和附加提示。YOLO 会切到代理公布的免审批模式，并自动放行未被硬拦截的权限请求。代理拒绝这批 MCP 时，会话改为不带这些工具继续。
+
+### 修复
+
+- Memory 支持活动锁时，checkpoint 的执行、恢复和读写会避开宿主裁剪；取消或提前结束也会等图退出再放锁。直接改图（如分叉）可调用 `HarnessAgent.checkpoint_activity(thread_id)`。
+- 最低依赖 octop-memory 1.0.5。定时裁剪跳过 PostgreSQL 共享表；宿主确认线程归属并暂停该线程后，可用离线接口按线程裁剪。SQLite 会把保留边界仍需要的旧消息并入边界 checkpoint，再删掉更早的父链。
+
+## [1.0.10] - 2026-11-15
+
+### 新增
+
+- 每个 agent 可单独配置自动压缩的触发、保留和截断，也可关闭自动触发。`/compact` 和上下文溢出仍可摘要。
+- 配置 `managed_runner` 后，该 agent 把每一轮转发给指定 ACP runner，不再进入模型循环。
+
+### 修复
+
+- OpenAI 兼容流式调用只保留最后一个 chunk 的 usage，避免累计 usage 被重复累加。
+
+## [1.0.9] - 2026-11-10
+
+### 新增
+
+- MiniMax（国内站 / 国际站）供应商预设加入 MiniMax-M3 和 MiniMax-M3.1-Flash，上下文 1M，原生多模态。
+
+### 修复
+
+- `/compact` 写入的摘要事件带上 `cutoff_message_id` 和 `created_at_index`，与 deepagents 自动摘要一致：压缩后保留的消息不再带着已被摘要掉的对话所绑定的 Claude 推理块；截止点优先按消息 id 定位，仅在 id 找不到时才回退为「摘要 + 最新消息」。
+- 已禁用的 skill 不再出现在系统提示词中；请求级 `skills` 过滤（包括 Ask/Plan 模式的 `skills=[]`）也作用于提示词。此前只拦截文件工具访问，模型仍能看到这些 skill。
+- 存储的摘要截止点超出当前消息列表时，回退为「摘要 + 最新消息」，模型不再只看到旧摘要；切片不会从裸工具结果开始。
+- 空闲维护时清理旧的 LangGraph checkpoint，默认保留每个线程最近 20 个及恢复依赖，跳过有待处理工作的线程。保留窗口、裁剪前备份及 VACUUM 仍可配置。
+- `memory_save(content, topic, kind)` 支持 Fact、Preference、Decision、Task；中英文运行时规则引导当前对话模型直接选择类别，不额外调用分类模型。旧调用默认 Fact；连接不支持 kind 的旧 memory 库时，非 Fact 保存明确提示升级，不静默降级。需先合入并安装 memory 对应 API；保存 Task 不创建提醒，历史事实不变。
 
 ### 变更
 
-- `HttpDecisionClient` 在非 strict 模式下，传输或 HTTP 失败重试后抛出 `DecisionRequestError`，不再返回空结果。成功但解析不出概率时仍返回空 map。
+- 要求 `deepagents>=0.7.35`，随之需要 langchain 1.4.9+、langchain-core 1.7.6+、langgraph 1.2.12+。主 agent 的模型拒答仍作为普通回复返回，不中断本轮；子 agent 拒答时，`task` 结果会说明拒答原因，不再是空字符串。系统提示词中 skill 段落的位置有变化，升级后第一轮提示词缓存会失效一次。
+- SQLite checkpoint 裁剪默认只在首次清理前尝试备份，备份保留 7 天。空间不足或备份失败时继续裁剪，标记会阻止重复尝试。`always` 要求每次备份成功后才裁剪，`off` 关闭备份。
+- LangGraph checkpoint 默认在调用退出时保存（`OCTOP_CHECKPOINT_DURABILITY=exit`），减少中间步骤的写入。若进程在一轮进行中被强制终止，该轮尚未落盘的消息、工具结果和执行进度会丢失，已产生的外部工具副作用可能仍在。设 `OCTOP_CHECKPOINT_DURABILITY=async` 可恢复按步骤异步保存，也可设为 `sync` 按步骤同步保存。
+
+## [1.0.8] - 2026-11-05
+
+### 新增
+
+- 文件工具接受工作区相对路径。`base_dir` 从文档所在目录解析路径，`execute` 的 `cwd` 只作用于这一条命令。
+- 新增腾讯云 TokenHub 供应商预设，并在 TokenHub、Token Plan、企业版 Token Plan 和混元 Token Plan 中加入 HY4 模型。
+
+### 修复
+
+- 每轮模式提示、队友名单和决策短名单放在用户消息之后，系统提示和核心工具列表保持可缓存。以 `[turn note]` 或 `[本轮说明]` 开头的用户消息仍视为用户原文。
+- OpenAI 兼容请求去掉内联的 office 和 PDF 文件块，图片保留。
+- 召回追加在用户原文和附件之后，以带来源和角色标记的历史引用隔离旧问题和指令；冻结每轮快照，保留已有 checkpoint 的精确重放和请求公共前缀（TencentCloud/Octop#2043）。
+- 召回 DEBUG 日志附完整查询长度和 SHA-256 指纹，长查询可检索、对账，无需输出查询原文（TencentCloud/Octop#811）。
+- 记忆运行时关闭后，等待已提交的后台采集、提炼和维护任务完成再释放数据库，避免数据库已关闭错误和对话记忆丢失；同时覆盖配置变更前的旧中间件及图构建前的会话提炼（TencentCloud/Octop#484）。
+
+### 变更
+
+- 技能位置提示里 `.octop/skills` 排在最前。同名冲突仍由最后加载的来源覆盖。
+- 未打分的决策轮次保持同一份可缓存系统提示和核心工具列表。打分服务不可达时，完整目录留在本轮说明里。
+
+## [1.0.7] - 2026-11-04
+
+### 修复
+
+- 将 octop-memory 最低依赖提高到 1.0.3，确保后台手动文档审核入口可用，并带入长会话分批提炼、游标持久化及未决审计状态修复。
+- OpenSandbox 可以创建、删除和移动工作区路径。专家启动、技能卸载和工作区重命名不再因为沙箱没有这些操作而失败。
+
+### 变更
+
+- SearchFree 网页搜索的默认 `search_depth` 从 `advanced` 改为更快的 `basic`，仍可显式选择 `advanced`。
+
+## [1.0.6] - 2026-11-01
+
+### 新增
+
+- 回复和可见思考固定使用配置的语言，并排在工作区记忆之后。
+
+### 修复
+
+- 经 `call_deferred_tool` 调用的可用核心工具会直接执行；已禁用的工具仍然不可用。
+- 记忆模型因 temperature 被拒绝时，省略 temperature 再试一次（TencentCloud/Octop#835）。
+- 压缩摘要只发送更短的历史；仍然放不下时才用占位内容。
+- 只有文件名的 glob 必须带路径。
+- LLM HTTP 调用带有显式超时，上游挂起不会一直卡住本轮。
+
+### 变更
+
+- `HttpDecisionClient` 在非 strict 模式下，传输或 HTTP 失败重试后抛出 `DecisionRequestError`，不再返回空结果。
+- `desktop` 与 `all` 的 Pillow 下限改为 `>=13.0.0`，避开 12.3.0 及更早版本的图片解码漏洞。
 
 ## [1.0.5] - 2026-10-24
 

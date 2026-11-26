@@ -16,18 +16,38 @@ import logging
 import os
 import posixpath
 import re
+import shlex
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends.utils import validate_path
-from deepagents.middleware.filesystem import FilesystemPermission
-from langchain.agents.middleware import AgentMiddleware
+from deepagents.middleware.filesystem import (
+    DeleteSchema,
+    EditFileSchema,
+    ExecuteSchema,
+    FilesystemPermission,
+    GlobSchema,
+    GrepSchema,
+    LsSchema,
+    ReadFileSchema,
+    ReadVideoFileSchema,
+    WriteFileSchema,
+)
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import ToolMessage
 from langchain_core.messages.tool import ToolCall
+from langchain_core.tools import BaseTool
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+from pydantic import BaseModel, Field
 from wcmatch import glob as wcglob
+
+from octop_harness.middleware.tool_paths import (
+    path_from_tool_args,
+    tool_base_name,
+    tool_call_meta,
+)
 
 if TYPE_CHECKING:
     from octop_harness.backends.workspace import BackendWorkspace
@@ -42,6 +62,7 @@ _FS_TOOL_OPS: dict[str, Literal["read", "write"]] = {
     "glob": "read",
     "grep": "read",
     "write_file": "write",
+    "append_file": "write",
     "edit_file": "write",
     "delete": "write",
 }
@@ -127,29 +148,147 @@ def _virtual_path_if_under_base(windows_path: str, base: str | Path | None) -> s
     return "/" if not rel or rel == "." else f"/{rel}"
 
 
-def _tool_base_name(name: str) -> str:
-    trimmed = name.strip()
-    slash = trimmed.rfind("/")
-    return trimmed[slash + 1 :] if slash >= 0 else trimmed
-
-
 def _normalized_memory_path(path: str) -> str:
     return posixpath.normpath(path.strip().replace("\\", "/")).casefold()
 
 
-def _path_from_tool_args(tool_name: str, params: dict[str, Any]) -> str | None:
-    base = _tool_base_name(tool_name)
-    if base in {"read_file", "write_file", "edit_file", "delete"}:
-        for key in ("file_path", "path"):
-            raw = params.get(key)
-            if isinstance(raw, str) and raw.strip():
-                return raw.strip()
+def _is_absolute_path(raw: str) -> bool:
+    text = raw.strip()
+    return text.startswith(("/", "~")) or is_windows_absolute_path(text)
+
+
+def _relative_to_base(path: str, base_dir: str) -> str:
+    """Join a caller-selected base directory without changing backend semantics."""
+    return posixpath.normpath(posixpath.join(base_dir.strip().replace("\\", "/"), path.strip().replace("\\", "/")))
+
+
+# Shown to the model only. deepagents still requires an absolute path at execution;
+# ``_resolve_relative_paths`` consumes these fields before that validation.
+_RELATIVE_PATH_DESCRIPTION = (
+    "Path to use. An absolute path is used unchanged. "
+    "A relative path resolves from base_dir when that is set, otherwise from the workspace."
+)
+_OPTIONAL_RELATIVE_PATH_DESCRIPTION = (
+    "Directory to search. An absolute path is used unchanged. "
+    "A relative path resolves from base_dir when that is set, otherwise from the workspace. "
+    "Omit to search the workspace."
+)
+_BASE_DIR_DESCRIPTION = (
+    "Absolute directory for a relative path. "
+    "Pass the containing directory of a file when following a relative reference inside it. "
+    "Omit for an absolute path or a workspace-relative path."
+)
+_CWD_DESCRIPTION = (
+    "Absolute directory for this command only. "
+    "Pass a file's containing directory when the command must run beside that file. "
+    "Omit to run in the workspace. Later commands are unaffected."
+)
+
+
+class _LsCallSchema(LsSchema):
+    path: str = Field(description=_RELATIVE_PATH_DESCRIPTION)
+    base_dir: str | None = Field(default=None, description=_BASE_DIR_DESCRIPTION)
+
+
+class _ReadFileCallSchema(ReadFileSchema):
+    file_path: str = Field(description=_RELATIVE_PATH_DESCRIPTION)
+    base_dir: str | None = Field(default=None, description=_BASE_DIR_DESCRIPTION)
+
+
+class _ReadVideoFileCallSchema(ReadVideoFileSchema):
+    file_path: str = Field(description=_RELATIVE_PATH_DESCRIPTION)
+    base_dir: str | None = Field(default=None, description=_BASE_DIR_DESCRIPTION)
+
+
+class _WriteFileCallSchema(WriteFileSchema):
+    file_path: str = Field(description=_RELATIVE_PATH_DESCRIPTION)
+    base_dir: str | None = Field(default=None, description=_BASE_DIR_DESCRIPTION)
+
+
+class _EditFileCallSchema(EditFileSchema):
+    file_path: str = Field(description=_RELATIVE_PATH_DESCRIPTION)
+    base_dir: str | None = Field(default=None, description=_BASE_DIR_DESCRIPTION)
+
+
+class _DeleteCallSchema(DeleteSchema):
+    file_path: str = Field(description=_RELATIVE_PATH_DESCRIPTION)
+    base_dir: str | None = Field(default=None, description=_BASE_DIR_DESCRIPTION)
+
+
+class _GlobCallSchema(GlobSchema):
+    path: str | None = Field(default=None, description=_OPTIONAL_RELATIVE_PATH_DESCRIPTION)
+    base_dir: str | None = Field(default=None, description=_BASE_DIR_DESCRIPTION)
+
+
+class _GrepCallSchema(GrepSchema):
+    path: str | None = Field(default=None, description=_OPTIONAL_RELATIVE_PATH_DESCRIPTION)
+    base_dir: str | None = Field(default=None, description=_BASE_DIR_DESCRIPTION)
+
+
+class _ExecuteCallSchema(ExecuteSchema):
+    cwd: str | None = Field(default=None, description=_CWD_DESCRIPTION)
+
+
+_CALL_SCHEMAS: dict[str, type[BaseModel]] = {
+    "ls": _LsCallSchema,
+    "read_file": _ReadFileCallSchema,
+    "write_file": _WriteFileCallSchema,
+    "edit_file": _EditFileCallSchema,
+    "delete": _DeleteCallSchema,
+    "glob": _GlobCallSchema,
+    "grep": _GrepCallSchema,
+    "execute": _ExecuteCallSchema,
+}
+_ANNOTATED_SCHEMAS = frozenset(_CALL_SCHEMAS.values()) | {_ReadVideoFileCallSchema}
+
+
+_SOURCE_SCHEMAS: dict[str, type[BaseModel]] = {
+    "ls": LsSchema,
+    "read_file": ReadFileSchema,
+    "write_file": WriteFileSchema,
+    "edit_file": EditFileSchema,
+    "delete": DeleteSchema,
+    "glob": GlobSchema,
+    "grep": GrepSchema,
+    "execute": ExecuteSchema,
+}
+
+
+def _call_schema_for(tool_name: str, schema: Any) -> type[BaseModel] | None:
+    """Schema the model should see for one filesystem or execute tool."""
+    if not isinstance(schema, type) or not issubclass(schema, BaseModel):
         return None
-    if base in {"ls", "glob", "grep"}:
-        raw = params.get("path")
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip()
+    if schema in _ANNOTATED_SCHEMAS:
+        return None
+    base = tool_base_name(tool_name)
+    if base == "read_file" and issubclass(schema, ReadVideoFileSchema):
+        return _ReadVideoFileCallSchema
+    source = _SOURCE_SCHEMAS.get(base)
+    if source is not None and issubclass(schema, source):
+        return _CALL_SCHEMAS[base]
     return None
+
+
+def _with_document_base_schema(tool: Any) -> Any:
+    """Copy a tool so the model can pass a document-relative base.
+
+    The live tool keeps deepagents' schema. Request copies advertise ``base_dir``
+    or ``cwd``; the guard removes those arguments before the tool runs.
+    """
+    if not isinstance(tool, BaseTool):
+        return tool
+    schema = _call_schema_for(str(tool.name or ""), tool.args_schema)
+    if schema is None:
+        return tool
+    return tool.model_copy(update={"args_schema": schema})
+
+
+def _annotate_filesystem_tools(request: ModelRequest) -> ModelRequest:
+    tools = list(request.tools or [])
+    rewritten = [_with_document_base_schema(tool) for tool in tools]
+    if all(updated is original for updated, original in zip(rewritten, tools, strict=True)):
+        return request
+    return request.override(tools=rewritten)
 
 
 def _realpath_if_available(path: str) -> str | None:
@@ -264,7 +403,7 @@ def unbounded_glob_block_reason(
     to the backend.
     """
     pattern = params.get("pattern")
-    if _tool_base_name(tool_name) != "glob" or not isinstance(pattern, str):
+    if tool_base_name(tool_name) != "glob" or not isinstance(pattern, str):
         return None
     normalized = pattern.strip()
     if not _basename_wide_glob(normalized):
@@ -292,11 +431,11 @@ def filesystem_guard_block_reason(
     """
     if not permissions:
         return None
-    base = _tool_base_name(tool_name)
+    base = tool_base_name(tool_name)
     operation = _FS_TOOL_OPS.get(base)
     if operation is None:
         return None
-    raw_path = _path_from_tool_args(tool_name, params)
+    raw_path = path_from_tool_args(tool_name, params)
     if raw_path is None:
         return None
     try:
@@ -331,11 +470,6 @@ def path_outside_root_tool_message(
     )
 
 
-def _tool_call_meta(request: ToolCallRequest) -> tuple[str, str]:
-    tool_call = request.tool_call
-    return str(tool_call.get("name") or ""), str(tool_call.get("id") or "")
-
-
 class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
     """Filesystem tool boundary: user-owned memory, denies and soft failures.
 
@@ -364,12 +498,49 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         self._protect_user_memory = protect_user_memory
         self._rewritten_logged: set[str] = set()
 
+    def _execution_backend(self) -> Any:
+        workspace = self._workspace
+        if workspace is None:
+            return None
+        return getattr(workspace, "backend", None)
+
+    def _uses_virtual_tool_root(self) -> bool:
+        """True when filesystem tools address a rootfs, not the host workspace.
+
+        Docker and OpenSandbox set ``sandbox_fs``. bubblewrap sets
+        ``virtual_tool_root``. Relative paths stay under ``/`` so each backend
+        maps them into its own workspace.
+        """
+        backend = self._execution_backend()
+        if backend is None:
+            return False
+        return bool(getattr(backend, "sandbox_fs", False) or getattr(backend, "virtual_tool_root", False))
+
+    def _relative_root(self) -> str:
+        guest_workspace = getattr(self._execution_backend(), "sandbox_workspace_dir", None)
+        if isinstance(guest_workspace, str):
+            return guest_workspace
+        if self._uses_virtual_tool_root():
+            return "/"
+        return str(self._workspace_dir or ".")
+
+    def _shell_cwd(self, path: str) -> str:
+        """Turn an agent-facing cwd into the path the shell should ``cd`` to."""
+        backend = self._execution_backend()
+        mapper = getattr(backend, "shell_path", None) if backend is not None else None
+        if not callable(mapper):
+            return path
+        mapped = mapper(path)
+        if isinstance(mapped, str) and mapped.strip():
+            return mapped.strip()
+        return path
+
     def _rewrite_legacy_windows_request(self, request: ToolCallRequest) -> ToolCallRequest:
-        tool_name, _ = _tool_call_meta(request)
+        tool_name, _ = tool_call_meta(request)
         raw_args: Any = request.tool_call.get("args") or {}
         path = (
-            _path_from_tool_args(tool_name, raw_args)
-            if _tool_base_name(tool_name) in _FS_TOOL_OPS and isinstance(raw_args, dict)
+            path_from_tool_args(tool_name, raw_args)
+            if tool_base_name(tool_name) in _FS_TOOL_OPS and isinstance(raw_args, dict)
             else None
         )
         rewritten = (
@@ -406,9 +577,99 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         request.tool_call = new_call
         return request
 
+    def _resolve_relative_paths(  # noqa: PLR0911, PLR0912
+        self, request: ToolCallRequest
+    ) -> ToolCallRequest | ToolMessage:
+        """Consume harness-only ``base_dir`` / ``cwd`` before upstream validation.
+
+        Relative paths otherwise have deepagents' existing backend-root
+        semantics.  This opt-in layer provides an unambiguous document-relative
+        alternative without mutable session cwd state.
+        """
+        tool_name, call_id = tool_call_meta(request)
+        base = tool_base_name(tool_name)
+        raw_args: Any = request.tool_call.get("args") or {}
+        if not isinstance(raw_args, dict):
+            return request
+        args = dict(raw_args)
+        changed = False
+
+        if base == "execute":
+            cwd = args.pop("cwd", None)
+            if cwd is None:
+                return request
+            if not isinstance(cwd, str) or not cwd.strip():
+                return ToolMessage(
+                    content="Error: execute cwd must be a non-empty path.",
+                    name=tool_name or "execute",
+                    tool_call_id=call_id,
+                    status="error",
+                )
+            resolved_cwd = cwd.strip()
+            if not _is_absolute_path(resolved_cwd):
+                resolved_cwd = _relative_to_base(resolved_cwd, self._relative_root())
+            resolved_cwd = self._shell_cwd(resolved_cwd)
+            command = args.get("command")
+            if not isinstance(command, str):
+                return ToolMessage(
+                    content="Error: execute command must be a string.",
+                    name=tool_name or "execute",
+                    tool_call_id=call_id,
+                    status="error",
+                )
+            args["command"] = f"cd -- {shlex.quote(resolved_cwd)} && {command}"
+            changed = True
+        elif base in _FS_TOOL_OPS:
+            base_dir = args.pop("base_dir", None)
+            if base_dir is not None and (not isinstance(base_dir, str) or not base_dir.strip()):
+                return ToolMessage(
+                    content="Error: base_dir must be a non-empty path.",
+                    name=tool_name or "tool",
+                    tool_call_id=call_id,
+                    status="error",
+                )
+            key = next(
+                (name for name in ("file_path", "path") if isinstance(args.get(name), str) and str(args[name]).strip()),
+                None,
+            )
+            # An omitted glob/grep root used to search the backend root. The
+            # workspace is the stable default for ordinary project searches.
+            if (
+                key is None
+                and base in {"glob", "grep"}
+                and (self._workspace_dir is not None or self._uses_virtual_tool_root())
+            ):
+                key = "path"
+                args[key] = self._relative_root()
+                changed = True
+            if key is not None:
+                path = str(args[key]).strip()
+                if not _is_absolute_path(path):
+                    root = str(base_dir).strip() if isinstance(base_dir, str) else self._relative_root()
+                    args[key] = _relative_to_base(path, root)
+                    changed = True
+            changed = changed or base_dir is not None
+
+        if not changed:
+            return request
+        new_call: ToolCall = {
+            "name": tool_name,
+            "args": args,
+            "id": request.tool_call.get("id"),
+        }
+        if request.tool_call.get("type") == "tool_call":
+            new_call["type"] = "tool_call"
+        override = getattr(request, "override", None)
+        if callable(override):
+            updated = override(tool_call=new_call)
+            if isinstance(updated, ToolCallRequest):
+                return updated
+        request.tool_call = new_call
+        return request
+
     def _memory_write_block_reason(self, tool_name: str, params: dict[str, Any]) -> str | None:
         workspace = self._workspace
-        if workspace is None or _tool_base_name(tool_name) not in _MEMORY_WRITE_TOOLS:
+        if workspace is None or tool_base_name(tool_name) not in _MEMORY_WRITE_TOOLS:
             return None
         protected: dict[str, str] = {}
         for filename in ("MEMORY.md", "USER.md"):
@@ -426,7 +687,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
                 except (OSError, ValueError, PermissionError):
                     continue
             if matched_filename is not None:
-                if not self._protect_user_memory and _tool_base_name(tool_name) in _MEMORY_CONTENT_TOOLS:
+                if not self._protect_user_memory and tool_base_name(tool_name) in _MEMORY_CONTENT_TOOLS:
                     return None
                 if not self._protect_user_memory:
                     return _MEMORY_KEEP_PATH_MESSAGE.format(filename=matched_filename)
@@ -434,7 +695,7 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         return None
 
     def _blocked_message(self, request: ToolCallRequest) -> ToolMessage | None:
-        tool_name, call_id = _tool_call_meta(request)
+        tool_name, call_id = tool_call_meta(request)
         raw_args: Any = request.tool_call.get("args") or {}
         params: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
         reason = (
@@ -463,8 +724,8 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
     ) -> ToolMessage | None:
         if not is_path_outside_root_error(exc):
             return None
-        tool_name, call_id = _tool_call_meta(request)
-        if _tool_base_name(tool_name) not in _FS_TOOL_OPS:
+        tool_name, call_id = tool_call_meta(request)
+        if tool_base_name(tool_name) not in _FS_TOOL_OPS:
             return None
         logger.info("FilesystemGuard softened outside-root %s: %s", tool_name, exc)
         return path_outside_root_tool_message(
@@ -473,12 +734,29 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
             exc=exc,
         )
 
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return handler(_annotate_filesystem_tools(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        return await handler(_annotate_filesystem_tools(request))
+
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        request = self._rewrite_legacy_windows_request(request)
+        resolved = self._resolve_relative_paths(request)
+        if isinstance(resolved, ToolMessage):
+            return resolved
+        request = self._rewrite_legacy_windows_request(resolved)
         blocked = self._blocked_message(request)
         if blocked is not None:
             return blocked
@@ -495,7 +773,10 @@ class FilesystemGuardMiddleware(AgentMiddleware[Any, Any]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
     ) -> ToolMessage | Command[Any]:
-        request = self._rewrite_legacy_windows_request(request)
+        resolved = self._resolve_relative_paths(request)
+        if isinstance(resolved, ToolMessage):
+            return resolved
+        request = self._rewrite_legacy_windows_request(resolved)
         blocked = self._blocked_message(request)
         if blocked is not None:
             return blocked

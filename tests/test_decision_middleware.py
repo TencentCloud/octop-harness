@@ -9,14 +9,19 @@ from unittest.mock import MagicMock
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langgraph.config import var_child_runnable_config
 from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.types import Command
 
+from octop_harness.config import HarnessAgentConfig
 from octop_harness.decision import decision_active, parse_probabilities
 from octop_harness.decision.client import _ATTEMPTS, DecisionRequestError, HttpDecisionClient, _timeout_for
 from octop_harness.decision.config import DecisionConfig
 from octop_harness.decision.select import Candidate, keep_confident, lexical_shortlist
-from octop_harness.middleware.decision import DecisionMiddleware
+from octop_harness.middleware.decision import DecisionMiddleware, decision_dispatch_snapshot
+from octop_harness.middleware.tool_search import ToolSearchMiddleware
+from octop_harness.middleware.tools_filter import ToolsFilterMiddleware
 
 
 class _Scorer:
@@ -75,10 +80,12 @@ def _tool(name: str, description: str = "") -> MagicMock:
 
 
 def _note(request: ModelRequest) -> str:
-    if not request.messages:
-        return ""
-    content = request.messages[-1].content
-    return content if isinstance(content, str) else str(content)
+    for msg in reversed(request.messages or []):
+        content = msg.content
+        text = content if isinstance(content, str) else str(content)
+        if text.lstrip().startswith(("[本轮说明]", "[turn note]")):
+            return text
+    return ""
 
 
 def _config(**overrides: Any) -> DecisionConfig:
@@ -303,6 +310,26 @@ def test_low_tool_scores_keep_capability_tools() -> None:
         "call_deferred_tool",
     ]
     assert scorer.calls == 1
+
+
+def test_low_tool_scores_keep_memory_save() -> None:
+    tools = [
+        _tool("read_file", "读取文件"),
+        _tool("memory_search", "搜索记忆"),
+        _tool("memory_get", "读取记忆"),
+        _tool("memory_save", "保存记忆, 用户说记住时写入"),
+    ]
+    tools.extend(_tool(f"misc_{i}", "unrelated") for i in range(8))
+    scorer = _Scorer({"tool:memory_save": 0.1, **{f"tool:misc_{i}": 0.1 for i in range(8)}})
+    mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
+    out = mw.wrap_model_call(_request(tools=tools, text="记住这个偏好: 我喜欢咖啡"), lambda item: item)
+    assert [tool.name for tool in out.tools] == [
+        "read_file",
+        "memory_search",
+        "memory_get",
+        "memory_save",
+        "call_deferred_tool",
+    ]
 
 
 def test_unscored_tools_stay_in_the_catalog() -> None:
@@ -1062,6 +1089,107 @@ def test_turn_selection_does_not_change_the_cached_prefix() -> None:
     assert scorer.calls == 2
 
 
+def test_unscored_turn_keeps_the_same_cached_prefix() -> None:
+    rows = [{"name": f"skill-{index}", "description": "zzz"} for index in range(16)]
+    rows.append({"name": "pdf", "description": "读取 pdf"})
+    bullets = "\n".join(f"- **{row['name']}**: {row['description']}" for row in rows)
+    prompt = f"**Available Skills:**\n\n{bullets}\n\n**How to Use Skills (Progressive Disclosure):**\ntail\n"
+    tools = [_tool("read_file", "读取文件")]
+    tools.extend(_tool(f"misc-{index}", "zzz") for index in range(16))
+    tools.append(_tool("read_pdf", "读取 pdf"))
+    scorer = _Scorer({"skill:pdf": 0.95, "tool:read_pdf": 0.95})
+    mw = DecisionMiddleware(config=_config(team=False, tool_min_count=2), scorer=scorer)
+
+    def make(text: str) -> ModelRequest:
+        return ModelRequest(
+            model=MagicMock(),
+            messages=[HumanMessage(content=text)],
+            system_message=SystemMessage(content=prompt),
+            tool_choice=None,
+            tools=list(tools),
+            response_format=None,
+            state={"skills_metadata": [dict(row) for row in rows]},
+            runtime=MagicMock(),
+            model_settings={},
+        )
+
+    missed = mw.wrap_model_call(make("你好"), lambda item: item)
+    matched = mw.wrap_model_call(make("读 pdf"), lambda item: item)
+    assert missed.system_message.content == matched.system_message.content
+    assert "tail" in missed.system_message.content
+    assert "- **pdf**:" not in missed.system_message.content
+    assert (
+        [tool.name for tool in missed.tools]
+        == [tool.name for tool in matched.tools]
+        == [
+            "read_file",
+            "call_deferred_tool",
+        ]
+    )
+    assert _note(missed) == ""
+    assert "skill-0" not in _note(matched) and "misc-0" not in _note(matched)
+    assert "pdf" in _note(matched) and "read_pdf" in _note(matched)
+    assert scorer.calls == 1
+
+
+def test_turn_notes_merge_into_one_message() -> None:
+    from octop_harness.middleware.turn_note import insert_turn_note, is_turn_note
+
+    user = HumanMessage(content="[turn note]\nhi")
+    assert not is_turn_note(user)
+    once = insert_turn_note([user, AIMessage(content="先看一下")], "[turn note]\nroster")
+    twice = insert_turn_note(once, "[本轮说明]\n技能:\npdf")
+    notes = [msg for msg in twice if is_turn_note(msg)]
+    assert len(notes) == 1
+    assert notes[0] is not user
+    assert notes[0].content.startswith("[turn note]")
+    assert "roster" in notes[0].content and "pdf" in notes[0].content
+    assert user.content == "[turn note]\nhi"
+    assert isinstance(twice[2], AIMessage)
+
+
+def test_user_message_prefixed_like_a_turn_note_is_still_scored() -> None:
+    from octop_harness.middleware.turn_note import is_turn_note
+
+    tools = [_tool("read_file", "读取文件"), *(_tool(f"misc_{index}", "unrelated") for index in range(8))]
+    tools.append(_tool("read_pdf", "读取 pdf"))
+    scorer = _Scorer({"tool:read_pdf": 0.95})
+    mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
+    user = HumanMessage(content="[turn note]\n读取 pdf")
+    out = mw.wrap_model_call(_request(tools=tools, messages=[user]), lambda item: item)
+    assert out.messages[0] is user
+    assert not is_turn_note(out.messages[0])
+    assert is_turn_note(out.messages[1])
+    assert "read_pdf" in str(out.messages[1].content)
+    assert scorer.calls == 1
+
+
+def test_turn_note_stays_after_the_user_message() -> None:
+    tools = [_tool("read_file", "读取文件"), *(_tool(f"misc_{index}", "unrelated") for index in range(8))]
+    tools.append(_tool("read_pdf", "读取 pdf"))
+    scorer = _Scorer({"tool:read_pdf": 0.95})
+    mw = DecisionMiddleware(config=_config(skills=False, team=False, tool_min_count=2), scorer=scorer)
+    user = HumanMessage(content="读取 pdf")
+    first = mw.wrap_model_call(_request(tools=tools, messages=[user]), lambda item: item)
+    second = mw.wrap_model_call(
+        _request(
+            tools=tools,
+            messages=[
+                user,
+                AIMessage(content="先看一下"),
+                ToolMessage(content="ok", tool_call_id="c1"),
+            ],
+        ),
+        lambda item: item,
+    )
+    assert first.messages[0].content == "读取 pdf"
+    assert first.messages[1].content == second.messages[1].content
+    assert "read_pdf" in second.messages[1].content
+    assert isinstance(second.messages[2], AIMessage)
+    assert isinstance(second.messages[3], ToolMessage)
+    assert scorer.calls == 1
+
+
 def test_deferred_tool_call_forwards_to_the_selected_tool() -> None:
     tools = [_tool(f"misc_{index}", "unrelated") for index in range(8)]
     real = _tool("read_pdf", "读取 pdf")
@@ -1111,3 +1239,305 @@ def test_deferred_tool_call_forwards_to_the_selected_tool() -> None:
     )
     assert isinstance(missing, ToolMessage)
     assert missing.status == "error"
+    assert missing.content == "没有名为 misc_0 的本轮工具。"
+
+
+def test_turn_note_points_at_the_scanned_skill_path_and_direct_file_tools() -> None:
+    prompt = (
+        "**Available Skills:**\n"
+        "\n"
+        "- **daily-hot-news**: 抓取热搜\n"
+        "  -> Read `/.octop/workspaces/C10WX7/skills/daily-hot-news/SKILL.md` for full instructions\n"
+        "\n"
+        "**How to Use Skills (Progressive Disclosure):**\n"
+    )
+    scanned = "/.octop/workspaces/C10WX7/.octop/skills/daily-hot-news/SKILL.md"
+    state = {
+        "skills_metadata": [
+            {"name": "daily-hot-news", "description": "抓取热搜", "path": scanned},
+            {"name": "xlsx", "description": "表格", "path": "/.octop/workspaces/C10WX7/.octop/skills/xlsx/SKILL.md"},
+        ]
+    }
+    tools = [_tool("read_file", "读取文件"), *(_tool(f"misc_{index}", "unrelated") for index in range(8))]
+    mw = DecisionMiddleware(
+        config=_config(team=False, tool_min_count=2),
+        scorer=_Scorer({"skill:daily-hot-news": 0.98, "skill:xlsx": 0.1, "tool:misc_0": 0.95}),
+    )
+    request = ModelRequest(
+        model=MagicMock(),
+        messages=[HumanMessage(content="看热搜")],
+        system_message=SystemMessage(content=prompt),
+        tool_choice=None,
+        tools=tools,
+        response_format=None,
+        state=state,
+        runtime=MagicMock(),
+        model_settings={},
+    )
+    out = mw.wrap_model_call(request, lambda item: item)
+    note = _note(out)
+    assert f"直接调用 read_file 读取 `{scanned}`" in note
+    assert "/.octop/workspaces/C10WX7/skills/daily-hot-news/SKILL.md" not in note
+    assert "xlsx" not in note
+    assert "下面列出的才用 call_deferred_tool" in note
+    assert "函数列表里已有的工具" in note
+    assert "misc_0" in note
+    assert [tool.name for tool in out.tools if tool.name == "read_file"] == ["read_file"]
+
+
+def test_misrouted_core_tool_runs_instead_of_reporting_it_missing() -> None:
+    reader = _tool("read_file", "读取文件")
+    clock = _tool("current_time", "当前时间")
+    tools: list[Any] = [reader, clock]
+    tools.extend(_tool(f"misc_{index}", "unrelated") for index in range(6))
+    tools.append(_tool("cronjob_list", "列出定时任务"))
+    mw = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({"tool:cronjob_list": 0.95, **{f"tool:misc_{index}": 0.1 for index in range(6)}}),
+    )
+    narrowed = mw.wrap_model_call(_request(tools=tools, text="今日热点早报"), lambda item: item)
+    assert [tool.name for tool in narrowed.tools] == ["read_file", "current_time", "call_deferred_tool"]
+    note = _note(narrowed)
+    assert "cronjob_list" in note
+    assert "read_file" not in note.split("请直接按原名调用。", 1)[-1]
+    assert "函数列表里已有的工具" in note
+    seen: dict[str, Any] = {}
+
+    def handler(item: ToolCallRequest) -> ToolMessage:
+        seen["name"] = item.tool_call["name"]
+        seen["args"] = item.tool_call["args"]
+        seen["tool"] = item.tool
+        return ToolMessage(content="file", name=str(item.tool_call["name"]), tool_call_id=str(item.tool_call["id"]))
+
+    before = decision_dispatch_snapshot()
+    out = mw.wrap_tool_call(
+        ToolCallRequest(
+            tool_call={
+                "name": "call_deferred_tool",
+                "args": {"name": "read_file", "arguments": {"file_path": "SKILL.md"}},
+                "id": "c1",
+            },
+            tool=None,  # type: ignore[arg-type]
+            state={},  # type: ignore[arg-type]
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        handler,
+    )
+    assert seen == {"name": "read_file", "args": {"file_path": "SKILL.md"}, "tool": reader}
+    assert isinstance(out, ToolMessage)
+    assert out.name == "call_deferred_tool"
+    assert out.tool_call_id == "c1"
+    assert out.content == "file"
+    assert out.status != "error"
+    assert out.additional_kwargs["octop_forwarded_tool"] == "read_file"
+    forwarded = decision_dispatch_snapshot()
+    assert forwarded.core_forwards.get("read_file", 0) == before.core_forwards.get("read_file", 0) + 1
+
+    clock_out = mw.wrap_tool_call(
+        ToolCallRequest(
+            tool_call={"name": "call_deferred_tool", "args": {"name": "current_time"}, "id": "c2"},
+            tool=None,  # type: ignore[arg-type]
+            state={},  # type: ignore[arg-type]
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        handler,
+    )
+    assert seen["name"] == "current_time"
+    assert seen["tool"] is clock
+    assert isinstance(clock_out, ToolMessage)
+    assert clock_out.content == "file"
+    assert clock_out.status != "error"
+    assert clock_out.additional_kwargs["octop_forwarded_tool"] == "current_time"
+
+    dropped = mw.wrap_tool_call(
+        ToolCallRequest(
+            tool_call={"name": "call_deferred_tool", "args": {"name": "misc_0", "arguments": {}}, "id": "c3"},
+            tool=None,  # type: ignore[arg-type]
+            state={},  # type: ignore[arg-type]
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        handler,
+    )
+    assert isinstance(dropped, ToolMessage)
+    assert dropped.status == "error"
+    assert dropped.content == "没有名为 misc_0 的本轮工具。"
+
+
+def test_unknown_deferred_name_does_not_invent_a_direct_tool() -> None:
+    mw = DecisionMiddleware(config=_config(skills=False, tools=False, team=False), scorer=_Scorer({}))
+    before = decision_dispatch_snapshot()
+    missing = mw.wrap_tool_call(
+        ToolCallRequest(
+            tool_call={"name": "call_deferred_tool", "args": {"name": "read_file", "arguments": {}}, "id": "c1"},
+            tool=None,  # type: ignore[arg-type]
+            state={},  # type: ignore[arg-type]
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        lambda _request: ToolMessage(content="unused", tool_call_id="c1"),
+    )
+    assert isinstance(missing, ToolMessage)
+    assert missing.status == "error"
+    assert missing.content == "没有名为 read_file 的本轮工具。"
+    assert decision_dispatch_snapshot().unknown == before.unknown + 1
+
+    english = DecisionMiddleware(
+        config=_config(skills=False, tools=False, team=False),
+        language="en",
+        scorer=_Scorer({}),
+    )
+    english_missing = english.wrap_tool_call(
+        ToolCallRequest(
+            tool_call={"name": "call_deferred_tool", "args": {"name": "web_fetch"}, "id": "c2"},
+            tool=None,  # type: ignore[arg-type]
+            state={},  # type: ignore[arg-type]
+            runtime=None,  # type: ignore[arg-type]
+        ),
+        lambda _request: ToolMessage(content="unused", tool_call_id="c2"),
+    )
+    assert isinstance(english_missing, ToolMessage)
+    assert english_missing.content == "No turn tool named web_fetch."
+
+
+def _structured_tool(name: str, description: str = "") -> StructuredTool:
+    def run() -> str:
+        return name
+
+    return StructuredTool.from_function(run, name=name, description=description or name)
+
+
+def _deferred_request(name: str, arguments: dict[str, Any] | None = None, *, call_id: str) -> ToolCallRequest:
+    args: dict[str, Any] = {"name": name}
+    if arguments is not None:
+        args["arguments"] = arguments
+    return ToolCallRequest(
+        tool_call={"name": "call_deferred_tool", "args": args, "id": call_id},
+        tool=None,  # type: ignore[arg-type]
+        state={},  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+    )
+
+
+def test_disabled_core_tool_is_not_offered_through_the_dispatcher() -> None:
+    tools: list[Any] = [_structured_tool("read_file", "读取文件"), _structured_tool("current_time", "当前时间")]
+    tools.extend(_structured_tool(f"misc_{index}", "unrelated") for index in range(6))
+    tools.append(_structured_tool("cronjob_list", "列出定时任务"))
+    gate = ToolsFilterMiddleware(config=HarnessAgentConfig(tools_disabled=frozenset({"read_file"})))
+    decision = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({"tool:cronjob_list": 0.95, **{f"tool:misc_{index}": 0.1 for index in range(6)}}),
+    )
+
+    def through_decision(filtered: ModelRequest) -> ModelRequest:
+        return decision.wrap_model_call(filtered, lambda item: item)
+
+    narrowed = gate.wrap_model_call(_request(tools=tools, text="今日热点早报"), through_decision)
+    assert [tool.name for tool in narrowed.tools] == ["current_time", "call_deferred_tool"]
+    before = decision_dispatch_snapshot()
+    missing = decision.wrap_tool_call(
+        _deferred_request("read_file", {}, call_id="c1"),
+        lambda _item: ToolMessage(content="unused", tool_call_id="c1"),
+    )
+    assert isinstance(missing, ToolMessage)
+    assert missing.status == "error"
+    assert missing.content == "没有名为 read_file 的本轮工具。"
+    assert decision_dispatch_snapshot().unknown == before.unknown + 1
+    assert decision_dispatch_snapshot().core_forwards.get("read_file", 0) == before.core_forwards.get("read_file", 0)
+
+
+async def test_async_misrouted_core_tool_runs() -> None:
+    reader = _tool("read_file", "读取文件")
+    tools: list[Any] = [reader, *(_tool(f"misc_{index}", "unrelated") for index in range(6)), _tool("cronjob_list")]
+    mw = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({"tool:cronjob_list": 0.95, **{f"tool:misc_{index}": 0.1 for index in range(6)}}),
+    )
+    await mw.awrap_model_call(_request(tools=tools, text="今日热点早报"), _async_echo)
+    before = decision_dispatch_snapshot()
+
+    async def handler(item: ToolCallRequest) -> ToolMessage:
+        assert item.tool is reader
+        return ToolMessage(content="file", name=str(item.tool_call["name"]), tool_call_id=str(item.tool_call["id"]))
+
+    out = await mw.awrap_tool_call(_deferred_request("read_file", {"file_path": "SKILL.md"}, call_id="c1"), handler)
+    assert isinstance(out, ToolMessage)
+    assert out.content == "file"
+    assert out.name == "call_deferred_tool"
+    assert out.additional_kwargs["octop_forwarded_tool"] == "read_file"
+    assert (
+        decision_dispatch_snapshot().core_forwards.get("read_file", 0) == before.core_forwards.get("read_file", 0) + 1
+    )
+
+
+async def _async_echo(request: ModelRequest) -> ModelResponse:
+    return ModelResponse(result=[AIMessage(content=str(len(request.tools or [])))])
+
+
+def test_tool_search_still_guards_a_deferred_core_tool() -> None:
+    reader = _structured_tool("read_file", "读取文件")
+    tools: list[Any] = [reader, *(_structured_tool(f"misc_{index}", "unrelated") for index in range(6))]
+    tools.append(_structured_tool("cronjob_list", "列出定时任务"))
+    decision = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({"tool:cronjob_list": 0.95, **{f"tool:misc_{index}": 0.1 for index in range(6)}}),
+    )
+    search = ToolSearchMiddleware(deferred_tools=frozenset({"read_file"}))
+    seen: list[str] = []
+
+    def tool_node(item: ToolCallRequest) -> ToolMessage:
+        seen.append(str(item.tool_call["name"]))
+        return ToolMessage(content="ran", name=str(item.tool_call["name"]), tool_call_id=str(item.tool_call["id"]))
+
+    def through_search(item: ToolCallRequest) -> ToolMessage | Command[Any]:
+        return search.wrap_tool_call(item, tool_node)
+
+    runtime = type("Runtime", (), {"config": {"configurable": {"thread_id": "room"}}})()
+    with _configurable(run_id="run-1", thread_id="room"):
+        narrowed = decision.wrap_model_call(_request(tools=tools, text="今日热点早报"), lambda item: item)
+        visible: list[Any] = []
+
+        def capture(item: ModelRequest) -> ModelRequest:
+            visible.extend(item.tools or [])
+            return item
+
+        search.wrap_model_call(narrowed, capture)
+        blocked = decision.wrap_tool_call(
+            ToolCallRequest(
+                tool_call={
+                    "name": "call_deferred_tool",
+                    "args": {"name": "read_file", "arguments": {}},
+                    "id": "c1",
+                },
+                tool=None,  # type: ignore[arg-type]
+                state={},  # type: ignore[arg-type]
+                runtime=runtime,  # type: ignore[arg-type]
+            ),
+            through_search,
+        )
+        loaded = decision.wrap_tool_call(
+            ToolCallRequest(
+                tool_call={
+                    "name": "call_deferred_tool",
+                    "args": {"name": "read_file", "arguments": {}},
+                    "id": "c2",
+                },
+                tool=None,  # type: ignore[arg-type]
+                state={"loaded_tool_names": ["read_file"]},  # type: ignore[arg-type]
+                runtime=runtime,  # type: ignore[arg-type]
+            ),
+            through_search,
+        )
+
+    assert any(
+        getattr(tool, "name", "") == "read_file" and "Deferred reference" in tool.description for tool in visible
+    )
+    assert seen == ["read_file"]
+    assert isinstance(blocked, Command)
+    blocked_message = blocked.update["messages"][0]
+    assert isinstance(blocked_message, ToolMessage)
+    assert blocked_message.name == "call_deferred_tool"
+    assert blocked_message.additional_kwargs["octop_forwarded_tool"] == "read_file"
+    assert "tool_schema_not_loaded" in blocked_message.content
+    assert isinstance(loaded, ToolMessage)
+    assert loaded.content == "ran"
+    assert loaded.name == "call_deferred_tool"
+    assert loaded.additional_kwargs["octop_forwarded_tool"] == "read_file"
