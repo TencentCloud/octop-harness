@@ -33,6 +33,24 @@ class TestSyncBuiltinSkillsToBackend:
         assert synced is False
         assert fallback == []
 
+    def test_skill_tree_is_uploaded_once(
+        self,
+        workspace: BackendWorkspace,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[list[tuple[str, bytes]]] = []
+        original = workspace.upload_many
+
+        def record(pairs: list[tuple[str, bytes]]) -> None:
+            calls.append(list(pairs))
+            original(pairs)
+
+        monkeypatch.setattr(workspace, "upload_many", record)
+        sync_builtin_skills_to_backend(workspace, agent_version="0.1.0")
+
+        assert len(calls) == 1
+        assert calls[0]
+
     def test_re_syncs_when_version_differs(self, workspace: BackendWorkspace) -> None:
         sync_builtin_skills_to_backend(workspace, agent_version="0.1.0")
         synced, fallback = sync_builtin_skills_to_backend(workspace, agent_version="0.2.0")
