@@ -53,13 +53,16 @@ def is_skill_enabled(
 
 
 def _parse_skill_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    if not text.startswith("---\n"):
+    # SKILL.md files authored on Windows carry CRLF line endings; normalize
+    # first so the fence anchors are found regardless of EOL style.
+    normalized = text.replace("\r\n", "\n")
+    if not normalized.startswith("---\n"):
         return {}, text
-    end = text.find("\n---", 4)
+    end = normalized.find("\n---", 4)
     if end == -1:
         return {}, text
-    raw = text[4:end]
-    body = text[end + 4 :].lstrip("\n")
+    raw = normalized[4:end]
+    body = normalized[end + 4 :].lstrip("\n")
     try:
         meta = yaml.safe_load(raw) or {}
         if not isinstance(meta, dict):
