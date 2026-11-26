@@ -10,6 +10,7 @@ from deepagents.backends import FilesystemBackend
 from octop_harness.backends.utils import (
     anchor_at_backend_root,
     backend_file_exists,
+    backend_file_exists_strict,
     backend_write_force,
     is_complete_storage_path,
     materialize_storage_path,
@@ -47,6 +48,34 @@ class TestBackendFileExists:
     def test_returns_true_for_existing(self, backend: FilesystemBackend) -> None:
         backend_write_force(backend, "/yes.txt", "hi")
         assert backend_file_exists(backend, "/yes.txt") is True
+
+
+class TestBackendFileExistsStrict:
+    def test_returns_false_for_missing(self, backend: FilesystemBackend) -> None:
+        # FilesystemBackend reports a missing file via ReadResult.error
+        # ("File '...' not found"); the strict probe must read that as a
+        # positive absence, not an unknown verdict.
+        assert backend_file_exists_strict(backend, "/nope.txt") is False
+
+    def test_returns_true_for_existing(self, backend: FilesystemBackend) -> None:
+        backend_write_force(backend, "/yes.txt", "hi")
+        assert backend_file_exists_strict(backend, "/yes.txt") is True
+
+    def test_returns_none_when_probe_raises(self) -> None:
+        class _FailingBackend:
+            def read(self, path, *, offset=0, limit=None):
+                raise RuntimeError("backend down")
+
+        assert backend_file_exists_strict(_FailingBackend(), "/x.txt") is None
+
+    def test_returns_none_on_error_result_without_not_found(self) -> None:
+        from deepagents.backends.protocol import ReadResult
+
+        class _ErrorBackend:
+            def read(self, path, *, offset=0, limit=None):
+                return ReadResult(error="Error: permission denied")
+
+        assert backend_file_exists_strict(_ErrorBackend(), "/x.txt") is None
 
 
 class TestIsCompleteStoragePath:

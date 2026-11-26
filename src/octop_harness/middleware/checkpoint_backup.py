@@ -25,10 +25,24 @@ _BACKUP_MODE_ENV = "OCTOP_CHECKPOINT_BACKUP_BEFORE_PRUNE"
 _BACKUP_KEEP_DAYS_ENV = "OCTOP_CHECKPOINT_BACKUP_KEEP_DAYS"
 _DAY_SECONDS = 24 * 60 * 60
 _COPY_TIMEOUT_SECONDS = 5 * 60
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
 _BACKUP_LOCKS: weakref.WeakValueDictionary[Path, threading.Lock] = weakref.WeakValueDictionary()
 _BACKUP_LOCKS_GUARD = threading.Lock()
 _UNWRITTEN_MARKERS: dict[Path, str] = {}
 _ALWAYS_WARNINGS: dict[tuple[Path, str], float] = {}
+
+
+class _CheckpointCorruptionError(sqlite3.DatabaseError):
+    """Raised when the checkpoint SQLite store fails integrity checks."""
+
+
+def _is_corruption_error(exc: BaseException) -> bool:
+    if isinstance(exc, _CheckpointCorruptionError):
+        return True
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    lower = str(exc).lower()
+    return "database disk image is malformed" in lower or "file is not a database" in lower or "sqlite_corrupt" in lower
 
 
 @lru_cache(maxsize=32)
@@ -125,13 +139,14 @@ def _backup_checkpoint_file(path: Path, backup: Path, keep_days: int) -> None:
 
     with _temporary_backup_file(backup) as temp:
         with (
-            closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as source,
-            closing(sqlite3.connect(temp)) as target,
+            closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=30.0)) as source,
+            closing(sqlite3.connect(temp, timeout=30.0)) as target,
         ):
+            source.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
             source.backup(target, pages=1024, progress=check_timeout)
             check = target.execute("PRAGMA quick_check").fetchone()
             if check != ("ok",):
-                raise sqlite3.DatabaseError(f"checkpoint backup quick_check failed: {check!r}")
+                raise _CheckpointCorruptionError(f"checkpoint backup quick_check failed: {check!r}")
         size = temp.stat().st_size
         os.replace(temp, backup)
     logger.info(
@@ -150,13 +165,17 @@ def _required_backup_space(path: Path) -> int:
     return size + (size + 9) // 10
 
 
-def _warn_always(path: Path, reason: str, message: str, *args: object) -> None:
+def _log_once_per_day(path: Path, reason: str, level: int, message: str, *args: object) -> None:
     key = (path, reason)
     now = time.monotonic()
     previous = _ALWAYS_WARNINGS.get(key)
     if previous is None or now - previous >= _DAY_SECONDS:
         _ALWAYS_WARNINGS[key] = now
-        logger.warning(message, *args)
+        logger.log(level, message, *args)
+
+
+def _warn_always(path: Path, reason: str, message: str, *args: object) -> None:
+    _log_once_per_day(path, reason, logging.WARNING, message, *args)
 
 
 def _write_marker(backup: Path, marker: Path, record: str) -> None:
@@ -199,6 +218,8 @@ def prepare_checkpoint_backup(path: Path, mode: BackupMode, keep_days: int) -> b
             return True
 
         result = _attempt_backup(path, backup, mode, keep_days)
+        if result == "corrupt_skipped":
+            return False
         if not marked and (mode == "first" or result == "backed_up"):
             record = json.dumps({"completed_at": datetime.now(UTC).isoformat(), "result": result}) + "\n"
             _write_marker(backup, marker, record)
@@ -213,6 +234,16 @@ def _attempt_backup(path: Path, backup: Path, mode: BackupMode, keep_days: int) 
             _backup_checkpoint_file(path, backup, keep_days)
             return "backed_up"
     except Exception as exc:
+        if _is_corruption_error(exc):
+            _log_once_per_day(
+                path,
+                "corrupt_source",
+                logging.ERROR,
+                "checkpoint database %s appears corrupted (%s); skipping checkpoint pruning",
+                path,
+                exc,
+            )
+            return "corrupt_skipped"
         message = "checkpoint backup failed for %s (%s); %s"
         if mode == "first":
             logger.warning(message, path, exc, "continuing without a backup")

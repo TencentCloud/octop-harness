@@ -310,3 +310,80 @@ def test_policy_mode(value, mode, warning, monkeypatch, caplog):
 def test_policy_keep_days(value, expected, monkeypatch):
     monkeypatch.setenv(_KEEP_DAYS, value)
     assert checkpoint_retention_policy()["backup_keep_days"] == expected
+
+
+def test_first_aborts_pruning_without_marker_when_quick_check_fails(store, monkeypatch, caplog):
+    memory, path, backup, marker = store
+    connect = sqlite3.connect
+
+    class InvalidBackup(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql == "PRAGMA quick_check":
+                return super().execute("SELECT 'simulated corrupt page'")
+            return super().execute(sql, parameters)
+
+    def connect_for_backup(database, **kwargs):
+        if isinstance(database, Path) and database.name.startswith(backup.name + ".tmp-"):
+            kwargs["factory"] = InvalidBackup
+        return connect(database, **kwargs)
+
+    monkeypatch.setattr(checkpoint_backup.sqlite3, "connect", connect_for_backup)
+    for _ in range(2):
+        _prune_checkpoints_if_configured(memory)
+    assert _checkpoint_count(path) == 6
+    assert not backup.exists()
+    assert not marker.exists()
+    assert not list(path.parent.glob(backup.name + ".tmp-*"))
+    assert caplog.text.count("simulated corrupt page") == 1
+
+
+def test_first_aborts_pruning_when_source_reports_malformed(store, monkeypatch, caplog):
+    memory, path, backup, marker = store
+    connect = sqlite3.connect
+
+    class MalformedSource(sqlite3.Connection):
+        def backup(self, target, *, pages, progress):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+    def connect_for_backup(database, **kwargs):
+        if kwargs.get("uri"):
+            kwargs["factory"] = MalformedSource
+        return connect(database, **kwargs)
+
+    monkeypatch.setattr(checkpoint_backup.sqlite3, "connect", connect_for_backup)
+    for _ in range(2):
+        _prune_checkpoints_if_configured(memory)
+    assert _checkpoint_count(path) == 6
+    assert not backup.exists()
+    assert not marker.exists()
+    assert caplog.text.count("database disk image is malformed") == 1
+
+
+def test_vacuum_checkpoint_sets_busy_timeout_and_skips_corrupt_db(tmp_path, monkeypatch, caplog):
+    from octop_harness.middleware import memory as memory_mw
+
+    path = tmp_path / "memory.sqlite"
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+
+    monkeypatch.setenv("OCTOP_CHECKPOINT_VACUUM", "1")
+    monkeypatch.setattr(memory_mw, "_reclaimable_checkpoint_bytes", lambda _p: memory_mw._VACUUM_RECOMMEND_BYTES)
+
+    executed: list[str] = []
+    real_connect = sqlite3.connect
+
+    class RecordingConn(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            executed.append(str(sql))
+            if sql == "PRAGMA quick_check":
+                return super().execute("SELECT 'corrupt page 2'")
+            return super().execute(sql, parameters)
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **kw: real_connect(*a, factory=RecordingConn, **kw))
+    memory_mw._vacuum_checkpoint_if_needed(path)
+
+    assert "PRAGMA busy_timeout=30000" in executed
+    assert "PRAGMA quick_check" in executed
+    assert "VACUUM" not in executed
+    assert "skipping checkpoint VACUUM" in caplog.text
