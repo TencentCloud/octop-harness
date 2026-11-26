@@ -333,6 +333,41 @@ async def test_volcengine_image_request_uses_seedream_api_and_decodes_base64() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    ["doubao-seedream-5-0-lite-260128", "doubao-seedream-5-0-pro-260628", "doubao-seedream-5-0-flash-260915"],
+)
+async def test_volcengine_single_image_request_omits_sequential_generation(model: str) -> None:
+    seen_body: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(_PNG).decode()}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = VolcengineMediaProvider(_media_config(image_model=model), client=client)
+        await provider.generate_image(ImageGenerationRequest(prompt="a ball"))
+
+    assert "sequential_image_generation" not in seen_body
+    assert "sequential_image_generation_options" not in seen_body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["doubao-seedream-5-0-pro-260628", "doubao-seedream-5-0-flash-260915"])
+async def test_seedream_5_pro_and_flash_reject_multi_image_requests_before_calling_ark(model: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Ark must not be called")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = VolcengineMediaProvider(_media_config(image_model=model), client=client)
+        with pytest.raises(MediaGenerationError) as exc_info:
+            await provider.generate_image(ImageGenerationRequest(prompt="a ball", count=2))
+
+    assert exc_info.value.code == "unsupported_input"
+    assert exc_info.value.category == "validation"
+
+
+@pytest.mark.asyncio
 async def test_seedream_5_upgrades_undersized_image_request_to_2k() -> None:
     seen_body: dict[str, Any] = {}
 
