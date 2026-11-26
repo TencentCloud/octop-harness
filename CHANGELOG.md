@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 修复
 
+- 首次及后续动态挂载的 MCP 服务可在当轮显式选择；未选择的服务工具继续隐藏。
 - `memory_search` 返回带图原话的文字，过滤图片引用和图片数据；跳过只有图片的命中。旧库原话索引待升级时，工具会显示升级提示，并保留已命中的长期记忆。
 - `memory_get` 打开带图原始记录时保留文字和分页位置，纯图片摘录返回没有可用内容。
 - 修复事件循环退出时同步关闭 SQLite checkpointer 可能触发的后台线程异常。

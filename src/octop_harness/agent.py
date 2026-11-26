@@ -1745,10 +1745,10 @@ class HarnessAgent:
         # rewrites (relative-path resolution, legacy Windows paths).
         chain.append(self._file_capture)
 
-        if cfg.mcp_server_configs:
+        if cfg.mcp_server_configs or self._mcp_tool_name_set:
             chain.append(
                 MCPToolMiddleware(
-                    server_names=frozenset(cfg.mcp_server_configs),
+                    server_names=cfg.mcp_server_configs,
                     mcp_tool_names=self._mcp_tool_name_set,
                     default_servers=cfg.mcp_default_servers,
                 )
