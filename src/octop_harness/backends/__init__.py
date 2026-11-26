@@ -69,6 +69,7 @@ _BUILTIN_TYPES: frozenset[str] = frozenset(
         "oss",  # Alibaba Cloud OSS (uses official oss2)
         "obs",  # Huawei Cloud OBS (uses official esdk-obs-python)
         "docker",  # agent-scoped Docker sandbox ([docker] extra)
+        "cubesandbox",  # remote CubeSandbox ([cubesandbox] extra)
         "opensandbox",  # remote OpenSandbox ([opensandbox] extra)
     },
 )
@@ -192,6 +193,8 @@ def resolve_backend(
         return _build_docker(kwargs, workspace_dir=workspace_dir)
     if backend_type == "opensandbox":
         return _build_opensandbox(kwargs)
+    if backend_type == "cubesandbox":
+        return _build_cubesandbox(kwargs)
     # Unreachable: ``backend_type`` was already validated against ``_BUILTIN_TYPES``.
     raise AssertionError(f"unhandled backend type {backend_type!r}")  # pragma: no cover
 
@@ -457,7 +460,7 @@ def spec_supports_execution(spec: Any) -> bool:
 
     Mirrors the deepagents rule: a ``composite`` spec delegates to its
     ``default`` sub-spec (routes are ignored, as in ``CompositeBackend``), and
-    ``local_shell`` / ``docker`` / ``opensandbox`` are the shell-capable builtins. Pre-built
+    ``local_shell`` / ``docker`` / ``opensandbox`` / ``cubesandbox`` are the shell-capable builtins. Pre-built
     backend instances are inspected directly.
     """
     if spec is None:
@@ -474,7 +477,7 @@ def spec_supports_execution(spec: Any) -> bool:
     if spec.get("type") == "composite":
         default = spec.get("default")
         return default is not None and spec_supports_execution(default)
-    return spec.get("type") in {"local_shell", "docker", "opensandbox"}
+    return spec.get("type") in {"local_shell", "docker", "opensandbox", "cubesandbox"}
 
 
 def _looks_like_backend_instance(obj: Any) -> bool:
@@ -600,10 +603,47 @@ def _build_opensandbox(kwargs: dict[str, Any]) -> BackendProtocol:
     return OpenSandbox(**kwargs)
 
 
+def _build_cubesandbox(kwargs: dict[str, Any]) -> BackendProtocol:
+    """Build a remote CubeSandbox using its optional SDK.
+
+    ``workspace_backup`` (a nested backend spec such as ``{"type": "cos", ...}``)
+    turns object storage into the durable copy of the sandbox workspace: it is
+    restored into every freshly created sandbox and can be pushed back with
+    ``CubeSandbox.archive_workspace()``. The storage prefix defaults to
+    ``/cube-workspaces/<user>/<agent>`` so all replicas share one mirror.
+    """
+    from octop_harness.backends.cube_sandbox import CubeSandbox
+    from octop_harness.backends.cube_workspace import default_workspace_prefix, workspace_backup_from_spec
+
+    spec = dict(kwargs)
+    backup_spec = spec.pop("workspace_backup", None)
+    backup_path = spec.pop("workspace_backup_path", "/workspace")
+    backup_prefix = spec.pop("workspace_backup_prefix", None)
+    backup_max_files = spec.pop("workspace_backup_max_files", 5000)
+    if backup_spec is None:
+        if backup_prefix is not None or backup_max_files != 5000 or backup_path != "/workspace":
+            raise ValueError("workspace_backup_* options require a workspace_backup spec")
+        return CubeSandbox(**spec)
+    if "restore_workspace" in spec:
+        raise ValueError("Pass either restore_workspace or workspace_backup, not both")
+    user, agent = spec.get("octop_user"), spec.get("octop_agent")
+    if not user or not agent:
+        raise ValueError("workspace_backup requires octop_user and octop_agent")
+    prefix = backup_prefix or default_workspace_prefix(str(user), str(agent), str(spec.get("octop_scope", "agent")))
+    spec["workspace_backup"] = workspace_backup_from_spec(
+        backup_spec,
+        prefix=prefix,
+        sandbox_dir=str(backup_path),
+        max_files=int(backup_max_files),
+    )
+    return CubeSandbox(**spec)
+
+
 __all__ = [
     "DEFAULT_BACKEND_SPEC",
     "BackendWorkspace",
     "BubbledLocalShellBackend",
+    "CubeSandbox",
     "HarnessLocalShellBackend",
     "MountedCompositeBackend",
     "ProbeResult",
@@ -615,6 +655,7 @@ __all__ = [
 ]
 
 from octop_harness.backends.bwrap_shell import BubbledLocalShellBackend
+from octop_harness.backends.cube_sandbox import CubeSandbox
 from octop_harness.backends.local_shell import HarnessLocalShellBackend
 from octop_harness.backends.probe import ProbeResult, probe_backend
 from octop_harness.backends.s3_backend import cos_spec_to_s3_compat

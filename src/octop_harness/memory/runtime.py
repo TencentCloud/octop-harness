@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from langgraph.channels.delta import DeltaChannel
+from langgraph.graph.message import _messages_delta_reducer
 from octop_memory import Memory, MemoryService
 
 from octop_harness.builtin.tools.memory_tools import build_memory_tools
@@ -32,6 +35,8 @@ if TYPE_CHECKING:
     from octop_harness.llm.factory import ChatModelFactory
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_MESSAGES_CHANNEL = DeltaChannel(lambda state, writes: _messages_delta_reducer(state, list(writes)), list)
 
 
 class MemoryRuntime:
@@ -59,14 +64,19 @@ class MemoryRuntime:
         self._middleware: MemoryMiddleware | None = None
         self._middleware_kwargs: dict[str, Any] | None = None
         self._llm_client: HarnessAgentLLMClient | None = None
+        self._lifecycle_lock = threading.RLock()
+        self._closed = False
+        # Retired middleware can still have accepted work using this memory.
+        self._live_middlewares: set[MemoryMiddleware] = set()
 
         if config.memory_enabled:
+            extraction_config = _extraction_service_config(config)
             self._memory = self._build_memory()
             self._llm_client = self._build_llm_client() if config.memory_aux_model_enabled else None
             self._service = MemoryService(
                 self._memory,
                 llm=self._llm_client,
-                config=_extraction_service_config(config),
+                config=extraction_config,
                 host="octop-harness",
                 manual_documents_provider=(
                     lambda: {
@@ -113,6 +123,12 @@ class MemoryRuntime:
         When Memory is on, JSONL additionally honors ``memory_jsonl_enabled``;
         when Memory is off, only ``session_log_enabled`` gates JSONL.
         """
+        with self._lifecycle_lock:
+            if self._closed:
+                return None
+            return self._build_middleware()
+
+    def _build_middleware(self) -> MemoryMiddleware | None:
         cfg = self._config
         service = self._service
         if service is None and not cfg.session_log_enabled:
@@ -152,8 +168,8 @@ class MemoryRuntime:
             "jsonl_max_bytes": cfg.session_log_max_bytes,
             "on_chat_model": on_chat_model,
             "maintenance_interval_seconds": maintenance_interval,
-            # Start the first cheap GC + incremental-vacuum pass shortly after
-            # binding. Full compact/VACUUM remains an explicit operator action.
+            "checkpoint_messages_channel": _CHECKPOINT_MESSAGES_CHANNEL,
+            # Start the first maintenance pass shortly after binding.
             "maintenance_initial_delay_seconds": 1.0,
         }
         # The middleware owns live timers (maintenance, interval/idle extract)
@@ -165,15 +181,28 @@ class MemoryRuntime:
         # recompile used to leak one more maintenance beat.
         previous = self._middleware
         if previous is not None and self._middleware_kwargs == kwargs:
+            self._bind_manual_review_scheduler(previous)
             return previous
         self._middleware = MemoryMiddleware(**kwargs)
+        self._live_middlewares.add(self._middleware)
         self._middleware_kwargs = kwargs
         if previous is not None:
             # Config actually changed — retire the old timers rather than
             # letting them run beside the new ones.
-            with contextlib.suppress(Exception):
-                previous.shutdown()
+            previous.shutdown(on_idle=lambda: self._forget_middleware(previous))
+        self._bind_manual_review_scheduler(self._middleware)
         return self._middleware
+
+    def _forget_middleware(self, middleware: MemoryMiddleware) -> None:
+        with self._lifecycle_lock:
+            self._live_middlewares.discard(middleware)
+
+    def _bind_manual_review_scheduler(self, middleware: MemoryMiddleware) -> None:
+        """Point saves at this middleware's background review, when the service supports it."""
+        service = self._service
+        setter = getattr(service, "set_manual_review_scheduler", None) if service is not None else None
+        if setter is not None:
+            setter(middleware.schedule_manual_review)
 
     def end_session(
         self,
@@ -188,33 +217,54 @@ class MemoryRuntime:
             return
         middleware = self._middleware
         if middleware is None:
-            middleware = MemoryMiddleware(service=self._service, jsonl_enabled=False)
-        middleware.end_session(session_id, background=background)
+            middleware = self.build_middleware()
+        if middleware is not None:
+            middleware.end_session(session_id, background=background)
 
     def close(self) -> None:
-        """Drop this runtime's claim on ``Memory`` (idempotent).
+        """Stop new work and release ``Memory`` once accepted workers finish.
 
-        Middleware / aux LLM are always torn down — they are per-agent.
-        The shared ``Memory`` (backend + checkpointer pool) is released to
-        the process store and only closed when the last runtime lets go.
+        This is idempotent and does not wait for background work. The shared
+        backend + checkpointer claim stays alive until all current and retired
+        middleware workers finish, then closes when the last runtime lets go.
         """
-        middleware = self._middleware
-        if middleware is not None:
-            with contextlib.suppress(Exception):
-                middleware.shutdown()
-        key = self._memory_key
-        memory = self._memory
-        self._memory_key = None
-        self._memory = None
-        self._service = None
-        self._middleware = None
-        self._middleware_kwargs = None
-        self._llm_client = None
-        if key is not None:
-            shared_memory_store().release(key)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            middlewares = list(self._live_middlewares)
+            self._live_middlewares.clear()
+            key, memory = self._memory_key, self._memory
+            self._memory_key = None
+            self._memory = None
+            self._service = None
+            self._middleware = None
+            self._middleware_kwargs = None
+            self._llm_client = None
+
+        def release_memory() -> None:
+            if key is not None:
+                shared_memory_store().release(key)
+            elif memory is not None:
+                close_memory_resources(memory)
+
+        if not middlewares:
+            release_memory()
             return
-        if memory is not None:
-            close_memory_resources(memory)
+
+        remaining = len(middlewares)
+        release_lock = threading.Lock()
+
+        def on_idle() -> None:
+            nonlocal remaining
+            with release_lock:
+                remaining -= 1
+                last = remaining == 0
+            if last:
+                release_memory()
+
+        for middleware in middlewares:
+            middleware.shutdown(on_idle=on_idle)
 
     def __del__(self) -> None:
         with contextlib.suppress(Exception):  # pragma: no cover - destructor must not raise
@@ -290,15 +340,25 @@ class MemoryRuntime:
 
 
 def _extraction_service_config(config: HarnessAgentConfig) -> dict[str, Any] | None:
-    """Budget passed into octop-memory's extractor.
+    """Extraction policy forwarded into octop-memory's ``extraction`` config.
 
     ``CandidateExtractor`` always sends its own ``max_tokens`` (default
-    2048). A harness-side fallback on the chat client never overrides that,
-    so the host budget has to land in ``extraction.max_tokens``.
+    2048), so the host budget has to land in ``extraction.max_tokens``.
+    Optional retention guidance lands in ``extraction.keep_rules`` and
+    ``extraction.skip_rules``.
     """
-    if config.memory_extract_max_tokens is None:
-        return None
-    return {"extraction": {"max_tokens": config.memory_extract_max_tokens}}
+    if (config.memory_extract_keep_rules or config.memory_extract_skip_rules) and not getattr(
+        MemoryService, "supports_extraction_rules", False
+    ):
+        raise ValueError("Configured memory extraction rules require an octop-memory build with retention rule support")
+    extraction: dict[str, Any] = {}
+    if config.memory_extract_max_tokens is not None:
+        extraction["max_tokens"] = config.memory_extract_max_tokens
+    if config.memory_extract_keep_rules is not None:
+        extraction["keep_rules"] = config.memory_extract_keep_rules
+    if config.memory_extract_skip_rules is not None:
+        extraction["skip_rules"] = config.memory_extract_skip_rules
+    return {"extraction": extraction} if extraction else None
 
 
 __all__ = ["MemoryRuntime"]

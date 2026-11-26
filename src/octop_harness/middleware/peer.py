@@ -7,11 +7,11 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from deepagents.middleware._utils import append_to_system_message
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage
 
 from octop_harness.middleware.runtime import runtime_config
+from octop_harness.middleware.turn_note import insert_turn_note, is_turn_note
 from octop_harness.teams.profile import (
     Language,
     peer_description,
@@ -41,10 +41,15 @@ def has_agent_at_mention(text: str) -> bool:
     return _AGENT_AT_RE.search(text) is not None
 
 
+def agent_at_mentions(text: str) -> list[str]:
+    """``@`` tokens in *text*, using the same rule as :func:`has_agent_at_mention`."""
+    return [match.group(1) for match in _AGENT_AT_RE.finditer(text)]
+
+
 def _latest_user_text(request: ModelRequest) -> str:
     messages = getattr(request, "messages", None) or []
     for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
+        if isinstance(msg, HumanMessage) and not is_turn_note(msg):
             return _stringify_content(msg.content).strip()
     return ""
 
@@ -161,9 +166,9 @@ class PeerAgentMiddleware(AgentMiddleware[Any, Any]):
     """Expose ``agent_list`` / ``ask_agent`` and append a peer roster on ``@``.
 
     Prompt injection is request-scoped (``wrap_model_call``) and only runs when
-    the latest user message contains an ``@agent`` token, so ordinary turns keep
-    a stable system-prompt prefix for provider cache hits. The roster is
-    appended after other prompt injectors. Tools are attached via ``self.tools``.
+    the latest user message contains an ``@agent`` token. The roster is a turn
+    note after that message, so ordinary turns and ``@`` turns share one system
+    prompt for provider cache hits. Tools are attached via ``self.tools``.
     A request-scoped ``peer_invoke_mode`` may replace ``ask_agent``'s schema
     for that turn when it tightens (never escalates) the agent's configured
     mode.
@@ -211,7 +216,8 @@ class PeerAgentMiddleware(AgentMiddleware[Any, Any]):
             if tools is not None:
                 overrides["tools"] = tools
             if block is not None:
-                overrides["system_message"] = append_to_system_message(request.system_message, block)
+                title = "[本轮说明]\n" if self._language != "en" else "[turn note]\n"
+                overrides["messages"] = insert_turn_note(list(request.messages or []), title + block)
         except Exception:  # prompt injection is best-effort; pylint: disable=broad-except
             logger.warning("PeerAgentMiddleware prompt injection failed", exc_info=True)
             return request
@@ -262,6 +268,7 @@ render_team_prompt = render_peer_prompt
 __all__ = [
     "PeerAgentMiddleware",
     "TeamMiddleware",
+    "agent_at_mentions",
     "has_agent_at_mention",
     "render_peer_prompt",
     "render_team_prompt",

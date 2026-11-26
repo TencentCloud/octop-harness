@@ -117,16 +117,23 @@ def _build_force_summarization_middleware(model: Any, backend: Any) -> Any:
     )
 
     from octop_harness.middleware.memory_recall import count_tokens_with_recall
+    from octop_harness.middleware.summarization_limits import (
+        SUMMARY_INPUT_TOKEN_LIMIT,
+        harden_summarization_middleware,
+    )
 
     defaults = compute_summarization_defaults(model)
-    return SummarizationMiddleware(
-        model=model,
-        backend=backend,
-        # Auto-trigger unused for force; keep is intentionally tighter than auto.
-        trigger=defaults["trigger"],
-        keep=("messages", FORCE_KEEP_MESSAGES),
-        token_counter=count_tokens_with_recall,
-        truncate_args_settings=defaults.get("truncate_args_settings"),
+    return harden_summarization_middleware(
+        SummarizationMiddleware(
+            model=model,
+            backend=backend,
+            # Auto-trigger unused for force; keep is intentionally tighter than auto.
+            trigger=defaults["trigger"],
+            keep=("messages", FORCE_KEEP_MESSAGES),
+            token_counter=count_tokens_with_recall,
+            trim_tokens_to_summarize=SUMMARY_INPUT_TOKEN_LIMIT,
+            truncate_args_settings=defaults.get("truncate_args_settings"),
+        )
     )
 
 
@@ -251,6 +258,7 @@ async def _persist_compact_event(
     session_id: str,
     to_summarize: list[Any],
     preserved: list[Any],
+    messages: list[Any],
     thread_id: str,
 ) -> CompactResult:
     summary_msg = work_mw._build_new_messages_with_path(summary, file_path)[0]
@@ -259,10 +267,18 @@ async def _persist_compact_event(
         conversation_tokens_from_messages(replay_recall_snapshots(to_summarize))
         - estimate_tokens(message_content_text(getattr(summary_msg, "content", ""))),
     )
+    state_cutoff = work_mw._compute_state_cutoff(event, cutoff, messages)
+    # Same shape deepagents writes for auto-compaction (0.7.35+). Without
+    # ``created_at_index`` the kept messages keep their Claude reasoning
+    # blocks, which are bound to the conversation that was just summarized
+    # away; ``cutoff_message_id`` keeps the cutoff correct if earlier messages
+    # are ever removed.
     new_event = {
-        "cutoff_index": work_mw._compute_state_cutoff(event, cutoff),
+        "cutoff_index": state_cutoff,
+        "cutoff_message_id": messages[state_cutoff].id if 0 <= state_cutoff < len(messages) else None,
         "summary_message": summary_msg,
         "file_path": file_path,
+        "created_at_index": len(messages),
     }
     shown = display_offload_path(file_path, session_id) or None
     try:
@@ -369,6 +385,7 @@ async def force_compact_thread(
             session_id=session_id,
             to_summarize=to_summarize,
             preserved=preserved,
+            messages=messages,
             thread_id=thread_id,
         )
 

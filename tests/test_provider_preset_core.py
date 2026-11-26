@@ -176,29 +176,52 @@ class TestCoreProviderPresets:
     def test_deepseek_bundle_only_lists_current_v4_models(self) -> None:
         presets = {p.id: p for p in load_provider_templates(templates_path=_BUNDLED_TEMPLATE)}
         ds = presets["deepseek"]
-        assert {m.id for m in ds.models} == {"deepseek-v4-flash", "deepseek-v4-pro"}
+        models = {m.id: m for m in ds.models}
+        assert set(models) == {"deepseek-flash", "deepseek-v4-pro"}
         assert {m.max_input_tokens for m in ds.models} == {1_000_000}
         assert {m.max_output_tokens for m in ds.models} == {384_000}
+        assert models["deepseek-flash"].input == ("text", "image")
+        assert models["deepseek-flash"].is_multimodal is True
+        assert models["deepseek-v4-pro"].input == ("text",)
 
-    def test_hai_kimi_k25_supports_image(self) -> None:
+    def test_hai_catalog_models_and_context_limits(self) -> None:
         presets = {p.id: p for p in load_provider_templates(templates_path=_BUNDLED_TEMPLATE)}
         hai = presets["tencent-hai"]
         models = {m.id: m for m in hai.models}
+        assert set(models) == {
+            "hy4-preview",
+            "deepseek-flash",
+            "DeepSeek-V4-Pro",
+            "DeepSeek-V3.1-Terminus-W4AFP8",
+            "glm-5.3",
+            "glm-5.3-flash",
+            "glm-5.2",
+            "Kimi-K2.5",
+            "MiniMax-M2.7",
+            "Qwen3.5-397B-A17B-FP8",
+            "Qwen3-32B-FP8",
+        }
+        assert models["hy4-preview"].max_input_tokens == 1_000_000
+        assert models["hy4-preview"].max_output_tokens == 64_000
+        assert models["deepseek-flash"].max_input_tokens == 1_000_000
+        assert models["deepseek-flash"].max_output_tokens == 384_000
+        assert models["deepseek-flash"].input == ("text", "image")
+        assert models["DeepSeek-V4-Pro"].max_input_tokens == 1_000_000
+        assert models["DeepSeek-V4-Pro"].max_output_tokens == 384_000
+        assert models["DeepSeek-V3.1-Terminus-W4AFP8"].max_input_tokens == 128_000
+        assert models["glm-5.3"].max_input_tokens == 1_000_000
+        assert models["glm-5.3"].max_output_tokens == 131_072
+        assert models["glm-5.3-flash"].max_input_tokens == 1_000_000
+        assert models["glm-5.3-flash"].input == ("text", "image")
+        assert models["glm-5.2"].max_input_tokens == 1_000_000
         kimi = models["Kimi-K2.5"]
         assert kimi.input == ("text", "image")
         assert kimi.is_multimodal is True
         assert kimi.max_input_tokens == 262_144
         assert models["MiniMax-M2.7"].max_input_tokens == 204_800
-        assert models["GLM-5.1-FP8"].max_input_tokens == 200_000
         assert models["Qwen3.5-397B-A17B-FP8"].max_input_tokens == 262_144
         assert models["Qwen3.5-397B-A17B-FP8"].input == ("text", "image")
         assert models["Qwen3-32B-FP8"].max_input_tokens == 40_960
-        assert models["Qwen3-VL-32B-Instruct-FP8"].max_input_tokens == 262_144
-        assert models["Qwen2.5-VL-32B-Instruct"].max_input_tokens == 32_768
-        assert models["Qwen3-VL-2B-Instruct"].max_input_tokens == 262_144
-        # HAI-hosted DeepSeek routes keep their platform cap instead of
-        # inheriting the direct DeepSeek API's 1M context window.
-        assert models["DeepSeek-V4-Pro"].max_input_tokens == 128_000
 
     def test_openai_gpt4o_supports_image(self) -> None:
         presets = {p.id: p for p in load_provider_templates(templates_path=_BUNDLED_TEMPLATE)}
@@ -246,6 +269,7 @@ class TestCoreProviderPresets:
         assert token_plan.api_key_prefix == "sk-tp-"
         assert set(models) == {
             "tc-code-latest",
+            "hy4",
             "minimax-m2.7",
             "glm-5",
             "glm-5.1",
@@ -269,6 +293,7 @@ class TestCoreProviderPresets:
         enterprise_models = {model.id: model for model in enterprise.models}
         assert set(enterprise_models) == {
             "auto",
+            "hy4",
             "deepseek-v4-flash",
             "deepseek-v4-flash-0731",
             "deepseek-v4-flash-202605",
@@ -296,8 +321,12 @@ class TestCoreProviderPresets:
         hy_plan = presets["tencent-hy-token-plan"]
         assert hy_plan.base_url == "https://api.lkeap.cloud.tencent.com/plan/v3"
         assert hy_plan.variant == "hy_token_plan"
-        assert {model.id for model in hy_plan.models} == {"hy3", "hy3-preview"}
-        assert {model.max_input_tokens for model in hy_plan.models} == {256_000}
+        assert {model.id for model in hy_plan.models} == {"hy3", "hy3-preview", "hy4"}
+        assert {model.id: model.max_input_tokens for model in hy_plan.models} == {
+            "hy3": 256_000,
+            "hy3-preview": 256_000,
+            "hy4": 960_000,
+        }
         assert {model.max_output_tokens for model in hy_plan.models} == {64_000}
 
     def test_zhipu_glm_context_windows_match_provider_catalog(self) -> None:
@@ -324,7 +353,14 @@ class TestCoreProviderPresets:
             assert models["kimi-k2-0711-preview"].max_input_tokens == 131_072
 
         for provider_id in ("minimax-cn", "minimax-intl"):
-            assert {m.max_input_tokens for m in presets[provider_id].models} == {204_800}
+            minimax = {model.id: model for model in presets[provider_id].models}
+            assert minimax["MiniMax-M3"].max_input_tokens == 1_000_000
+            assert minimax["MiniMax-M3"].reasoning is True
+            assert minimax["MiniMax-M3"].input == ("text", "image")
+            assert minimax["MiniMax-M3.1-Flash"].max_input_tokens == 1_000_000
+            assert minimax["MiniMax-M3.1-Flash"].reasoning is True
+            assert minimax["MiniMax-M3.1-Flash"].input == ("text", "image")
+            assert {m.max_input_tokens for m in presets[provider_id].models} == {204_800, 1_000_000}
 
         mimo = {model.id: model for model in presets["mimo"].models}
         assert mimo["mimo-v2.5"].max_input_tokens == 1_048_576

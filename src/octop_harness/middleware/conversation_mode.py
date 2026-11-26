@@ -14,13 +14,14 @@ from typing import Any, Literal, cast
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain.agents.middleware.types import AgentState
-from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from langchain_core.tools.base import BaseTool
 from langgraph.config import get_config
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from octop_harness.middleware.runtime import runtime_config
+from octop_harness.middleware.turn_note import insert_turn_note
 
 logger = logging.getLogger(__name__)
 
@@ -180,36 +181,12 @@ def _current_configurable() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _hint_already_present(content: str | list[Any] | Any, hint: str) -> bool:
-    if isinstance(content, str):
-        return hint in content
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, str) and hint in block:
-                return True
-            if isinstance(block, dict):
-                text = block.get("text")
-                if isinstance(text, str) and hint in text:
-                    return True
-        return False
-    return hint in str(content)
-
-
-def _append_system_hint(request: ModelRequest[Any], hint: str) -> ModelRequest[Any]:
+def _append_mode_note(request: ModelRequest[Any], hint: str) -> ModelRequest[Any]:
+    """Put the mode hint after the user message so the system prompt stays stable."""
     cleaned = hint.strip()
     if not cleaned:
         return request
-    existing = request.system_message
-    if existing is None:
-        return request.override(system_message=SystemMessage(content=cleaned))
-    content = existing.content
-    if _hint_already_present(content, cleaned):
-        return request
-    if isinstance(content, str):
-        merged: str | list[Any] = f"{content.rstrip()}\n\n{cleaned}"
-    elif isinstance(content, list):
-        merged = [*content, {"type": "text", "text": cleaned}]
-    return request.override(system_message=SystemMessage(content=merged))
+    return request.override(messages=insert_turn_note(list(request.messages or []), "[turn note]\n" + cleaned))
 
 
 def _clear_skills_metadata(request: ModelRequest[Any]) -> ModelRequest[Any]:
@@ -221,7 +198,7 @@ def _clear_skills_metadata(request: ModelRequest[Any]) -> ModelRequest[Any]:
 
 
 def apply_conversation_mode_to_request(request: ModelRequest[Any]) -> ModelRequest[Any]:
-    """Filter Ask/Plan tools, drop skill catalog, append the mode hint."""
+    """Filter Ask/Plan tools, drop skill catalog, and add the mode hint as a turn note."""
     configurable = runtime_config(request).get("configurable") or {}
     if not isinstance(configurable, dict):
         configurable = {}
@@ -235,7 +212,7 @@ def apply_conversation_mode_to_request(request: ModelRequest[Any]) -> ModelReque
         if len(filtered) != len(tools_in):
             out = out.override(tools=filtered)
         out = _clear_skills_metadata(out)
-    return _append_system_hint(out, hint)
+    return _append_mode_note(out, hint)
 
 
 def _blocked_message(*, tool_name: str, mode: ConversationMode, tool_call_id: str) -> ToolMessage:

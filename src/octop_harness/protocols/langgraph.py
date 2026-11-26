@@ -2,30 +2,43 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from enum import StrEnum
+from functools import lru_cache
 from typing import Any
 
 from langchain_core.messages import BaseMessage
-from langgraph.types import Command, Overwrite
+from langgraph.types import Command, Durability, Overwrite
 
+from octop_harness.memory.checkpoint_activity import _guarded_checkpoint_stream, checkpoint_activity
 from octop_harness.protocols.base import ChatProtocol
 from octop_harness.protocols.think_splitter import ThinkSplitter
 from octop_harness.usage import normalize_usage_metadata
 
-_INTERNAL_LC_SOURCES = frozenset({"summarization", "memory_aux"})
+_INTERNAL_LC_SOURCES = frozenset({"summarization"})
+_DURABILITY_ENV = "OCTOP_CHECKPOINT_DURABILITY"
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=16)
+def _parse_durability(value: str) -> Durability:
+    match value:
+        case "exit" | "async" | "sync":
+            return value
+    logger.warning("invalid %s=%r; using exit", _DURABILITY_ENV, value)
+    return "exit"
 
 
 def _is_internal_model_stream(metadata: Any) -> bool:
     """Return whether a LangGraph message stream belongs to an internal LLM call.
 
     LangChain tags conversation-compaction calls with
-    ``metadata["lc_source"] == "summarization"``; ``HarnessAgentLLMClient`` tags
-    memory extraction / promotion / manual-document calls with
-    ``metadata["lc_source"] == "memory_aux"``.  LangGraph's ``messages`` stream
-    includes those nested model tokens alongside the user-facing model response,
-    so they must be removed before protocol consumers see them.
+    ``metadata["lc_source"] == "summarization"``.  LangGraph's ``messages``
+    stream includes those nested model tokens alongside the user-facing model
+    response, so they must be removed before protocol consumers see them.
     """
     return isinstance(metadata, dict) and metadata.get("lc_source") in _INTERNAL_LC_SOURCES
 
@@ -73,6 +86,23 @@ def _serialize_hitl_request(value: Any) -> dict[str, Any]:
         dumped = value.model_dump()
         return dumped if isinstance(dumped, dict) else {"raw": str(value)}
     return {"raw": str(value)}
+
+
+def _managed_checkpoint_copy(message: Any) -> bool:
+    """A managed turn already streamed this message and is only storing it."""
+    if isinstance(message, dict):
+        extra = message.get("additional_kwargs")
+    else:
+        extra = getattr(message, "additional_kwargs", None)
+    return isinstance(extra, dict) and bool(extra.get("octop_managed_streamed"))
+
+
+def _live_tool_message(message: Any) -> bool:
+    if _managed_checkpoint_copy(message):
+        return False
+    if isinstance(message, dict):
+        return message.get("role") == "tool" or message.get("type") == "tool"
+    return getattr(message, "type", None) == "tool"
 
 
 def _channel_messages(raw: Any) -> list[Any]:
@@ -152,9 +182,24 @@ class LangGraphProtocol(ChatProtocol):
     def name(self) -> str:
         return "langgraph"
 
-    async def call(self, messages: list[BaseMessage], config: dict[str, Any]) -> dict[str, Any]:
-        result: dict[str, Any] = await self._graph.ainvoke({"messages": messages}, config=config)
-        return result
+    def _durability_options(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        # LangGraph warns when given durability for a stateless graph. Also
+        # leave its legacy checkpoint_during keyword usable on stream calls.
+        if "durability" not in kwargs and "checkpoint_during" not in kwargs:
+            checkpointer = getattr(self._graph, "checkpointer", None)
+            if checkpointer is not None and checkpointer is not False:
+                kwargs["durability"] = _parse_durability(os.environ.get(_DURABILITY_ENV, "exit").strip().lower())
+        return kwargs
+
+    async def call(
+        self, messages: list[BaseMessage], config: dict[str, Any], *, durability: Durability | None = None
+    ) -> dict[str, Any]:
+        options = self._durability_options({"durability": durability} if durability is not None else {})
+        async with checkpoint_activity(
+            getattr(self._graph, "checkpointer", None), str((config.get("configurable") or {}).get("thread_id") or "")
+        ):
+            result: dict[str, Any] = await self._graph.ainvoke({"messages": messages}, config=config, **options)
+            return result
 
     async def stream(
         self,
@@ -164,12 +209,16 @@ class LangGraphProtocol(ChatProtocol):
     ) -> AsyncGenerator[dict[str, Any], None]:
         splitter = ThinkSplitter()
         async with aclosing(
-            self._graph.astream(
-                {"messages": messages},
-                config=config,
-                stream_mode=["values", "updates", "messages", "custom"],
-                version="v2",
-                **kwargs,
+            _guarded_checkpoint_stream(
+                self._graph.astream(
+                    {"messages": messages},
+                    config=config,
+                    stream_mode=["values", "updates", "messages", "custom"],
+                    version="v2",
+                    **self._durability_options(kwargs),
+                ),
+                getattr(self._graph, "checkpointer", None),
+                str((config.get("configurable") or {}).get("thread_id") or ""),
             )
         ) as graph_chunks:
             async for chunk in graph_chunks:
@@ -192,12 +241,16 @@ class LangGraphProtocol(ChatProtocol):
 
         splitter = ThinkSplitter()
         async with aclosing(
-            self._graph.astream(
-                Command(resume={"decisions": decisions}),
-                config=merged_config,
-                stream_mode=["values", "updates", "messages", "custom"],
-                version="v2",
-                **kwargs,
+            _guarded_checkpoint_stream(
+                self._graph.astream(
+                    Command(resume={"decisions": decisions}),
+                    config=merged_config,
+                    stream_mode=["values", "updates", "messages", "custom"],
+                    version="v2",
+                    **self._durability_options(kwargs),
+                ),
+                getattr(self._graph, "checkpointer", None),
+                thread_id,
             )
         ) as graph_chunks:
             async for chunk in graph_chunks:
@@ -225,6 +278,24 @@ class LangGraphProtocol(ChatProtocol):
         msg_type = getattr(msg_chunk, "type", "")
         if msg_type in ("tool", "human", "system"):
             return out
+        # Managed ACP turns stream deltas as chunks, then store the full
+        # message for the checkpoint. Skip that copy so the channel does not
+        # print the reply twice.
+        extra = getattr(msg_chunk, "additional_kwargs", None)
+        if isinstance(extra, dict):
+            tool_result = extra.get("octop_tool_result")
+            if isinstance(tool_result, dict):
+                out.append(
+                    {
+                        "type": AgentEventType.TOOL_RESULT,
+                        "node": node,
+                        "messages": [tool_result],
+                    }
+                )
+                return out
+        if msg_type == "ai" and isinstance(extra, dict) and extra.get("octop_managed_streamed"):
+            usage_event = _usage_event(msg_chunk, metadata, node)
+            return [usage_event] if usage_event is not None else []
         reasoning = getattr(msg_chunk, "additional_kwargs", {}).get("reasoning_content")
         if reasoning:
             out.append({"type": AgentEventType.REASONING, "content": reasoning, "node": node})
@@ -267,10 +338,7 @@ class LangGraphProtocol(ChatProtocol):
             if node_name == "__interrupt__":
                 continue
             node_messages = _channel_messages(node_data.get("messages")) if isinstance(node_data, dict) else []
-            is_tool_result = any(
-                getattr(m, "type", None) == "tool" or (isinstance(m, dict) and m.get("role") == "tool")
-                for m in node_messages
-            )
+            is_tool_result = any(_live_tool_message(m) for m in node_messages)
             if is_tool_result:
                 out.append({"type": AgentEventType.TOOL_RESULT, "node": node_name, "messages": node_messages})
             else:
@@ -302,4 +370,21 @@ class LangGraphProtocol(ChatProtocol):
         config: dict[str, Any],
         **kwargs: Any,
     ) -> Any:
-        return await self._graph.astream_events({"messages": messages}, config=config, version="v3", **kwargs)
+        stream = await self._graph.astream_events(
+            {"messages": messages}, config=config, version="v3", **self._durability_options(kwargs)
+        )
+        checkpointer = getattr(self._graph, "checkpointer", None)
+        if callable(getattr(type(checkpointer), "checkpoint_activity", None)) or callable(
+            getattr(type(checkpointer), "acheckpoint_activity", None)
+        ):
+            # LangGraph v3 projections all pump this iterator. Wrapping it keeps
+            # the native stream API and holds the lease through final flush and
+            # abort, even when consumers use output() or subgraph projections.
+            # This experimental adapter is covered by real LangGraph v3 tests.
+            source = getattr(stream, "_graph_aiter", None)
+            if source is None:
+                raise RuntimeError("checkpoint activity requires a compatible LangGraph v3 stream")
+            stream._graph_aiter = _guarded_checkpoint_stream(
+                source, checkpointer, str((config.get("configurable") or {}).get("thread_id") or "")
+            )
+        return stream

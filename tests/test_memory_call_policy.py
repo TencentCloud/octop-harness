@@ -7,8 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.runnables.config import var_child_runnable_config
+from octop_memory.ports.llm import LLMClientError
 
 from octop_harness.config import HarnessAgentConfig, ModelConfig, ProviderConfig
 from octop_harness.llm.factory import ChatModelFactory
@@ -154,51 +153,136 @@ def test_model_cache_invalidation_removes_memory_variant(provider_wide: bool) ->
     factory.close()
 
 
-class _RecordingFactory:
-    """Minimal factory stub that returns one recording chat model."""
+@pytest.mark.parametrize("use_aux", [False, True])
+@pytest.mark.parametrize("tier", ["light", "heavy"])
+def test_kimi_temperature_recovery_after_aux_timeout(monkeypatch: pytest.MonkeyPatch, use_aux: bool, tier: str) -> None:
+    requests: list[httpx.Request] = []
 
-    def __init__(self, model: Any) -> None:
-        self.model = model
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "aux.example":
+            raise httpx.ReadTimeout("aux unavailable", request=request)
+        if "temperature" in json.loads(request.content):
+            return httpx.Response(
+                400,
+                request=request,
+                json={"error": {"message": "invalid temperature: only 1 is allowed", "type": "invalid_request_error"}},
+            )
+        return _response(request)
 
-    def get_chat_model(self, ref: str, **kwargs: Any) -> Any:
-        del ref, kwargs
-        return self.model
-
-
-class _RecordingChatModel(FakeListChatModel):
-    """FakeList that records the run config of every invocation."""
-
-    last_config: dict[str, Any] | None = None
-
-    def bind(self, **kwargs: Any) -> _RecordingChatModel:
-        del kwargs
-        return self
-
-    def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        self.last_config = kwargs.get("config")
-        return super().invoke(*args, **kwargs)
-
-
-def test_aux_model_calls_are_tagged_as_internal() -> None:
-    """Memory aux calls must be identifiable so the graph stream can drop them."""
-    model = _RecordingChatModel(responses=["ok"])
-    client = HarnessAgentLLMClient(_RecordingFactory(model), default_model="local/Qwen3")
-
-    assert client.call_llm("probe") == "ok"
-    assert model.last_config is not None
-    assert model.last_config["metadata"]["lc_source"] == "memory_aux"
-
-
-def test_aux_model_calls_keep_ambient_metadata() -> None:
-    """The marker is added on top of the inherited run metadata, not instead of it."""
-    model = _RecordingChatModel(responses=["ok"])
-    client = HarnessAgentLLMClient(_RecordingFactory(model), default_model="local/Qwen3")
-    token = var_child_runnable_config.set({"metadata": {"langgraph_node": "tools", "session_id": "s1"}})
+    monkeypatch.setattr(httpx.Client, "send", send)
+    factory = ChatModelFactory(
+        [
+            ProviderConfig(
+                id="aux", base_url="https://aux.example/v1", api_key="test", models=[ModelConfig(id="Qwen3")]
+            ),
+            ProviderConfig(
+                id="moonshot",
+                base_url="https://kimi.example/v1",
+                api_key="test",
+                models=[ModelConfig(id="kimi-for-coding", max_output_tokens=256)],
+            ),
+        ]
+    )
+    client = HarnessAgentLLMClient(
+        factory,
+        aux_model="aux/Qwen3" if use_aux else None,
+        default_model="moonshot/kimi-for-coding",
+        light_timeout_s=42,
+        heavy_timeout_s=90,
+        extra_body={"vendor_option": "primary-only"},
+        max_retries=1,
+        retry_backoff_s=0,
+    )
+    client.set_current_model("moonshot/kimi-for-coding")
     try:
-        assert client.call_llm("probe") == "ok"
+        assert client.call_llm("extract", tier=tier, temperature=0.0, max_tokens=512, response_format="json") == "ok"
+        assert [r.url.host for r in requests] == (["aux.example"] * 2 if use_aux else []) + ["kimi.example"] * 2
+        original, retry = [json.loads(r.content) for r in requests[-2:]]
+        assert original.pop("temperature") == 0.0
+        assert original == retry
+        assert "temperature" not in retry
+        assert retry["max_completion_tokens"] == 256
+        assert retry["response_format"] == {"type": "json_object"}
+        assert ("vendor_option" in retry) is not use_aux
+        assert "chat_template_kwargs" not in retry
+        assert requests[-1].extensions["timeout"]["read"] == (42 if tier == "light" else 90)
+        assert factory.get_chat_model("moonshot/kimi-for-coding").root_client.max_retries == 2
     finally:
-        var_child_runnable_config.reset(token)
+        factory.close()
 
-    assert model.last_config is not None
-    assert model.last_config["metadata"]["session_id"] == "s1"
-    assert model.last_config["metadata"]["lc_source"] == "memory_aux"
+
+@pytest.mark.parametrize("second_status", [200, 400, 503])
+@pytest.mark.parametrize("retries", [0, 1])
+def test_temperature_retry_is_bounded_and_preserves_transient_retries(
+    monkeypatch: pytest.MonkeyPatch, second_status: int, retries: int
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        requests.append(request)
+        status = 400 if len(requests) == 1 else second_status
+        if status == 200:
+            return _response(request)
+        return httpx.Response(
+            status,
+            request=request,
+            json={"error": {"message": "invalid temperature", "type": "invalid_request_error"}},
+        )
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    factory = _factory()
+    client = HarnessAgentLLMClient(factory, default_model="local/Qwen3", max_retries=retries, retry_backoff_s=0)
+    try:
+        if second_status == 200:
+            assert client.call_llm("extract", temperature=0.0) == "ok"
+        else:
+            with pytest.raises(LLMClientError, match="invalid temperature"):
+                client.call_llm("extract", temperature=0.0)
+        assert len(requests) == (2 + retries if second_status == 503 else 2)
+        assert all("temperature" not in json.loads(r.content) for r in requests[1:])
+        assert all(json.loads(r.content)["chat_template_kwargs"] == {"enable_thinking": False} for r in requests)
+    finally:
+        factory.close()
+
+
+def test_failed_temperature_retry_keeps_model_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "local.example":
+            return httpx.Response(400, request=request, json={"error": {"message": "invalid temperature"}})
+        return _response(request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    factory = _factory()
+    try:
+        client = HarnessAgentLLMClient(factory, aux_model="local/Qwen3", default_model="other/gpt-4.1")
+        assert client.call_llm("extract", temperature=0.0) == "ok"
+        assert [r.url.host for r in requests] == ["local.example", "local.example", "other.example"]
+        assert "temperature" not in json.loads(requests[1].content)
+        # A rejection by one provider must not change another provider's options.
+        assert json.loads(requests[2].content)["temperature"] == 0.0
+    finally:
+        factory.close()
+
+
+def test_auth_error_mentioning_temperature_does_not_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            401, request=request, json={"error": {"message": "unauthorized request with temperature=0"}}
+        )
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    factory = _factory()
+    try:
+        client = HarnessAgentLLMClient(factory, default_model="local/Qwen3")
+        with pytest.raises(LLMClientError, match="unauthorized"):
+            client.call_llm("extract", temperature=0.0)
+        assert len(requests) == 1
+    finally:
+        factory.close()

@@ -5,8 +5,10 @@ from __future__ import annotations
 from octop_harness.middleware.client_tool_search import ClientToolSearchMiddleware
 from octop_harness.middleware.conversation_mode import ConversationModeMiddleware
 from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
+from octop_harness.middleware.mcp_tool_error import McpToolErrorMiddleware
 from octop_harness.middleware.media_offload import MediaOffloadMiddleware
 from octop_harness.middleware.memory import MemoryMiddleware
+from octop_harness.middleware.memory_recall import RecallCandidate, get_recall_candidates
 from octop_harness.middleware.model_settings import (
     CONFIGURABLE_MAX_INPUT_TOKENS,
     CONFIGURABLE_MODEL_SETTINGS,
@@ -23,11 +25,14 @@ __all__ = [
     "ClientToolSearchMiddleware",
     "ConversationModeMiddleware",
     "FilesystemGuardMiddleware",
+    "McpToolErrorMiddleware",
     "MediaOffloadMiddleware",
     "MemoryMiddleware",
     "ModelSettingsMiddleware",
     "NativeToolSearchMiddleware",
     "PeerAgentMiddleware",
+    "RecallCandidate",
     "ToolSearchMiddleware",
     "detect_pii",
+    "get_recall_candidates",
 ]

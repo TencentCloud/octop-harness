@@ -1,8 +1,9 @@
 """Memory adapter helpers for octop-harness.
 
-The public surface of this subpackage is :class:`MemoryRuntime`, which wires
+The public surface includes :class:`MemoryRuntime`, which wires
 :class:`octop_memory.Memory` / :class:`octop_memory.MemoryService` into the
-agent.
+agent, and :func:`checkpoint_activity`, which coordinates host graph operations
+with PostgreSQL checkpoint maintenance.
 
 :class:`octop_harness.memory.llm_client.HarnessAgentLLMClient` is an internal
 adapter used by :class:`MemoryRuntime` to expose the agent's
@@ -16,6 +17,7 @@ adapter themselves.
 
 from __future__ import annotations
 
+from octop_harness.memory.checkpoint_activity import checkpoint_activity
 from octop_harness.memory.runtime import MemoryRuntime
 
-__all__ = ["MemoryRuntime"]
+__all__ = ["MemoryRuntime", "checkpoint_activity"]
