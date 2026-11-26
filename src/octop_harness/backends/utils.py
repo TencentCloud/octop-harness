@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -203,6 +204,26 @@ def backend_file_exists(backend: BackendProtocol, path: str) -> bool:
     return result.error is None and result.file_data is not None
 
 
+def backend_file_exists_strict(backend: BackendProtocol, path: str) -> bool | None:
+    """Tri-state existence probe: ``True``/``False``, or ``None`` when the
+    backend probe itself failed. Fail-closed callers must treat ``None`` as
+    "cannot snapshot", never as "absent"."""
+    try:
+        result = backend.read(path, offset=0, limit=1)
+    except BACKEND_CALL_ERRORS:
+        return None
+    if result.error is not None:
+        # Strip the embedded path first: error text embeds it, so a path
+        # containing "file" must not pair with an unrelated "not found"
+        # ("host not found") into a false-positive absence. Sandbox backends
+        # use the file_not_found sentinel instead of the human phrasing.
+        detail = str(result.error).lower().replace(str(path).lower(), "")
+        if "file_not_found" in detail or re.search(r"\bfiles?\b[^\n]*\bnot found\b", detail):
+            return False
+        return None
+    return result.file_data is not None
+
+
 __all__ = [
     "ASYNC_DEFENSIVE_OP_ERRORS",
     "BACKEND_CALL_ERRORS",
@@ -210,6 +231,7 @@ __all__ = [
     "BackendOperationNotSupportedError",
     "anchor_at_backend_root",
     "backend_file_exists",
+    "backend_file_exists_strict",
     "backend_write_force",
     "delete_local_path",
     "is_complete_storage_path",

@@ -106,8 +106,6 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
         except Exception as exc:  # pragma: no cover - storage / IO fault; pylint: disable=broad-except
             logger.warning("memory_get failed: %s", exc, exc_info=True)
             return f"memory_get failed: {exc.__class__.__name__}"
-        if not isinstance(result, dict):
-            return str(result)
         if result.get("error"):
             return f"memory_get error: {result.get('error')}"
         content = result.get("content")

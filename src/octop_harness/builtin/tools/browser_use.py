@@ -47,6 +47,7 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from octop_harness.backends.utils import DEFENSIVE_OP_ERRORS
+from octop_harness.security.ssrf import UnsafeAgentFetchUrlError, validate_agent_fetch_url
 
 # ---- per-profile action history (ring buffer) ------------------------------
 
@@ -54,6 +55,7 @@ _HISTORY_MAX = 50
 _HISTORY_WINDOW = 20
 _history: dict[str, list[dict[str, Any]]] = {}
 _TAB_LINE_RE = re.compile(r"^\[(?P<tab_id>[^\]]+)\]\s+.*?\s—\s(?P<url>\S.*)$")
+_PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 def _record_history(profile: str, action: str, success: bool) -> int:
@@ -388,6 +390,26 @@ def _validate_action_params(action: str, kwargs: dict[str, Any]) -> str | None:
     return None
 
 
+def _guard_browser_request(action: str, profile: str, url: str, output_path: str) -> str | None:
+    """Reject a profile path, a private navigation target, or a parent-segment screenshot path.
+
+    ``web_fetch`` already refuses loopback and link-local URLs. Navigation has
+    to use the same check, or a restricted agent can open those addresses in
+    Chrome instead. The profile name is a directory under the browser profiles
+    root, so it has to be one path segment.
+    """
+    if not _PROFILE_RE.fullmatch(profile):
+        return "profile must be 1-64 characters of letters, digits, '_' or '-'"
+    if action in {"navigate", "new_tab"} and url:
+        try:
+            validate_agent_fetch_url(url)
+        except UnsafeAgentFetchUrlError as exc:
+            return str(exc)
+    if output_path and ".." in Path(output_path).parts:
+        return "screenshot path must not contain '..'"
+    return None
+
+
 @tool
 async def browser_use(
     action: Annotated[str, Field(description="Browser action, e.g. navigate, screenshot, dom_tree, click.")],
@@ -527,6 +549,19 @@ async def browser_use(
             success=False,
             content="",
             error=param_err,
+            metrics=None,
+            metadata=None,
+        )
+
+    guard_err = _guard_browser_request(normalized, profile, url, path)
+    if guard_err:
+        _record_history(profile, original, success=False)
+        return _envelope(
+            action=original,
+            profile=profile,
+            success=False,
+            content="",
+            error=guard_err,
             metrics=None,
             metadata=None,
         )

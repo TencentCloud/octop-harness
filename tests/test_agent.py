@@ -11,9 +11,10 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -805,7 +806,7 @@ class TestHarnessAgentModelFactory:
 class TestAgetHistory:
     """Tests for HarnessAgent.aget_history()."""
 
-    def _make_agent(self, tmp_path: Path, checkpointer: Any) -> HarnessAgent:
+    def _make_agent(self, tmp_path: Path, checkpointer: Any, **overrides: Any) -> HarnessAgent:
         cfg = HarnessAgentConfig(
             name="hist-agent",
             workspace_dir=tmp_path,
@@ -821,6 +822,7 @@ class TestAgetHistory:
             default_model="p/text",
             checkpointer=checkpointer,
             memory_enabled=False,
+            **overrides,
         )
         with (
             patch("langchain_openai.ChatOpenAI", return_value=MagicMock()),
@@ -1183,6 +1185,110 @@ class TestAdeleteThread:
         agent = TestAgetHistory()._make_agent(tmp_path, checkpointer=fake_cp)
         with pytest.raises(RuntimeError, match="db unavailable"):
             await agent.adelete_thread("thread-1")
+
+
+class TestFileChangeLifecycle:
+    """Per-turn capture windows: pop/discard semantics and purge on teardown."""
+
+    def _make_agent(self, tmp_path: Path) -> HarnessAgent:
+        return TestAgetHistory()._make_agent(tmp_path, checkpointer=False)
+
+    def _record(self, agent: HarnessAgent, path: str, scope: str) -> None:
+        agent._file_changes.record(path, "old", "new", scope=scope)
+
+    def test_pop_drains_scope_once(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        self._record(agent, "b.md", "t2")
+        drained = agent.pop_file_changes("t1")
+        assert [c["path"] for c in drained] == ["a.md"]
+        assert agent.pop_file_changes("t1") == []
+        # The other scope is untouched by the t1 drain.
+        assert [c["path"] for c in agent.pop_file_changes("t2")] == ["b.md"]
+
+    def test_discard_drops_scope(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        agent.discard_file_changes("t1")
+        assert agent.pop_file_changes("t1") == []
+
+    def test_discard_all_clears_every_scope(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        self._record(agent, "b.md", "t2")
+        agent.discard_all_file_changes()
+        assert agent.pop_file_changes("t1") == []
+        assert agent.pop_file_changes("t2") == []
+
+    def test_new_window_drops_stale_captures(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        agent._start_file_change_window("t1", "t1")
+        assert agent.pop_file_changes("t1") == []
+
+    def test_pop_resolves_capture_scope_alias(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        # An override makes captures land under a different scope than the
+        # request's thread id; drain must follow the alias.
+        agent._start_file_change_window("t-req", "t-override")
+        self._record(agent, "a.md", "t-override")
+        drained = agent.pop_file_changes("t-req")
+        assert [c["path"] for c in drained] == ["a.md"]
+        assert agent.pop_file_changes("t-req") == []
+
+    @pytest.mark.asyncio
+    async def test_adelete_thread_purges_scope(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "thread-1")
+        await agent.adelete_thread("thread-1")
+        assert agent.pop_file_changes("thread-1") == []
+
+    def test_close_clears_all_scopes(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        self._record(agent, "a.md", "t1")
+        self._record(agent, "b.md", "t2")
+        agent.close()
+        assert agent.pop_file_changes("t1") == []
+        assert agent.pop_file_changes("t2") == []
+
+
+class TestSubagentFileCaptureWiring:
+    """The shared capture middleware must ride every subagent spec."""
+
+    def _make_agent(self, tmp_path: Path, **overrides: Any) -> HarnessAgent:
+        spec = {
+            "name": "helper",
+            "description": "helps",
+            "prompt": "You help.",
+        }
+        return TestAgetHistory()._make_agent(
+            tmp_path,
+            checkpointer=False,
+            subagents=[spec],
+            **overrides,
+        )
+
+    def test_parent_chain_contains_capture_middleware(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)
+        assert agent._file_capture in agent._build_middleware()
+
+    def test_config_specs_get_capture_middleware(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path, subagents_auto_load=False)
+        specs = agent._resolve_subagents()
+        assert len(specs) == 1
+        middleware = specs[0]["middleware"]
+        assert agent._file_capture in middleware
+        # Resolution is idempotent and never mutates the config's own list.
+        again = agent._resolve_subagents()
+        assert again[0]["middleware"].count(agent._file_capture) == 1
+        assert "middleware" not in agent._config.subagents[0]
+
+    def test_workspace_merged_specs_get_capture_middleware(self, tmp_path: Path) -> None:
+        agent = self._make_agent(tmp_path)  # subagents_auto_load defaults True
+        specs = agent._resolve_subagents()
+        assert specs
+        for spec in specs:
+            assert agent._file_capture in spec["middleware"]
 
 
 class TestMcpIntegration:
@@ -1781,6 +1887,7 @@ async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
         user="7",
         agent_id="designer",
         mcp_servers=["open-design__one"],
+        allowed_tools=["ask_user_question"],
         configurable={"locale": "zh", "session_key": "session", "knowledge_base_ids": ["kb"]},
     )
     expected = request.to_runnable_config()["configurable"]
@@ -1806,6 +1913,28 @@ async def test_hitl_resume_preserves_request_scope_across_nested_pauses(
     finally:
         await agent.aclose()
     assert agent._hitl_resume_configs == {}
+
+
+@pytest.mark.parametrize("auto_load", [False, True])
+def test_managed_subagents_receive_turn_tool_filter(
+    cfg: HarnessAgentConfig,
+    mock_model_factory: Callable[[], AbstractContextManager[MagicMock]],
+    stub_create_deep_agent: AbstractContextManager[MagicMock],
+    auto_load: bool,
+) -> None:
+    from octop_harness.middleware.tools_filter import ToolsFilterMiddleware
+
+    cfg.subagents_auto_load = auto_load
+    cfg.subagents = [
+        {"name": "reader", "description": "Read public files", "system_prompt": "Read only requested files."}
+    ]
+    with mock_model_factory(), stub_create_deep_agent as create, HarnessAgent(cfg):
+        assert create.call_args is not None
+        specs = cast(list[dict[str, object]], create.call_args.kwargs["subagents"])
+        spec = next(spec for spec in specs if spec["name"] == "reader")
+        middleware = spec["middleware"]
+        assert isinstance(middleware, list)
+        assert any(isinstance(item, ToolsFilterMiddleware) for item in cast(list[object], middleware))
 
 
 def test_summarization_factory_patch_is_exclusive() -> None:

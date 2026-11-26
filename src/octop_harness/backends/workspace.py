@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any
 from .utils import (
     BACKEND_CALL_ERRORS,
     BackendOperationNotSupportedError,
-    backend_file_exists,
+    backend_file_exists_strict,
     backend_write_force,
     delete_local_path,
     materialize_storage_path,
@@ -221,6 +221,11 @@ def _present_workspace_path(
     raw = storage_path.strip().replace("\\", "/")
     if not raw:
         return "."
+    guest_workspace = getattr(backend, "sandbox_workspace_dir", None)
+    if isinstance(guest_workspace, str):
+        relative = relative_virtual_path(raw, guest_workspace)
+        if relative is not None:
+            return relative or "."
     if backend is not None and is_cloud_storage_backend(backend):
         virt = remote_workspace_virtual_root(workspace_dir)
         rel = relative_virtual_path(raw, virt)
@@ -438,7 +443,8 @@ class BackendWorkspace:
         """Resolve a workspace-relative fragment without system-path remapping."""
         text = _strip_relative_prefix(fragment.replace("\\", "/"))
         if getattr(self._backend, "sandbox_fs", False):
-            return "/" if not text or text == "." else f"/{text}"
+            root = getattr(self._backend, "sandbox_workspace_dir", "/")
+            return root if not text or text == "." else root.rstrip("/") + "/" + text
         resolved = str((self._workspace_dir / text).resolve())
         Path(resolved).relative_to(self._workspace_dir.resolve())
         return resolved
@@ -706,13 +712,37 @@ class BackendWorkspace:
     # ----- Sync I/O -----
 
     def exists(self, path: str) -> bool:
+        # Delegate so the write path and the snapshot/rewind path can never
+        # disagree about traversal semantics.
+        return self.exists_strict(path) is True
+
+    def exists_strict(self, path: str) -> bool | None:
+        """Tri-state :meth:`exists` for fail-closed callers.
+
+        ``None`` means at least one backend probe failed, so absence could
+        not be positively confirmed; callers must treat unknown as "cannot
+        snapshot", never as "absent".
+        """
+        verdicts: list[bool | None] = []
         for fragment in self._read_fragments(path):
             for candidate in self._iter_materialize_candidates(fragment, map_system_paths=False):
-                if candidate.exists():
+                try:
+                    candidate.stat()
+                except FileNotFoundError:
+                    verdicts.append(False)
+                except (OSError, ValueError):
+                    verdicts.append(None)
+                else:
+                    # A positively confirmed local file wins over any later
+                    # backend probe (same semantics as ``exists``).
                     return True
             for key in self._candidate_storage_keys(fragment, map_system_paths=False):
-                if backend_file_exists(self._backend, key):
+                verdict = backend_file_exists_strict(self._backend, key)
+                if verdict is True:
                     return True
+                verdicts.append(verdict)
+        if None in verdicts:
+            return None
         return False
 
     def read_text(self, path: str, *, limit: int = 10_000_000) -> str | None:
