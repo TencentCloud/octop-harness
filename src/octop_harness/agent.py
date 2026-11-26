@@ -77,6 +77,7 @@ except ImportError:  # pragma: no cover - dependency is listed; defensive
     _AsyncSqliteSaver = None  # type: ignore[assignment, misc]
 
 if TYPE_CHECKING:
+    from deepagents import CompiledSubAgent, SubAgent
     from deepagents.backends.protocol import BackendProtocol
     from langchain_core.messages import BaseMessage
     from langgraph.types import Durability
@@ -1683,7 +1684,7 @@ class HarnessAgent:
         soft-fail; deny rules when permissions + execution backend) → file_capture
         (write snapshots; also attached to every subagent spec) → mcp_tools →
         retry → pii → media_offload → checkpoint_ts → memory → user middleware → team →
-        conversation_mode → tools_filter → decision (only when enabled) → tool search →
+        conversation_mode → decision (only when enabled) → tools_filter → tool search →
         task tool ordering → refusal passthrough → context_usage.
 
         ``RefusalPassthroughMiddleware`` replaces deepagents' tail
@@ -1812,7 +1813,6 @@ class HarnessAgent:
         from octop_harness.middleware.conversation_mode import ConversationModeMiddleware
 
         chain.append(ConversationModeMiddleware())
-        chain.append(ToolsFilterMiddleware(config=cfg))
 
         from octop_harness.decision import decision_active
 
@@ -1828,6 +1828,8 @@ class HarnessAgent:
                     skills_rendered_late=True,
                 )
             )
+
+        chain.append(ToolsFilterMiddleware(config=cfg))
 
         # Search only the final model-visible tool set. In particular, this
         # must run after MCP and user filtering so hidden tools cannot leak
@@ -2043,9 +2045,20 @@ class HarnessAgent:
             + "\n\n"
             + render_slash_skill_prompt(language=cfg.language)
         ).strip()
-        resolved_subagents = self._resolve_subagents(parent_tools=tools)
+        resolved_subagents = cast("list[SubAgent | CompiledSubAgent]", self._resolve_subagents(parent_tools=tools))
         if resolved_subagents:
-            kwargs["subagents"] = resolved_subagents
+            kwargs["subagents"] = [
+                spec
+                if "runnable" in spec
+                else {
+                    **spec,
+                    "middleware": [
+                        *((spec["middleware"] or []) if "middleware" in spec else []),
+                        ToolsFilterMiddleware(config=cfg, turn_only=True),
+                    ],
+                }
+                for spec in resolved_subagents
+            ]
         if skills:
             kwargs["skills"] = skills
         if memory:
