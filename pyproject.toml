@@ -43,9 +43,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "httpx>=0.27",
     "markdownify>=0.13",
-    # 1.0.5 snapshots replayed messages at a retention boundary and can prune
-    # one verified PostgreSQL thread offline after the host pauses it.
-    "octop-memory>=1.0.5",
+    "octop-memory>=1.0.6",
     "octop-browser>=0.9.9",
     "langchain-mcp-adapters>=0.3.0",
     # mcp 2.x breaks langchain-mcp-adapters (RequestContext import); pin until adapters support it.
@@ -201,6 +199,18 @@ known-first-party = ["octop_harness"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+# ---------------------------------------------------------------------------
+# Pyright / Cursor
+# ---------------------------------------------------------------------------
+
+[tool.pyright]
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+extraPaths = ["src"]
+useLibraryCodeForTypes = true
+reportMissingTypeStubs = "none"
 
 # ---------------------------------------------------------------------------
 # Mypy

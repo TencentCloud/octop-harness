@@ -6,9 +6,10 @@ from typing import Any, cast
 
 from langchain.agents.middleware import ModelRequest
 from langgraph.config import get_config
+from langgraph.typing import ContextT
 
 
-def runtime_config(request: ModelRequest) -> dict[str, Any]:
+def runtime_config(request: ModelRequest[ContextT]) -> dict[str, Any]:
     """Return the current graph ``RunnableConfig`` for middleware.
 
     LangGraph v0.6+ injects per-run settings via :func:`langgraph.config.get_config`.

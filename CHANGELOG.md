@@ -9,15 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 新增
 
+- 聊天自动召回快照新增只读候选元数据接口：`octop_harness.middleware.get_recall_candidates(message)` 与 `RecallCandidate`。宿主自定义中间件可在 `before_model` 读取本轮私有召回的 `atom_id`、排序位次 `rank` 等轻量元数据，用于外挂外部召回源时的同源去重与预算控制；重放发给模型前仍自动剥离全部私有字段，无消费者时发包行为完全不变（#260 / Octop#2966）。
 - 新增 CubeSandbox 后端，支持远程命令、虚拟文件系统，以及基于 PostgreSQL 锁的沙箱复用。
 - CubeSandbox 工作区可镜像到对象存储：新建沙箱自动回灌，`archive_workspace()` 负责归档。
 - 文件系统中间件按回合记录文件写入：每个文件保留本轮首次写入前与最后一次写入后的内容，主代理和子代理共用同一条捕获链路；宿主可据此生成回合级 diff，并在文件未被后续改动时回滚。
 
 ### 修复
 
+- 最低依赖升级到 `octop-memory 1.0.6`，确保发布包类型声明及最新记忆召回、原始索引修复可用。
+- 定时 checkpoint 裁剪备份检测到源 SQLite 库损坏（`database disk image is malformed`、`file is not a database` 或 `PRAGMA quick_check` 失败）时，即使在默认的 `first` 备份模式下也会中止裁剪且不写入完成标记，避免在损坏库上继续删除行；同时为裁剪备份连接、`reclaimable` 检查及可选 `VACUUM` 补齐 `busy_timeout=30000`，并在 `VACUUM` 前校验 `PRAGMA quick_check`（Octop#2998）。
+- 修复记忆运行时依赖已从 `deepagents` 移除的私有消息 reducer，兼容 `deepagents` 0.7.41。
 - 托管 ACP 智能体初始化时保留 checkpointer，从而可以往已有会话里追加消息。
 - 华为云 OBS 客户端改为传入单个秒级超时。原先传入 `(connect, read)` 元组，探测和浏览会在 `socket.settimeout` 上报 `'tuple' object cannot be interpreted as an integer`（Octop#2971）。
 - 子代理目录里没有 YAML frontmatter 的普通 Markdown 不再打成坏代理；未知工具名的日志带上所在文件（Octop#2977）。
+- 决策模型筛选工具时始终保留 `memory_save`，避免用户要求记住内容时该工具被静默裁掉（Octop#3073）。
 - `browser_use` 打开页面时使用与 `web_fetch` 相同的地址检查，并拒绝用配置名或截图路径跳出目录。
 
 ## [1.0.11] - 2026-11-17

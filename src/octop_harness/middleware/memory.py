@@ -43,6 +43,8 @@ from octop_harness.middleware.checkpoint_backup import (
     prepare_checkpoint_backup,
 )
 from octop_harness.middleware.memory_recall import (
+    RecallCandidate,
+    extract_recall_candidates,
     has_recall_snapshot,
     replay_recall_snapshots,
     stamp_recall_snapshot,
@@ -194,8 +196,9 @@ def _checkpoint_sqlite_path(memory: Any) -> Path | None:
 def _reclaimable_checkpoint_bytes(path: Path) -> int:
     import sqlite3
 
-    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=30.0)
     try:
+        conn.execute("PRAGMA busy_timeout=30000")
         page = int(conn.execute("PRAGMA page_size").fetchone()[0])
         free = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
     finally:
@@ -274,8 +277,17 @@ def _vacuum_checkpoint_if_needed(path: Path) -> None:
     import sqlite3
 
     try:
-        conn = sqlite3.connect(path)
+        conn = sqlite3.connect(path, timeout=30.0)
         try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            check = conn.execute("PRAGMA quick_check").fetchone()
+            if check != ("ok",):
+                logger.error(
+                    "skipping checkpoint VACUUM for %s: SQLite integrity check failed (%r)",
+                    path,
+                    check,
+                )
+                return
             conn.execute("VACUUM")
         finally:
             conn.close()
@@ -631,8 +643,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                     promote=promote,
                     regen_pages=regen_pages,
                 )
-                result_dict = result if isinstance(result, dict) else None
-                failure_reason = result_dict.get("failure_reason") if result_dict else None
+                failure_reason = result.get("failure_reason")
                 if failure_reason:
                     logger.info(
                         "MemoryMiddleware.end_session(%s) degraded: %s",
@@ -640,10 +651,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                         failure_reason,
                     )
                 else:
-                    if result_dict is not None:
-                        summary: object = {k: result_dict[k] for k in ("candidates", "promoted") if k in result_dict}
-                    else:
-                        summary = result
+                    summary: object = {k: result[k] for k in ("candidates", "promoted") if k in result}
                     logger.info(
                         "memory.trigger end_session->extract done session=%s result=%s",
                         session_id,
@@ -670,6 +678,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
     ) -> HumanMessage:
         """Freeze success, empty recall, maintenance skip, or failure for this turn."""
         rendered = ""
+        candidates: tuple[RecallCandidate, ...] | None = ()
         try:
             query = _stringify_content(message.content).strip()
             configurable = _get_configurable(runtime)
@@ -684,6 +693,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                     query, thread_id=thread_id, session_id=session_id, limit=self._recall_limit, **context_options
                 )
                 rendered = getattr(result, "rendered", None) or ""
+                candidates = extract_recall_candidates(result, rendered=rendered)
                 logger.debug(
                     "memory.trigger recall_inject thread=%s session=%s query_chars=%d query_sha256=%s limit=%d hit=%s",
                     thread_id,
@@ -695,7 +705,9 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 )
         except Exception:  # recall injection is best-effort; pylint: disable=broad-except
             logger.warning("MemoryMiddleware recall injection failed", exc_info=True)
-        return stamp_recall_snapshot(message, rendered)
+            rendered = ""
+            candidates = ()
+        return stamp_recall_snapshot(message, rendered, candidates=candidates)
 
     # ------------------------------------------------------------------
     # Write-path helpers

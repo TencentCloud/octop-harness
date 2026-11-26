@@ -142,6 +142,15 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
   text is not logged.
   Set `memory_recall_inject_enabled=False` on `HarnessAgentConfig` to disable
   fresh automatic recall while retaining memory tools and exact replay of old turns.
+- Host middlewares registered via `HarnessAgentConfig(middleware=[...])` run
+  after `MemoryMiddleware` and can call `get_recall_candidates(message)` (from
+  `octop_harness.middleware`) in `before_model` to inspect a read-only tuple of
+  `RecallCandidate` records (`atom_id`, 1-based `rank`, `layer`, `role_hint`,
+  `timestamp_iso`) stamped for the turn. It returns `()` when recall ran with no
+  hits, and `None` when recall is disabled, unsupported, or invalidated by a
+  content rewrite. Read it in `before_model` rather than `wrap_model_call`,
+  because `MemoryMiddleware` replays and strips private snapshot metadata before
+  forwarding API copies.
 
 Memory extraction can be configured independently of main chat:
 `memory_extract_max_tokens` sets the candidate/episode output budget (default
@@ -312,6 +321,18 @@ async for chunk in agent.stream(request):
     print(chunk.delta, end="")
 ```
 
+### Per-invocation tool permissions
+
+Pass `ChatRequest(messages="Hello", allowed_tools=[])` for a chat-only turn, or
+an exact tool-name list such as `["web_fetch"]` to narrow that invocation.
+`None` keeps existing behavior. This ceiling intersects configured permissions
+and Ask/Plan restrictions, filters the final tool catalog, and rejects forbidden
+tool calls before execution. Managed subagents and in-process HITL resumes retain
+the request scope; concurrent requests do not mutate the agent configuration.
+Hosts must derive the ceiling from trusted authorization data. Custom tools and
+precompiled subagents remain responsible for operations they perform internally.
+Tool permissions do not remove private memory already included in model context.
+
 ### Progressive tool loading
 
 Large, low-frequency tool sets can be hidden until the model needs them. The
@@ -369,7 +390,7 @@ and released when the resumed stream finishes or the agent closes.
 ### Scheduled SQLite checkpoint backups
 
 PostgreSQL checkpoint tables are shared. Scheduled retention skips them.
-With octop-memory 1.0.5, hosts can prune a verified thread offline after
+Hosts can prune a verified thread offline after
 pausing its execution, resumption and forks across all hosts.
 
 With a Memory version exposing `acheckpoint_activity(thread_id)`, Harness holds
@@ -515,9 +536,3 @@ async with ManagedMCPClient({"transport": "stdio", "command": "my-mcp", "args": 
 Explicit `await client.aclose()` is also supported. Closed or disconnected clients
 must be replaced; writes are never retried automatically. Default MCP tool loading
 remains stateless.
-
-## Inbound plugin admission
-
-Hook plugins can register host-neutral pre-agent handlers and optionally use host decision scoring. See [contracts and lifecycle](docs/inbound-plugins.md). The host must provide the Gateway bridge.
-
-All plugin kinds can register `ctx.settings(provider)` to own their settings schema and storage. Inbound handlers may implement the optional `InboundTextRenderer` contract to assemble text without hardcoded host prompt labels; authorization, media blocks and delivery stay with the host.
