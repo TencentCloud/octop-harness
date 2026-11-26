@@ -1507,9 +1507,10 @@ class TestBootstrapMiddlewareWiring:
         with mock_model_factory(), patch("deepagents.create_deep_agent", side_effect=fake_create):
             HarnessAgent(cfg)
 
-        # ``ask_user_question`` is a collaboration channel, not an approval gate,
-        # so it stays mounted; the security-derived file-tool gates must not.
-        assert set(captured.get("interrupt_on", {})) == {"ask_user_question"}
+        # ``ask_user_question`` and ``request_structured_form`` are collaboration
+        # channels, not approval gates, so they stay mounted; the security-derived
+        # file-tool gates must not.
+        assert set(captured.get("interrupt_on", {})) == {"ask_user_question", "request_structured_form"}
 
     def test_passes_interrupt_on_after_bootstrap(
         self,

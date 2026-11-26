@@ -693,6 +693,12 @@ class HarnessAgentConfig:
     # unattended runs (cron, heartbeats) where nobody can answer.
     ask_user_enabled: bool = True
 
+    # —— Structured forms (typed agent-initiated input) ——
+    # Mounts ``request_structured_form`` and pauses the graph on a
+    # ``respond``-only HITL interrupt. Independent from ``ask_user_enabled``
+    # so existing question behavior can be disabled without disabling forms.
+    structured_form_enabled: bool = True
+
     # —— Peer agents (call other experts via agent_list / ask_agent) ——
     # When True and the agent is created through
     # :class:`~octop_harness.manager.HarnessAgentManager`, ``PeerAgentMiddleware``
@@ -1112,6 +1118,7 @@ class HarnessAgentConfig:
             if self.tool_guard_rules_dir is not None
             else None,
             "ask_user_enabled": self.ask_user_enabled,
+            "structured_form_enabled": self.structured_form_enabled,
             "team_enabled": self.team_enabled,
             "team_peers": list(self.team_peers) if self.team_peers is not None else None,
             "peer_invoke_mode": self.peer_invoke_mode,

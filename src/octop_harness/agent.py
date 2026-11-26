@@ -29,6 +29,10 @@ from octop_harness.builtin.tools.desktop_screenshot import build_desktop_screens
 from octop_harness.builtin.tools.env_file import build_env_file_tools
 from octop_harness.builtin.tools.media_generation import build_media_generation_tools
 from octop_harness.builtin.tools.send_file import build_send_file_to_user_tool
+from octop_harness.builtin.tools.structured_form import (
+    STRUCTURED_FORM_TOOL_NAME,
+    request_structured_form,
+)
 from octop_harness.builtin.tools.web_search import load_web_search_tools
 from octop_harness.config import HarnessAgentConfig
 from octop_harness.init import InitResult
@@ -1609,6 +1613,8 @@ class HarnessAgent:
         tools.extend(load_web_search_tools(cfg.web_search_tools))
         if self._ask_user_active():
             tools.append(ask_user_question)
+        if self._structured_form_active():
+            tools.append(request_structured_form)
         if cfg.media_generation is not None and cfg.media_generation.has_api_key():
             tools.extend(build_media_generation_tools(self._workspace, cfg.media_generation))
         tools.extend(self._memory_runtime.build_tools())
@@ -1636,6 +1642,11 @@ class HarnessAgent:
         cfg = self._config
         return bool(cfg.ask_user_enabled) and ASK_USER_TOOL_NAME not in cfg.tools_disabled
 
+    def _structured_form_active(self) -> bool:
+        """Whether the typed structured-form channel is mounted."""
+        cfg = self._config
+        return bool(cfg.structured_form_enabled) and STRUCTURED_FORM_TOOL_NAME not in cfg.tools_disabled
+
     def _resolve_interrupt_on(self) -> dict[str, Any]:
         """Merge security-derived HITL gates with the ask-user channel."""
         interrupt_on: dict[str, Any] = {}
@@ -1650,6 +1661,11 @@ class HarnessAgent:
             interrupt_on[ASK_USER_TOOL_NAME] = {
                 "allowed_decisions": ["respond"],
                 "description": "The agent is asking you to decide.",
+            }
+        if self._structured_form_active():
+            interrupt_on[STRUCTURED_FORM_TOOL_NAME] = {
+                "allowed_decisions": ["respond", "cancel"],
+                "description": "The agent is asking you to fill in a structured form.",
             }
         return interrupt_on
 
