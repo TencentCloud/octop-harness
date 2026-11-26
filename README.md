@@ -152,6 +152,11 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
   because `MemoryMiddleware` replays and strips private snapshot metadata before
   forwarding API copies.
 
+You can guide candidate and episode extraction with `memory_extract_keep_rules` and
+`memory_extract_skip_rules`. Each accepts up to 2,000 characters. Empty values use
+the built-in prompt. Explicit rules require a version of octop-memory that exposes
+`MemoryService.supports_extraction_rules`.
+
 Memory extraction can be configured independently of main chat:
 `memory_extract_max_tokens` sets the candidate/episode output budget (default
 2048), while `memory_aux_light_timeout_s` / `memory_aux_heavy_timeout_s` set

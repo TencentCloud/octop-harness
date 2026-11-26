@@ -70,12 +70,13 @@ class MemoryRuntime:
         self._live_middlewares: set[MemoryMiddleware] = set()
 
         if config.memory_enabled:
+            extraction_config = _extraction_service_config(config)
             self._memory = self._build_memory()
             self._llm_client = self._build_llm_client() if config.memory_aux_model_enabled else None
             self._service = MemoryService(
                 self._memory,
                 llm=self._llm_client,
-                config=_extraction_service_config(config),
+                config=extraction_config,
                 host="octop-harness",
                 manual_documents_provider=(
                     lambda: {
@@ -339,15 +340,25 @@ class MemoryRuntime:
 
 
 def _extraction_service_config(config: HarnessAgentConfig) -> dict[str, Any] | None:
-    """Budget passed into octop-memory's extractor.
+    """Extraction policy forwarded into octop-memory's ``extraction`` config.
 
     ``CandidateExtractor`` always sends its own ``max_tokens`` (default
-    2048). A harness-side fallback on the chat client never overrides that,
-    so the host budget has to land in ``extraction.max_tokens``.
+    2048), so the host budget has to land in ``extraction.max_tokens``.
+    Optional retention guidance lands in ``extraction.keep_rules`` and
+    ``extraction.skip_rules``.
     """
-    if config.memory_extract_max_tokens is None:
-        return None
-    return {"extraction": {"max_tokens": config.memory_extract_max_tokens}}
+    if (config.memory_extract_keep_rules or config.memory_extract_skip_rules) and not getattr(
+        MemoryService, "supports_extraction_rules", False
+    ):
+        raise ValueError("Configured memory extraction rules require an octop-memory build with retention rule support")
+    extraction: dict[str, Any] = {}
+    if config.memory_extract_max_tokens is not None:
+        extraction["max_tokens"] = config.memory_extract_max_tokens
+    if config.memory_extract_keep_rules is not None:
+        extraction["keep_rules"] = config.memory_extract_keep_rules
+    if config.memory_extract_skip_rules is not None:
+        extraction["skip_rules"] = config.memory_extract_skip_rules
+    return {"extraction": extraction} if extraction else None
 
 
 __all__ = ["MemoryRuntime"]
