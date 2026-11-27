@@ -668,12 +668,20 @@ async def test_fallback_summary_reports_producing_model_and_offloads_once(tmp_pa
     graph = MagicMock()
     graph.aget_state = AsyncMock(return_value=SimpleNamespace(values={"messages": _long_thread(8)}))
     graph.aupdate_state = AsyncMock()
+    graph_mw = SummarizationMiddleware(
+        model=primary,
+        backend=_workspace_backend(tmp_path),
+        trigger=("messages", 99),
+        keep=("messages", 2),
+        trim_tokens_to_summarize=1234,
+    )
     calls = []
     original = SummarizationMiddleware._acreate_summary
     archives = []
     offload = SummarizationMiddleware._aoffload_to_backend
 
     async def summarize(mw, messages):
+        assert mw._lc_helper.trim_tokens_to_summarize == 1234
         calls.append(mw._lc_helper.model)
         if mw._lc_helper.model is primary or not fallback_succeeds:
             exc = RuntimeError("insufficient balance")
@@ -695,6 +703,7 @@ async def test_fallback_summary_reports_producing_model_and_offloads_once(tmp_pa
             model=primary,
             model_ref="provider/primary",
             fallback=("provider/backup", lambda: backup),
+            summarization_middleware=graph_mw,
             thread_id="thread",
         )
     assert calls == [primary, backup]

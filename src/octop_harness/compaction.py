@@ -158,6 +158,13 @@ def _build_force_summarization_middleware(model: Any, backend: Any) -> Any:
     )
 
 
+def _inherit_summary_budget(target: Any, source: Any) -> None:
+    """Keep the expert's input limit on each request-local summary helper."""
+    limit = getattr(getattr(source, "_lc_helper", None), "trim_tokens_to_summarize", None)
+    if isinstance(limit, int):
+        target._lc_helper.trim_tokens_to_summarize = limit
+
+
 def _is_summarization_middleware(obj: Any) -> bool:
     name = getattr(obj, "serialized_name", None) or getattr(type(obj), "serialized_name", None)
     if name == "SummarizationMiddleware":
@@ -287,6 +294,7 @@ async def _summarize_and_offload(
             model_ref, get_fallback = fallback
             try:
                 fallback_mw = _build_force_summarization_middleware(get_fallback(), offload_backend)
+                _inherit_summary_budget(fallback_mw, work_mw)
                 fallback_config = {**config, "configurable": {**config["configurable"], "model": model_ref}}
                 retry_token = var_child_runnable_config.set(cast(RunnableConfig, fallback_config))
                 try:
@@ -387,8 +395,8 @@ async def force_compact_thread(
 
     Always uses a force-specific keep policy (last
     :data:`FORCE_KEEP_MESSAGES` messages) and *model* for summary generation.
-    Prefers the graph middleware (same backend / session id / apply-event)
-    and only builds a one-shot instance when that MW is missing.
+    Named model routes use request-local middleware with the expert input budget
+    so concurrent conversations cannot overwrite each other's summary model.
     """
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
     if model_ref:
@@ -415,6 +423,7 @@ async def force_compact_thread(
     else:
         try:
             force_mw = _build_force_summarization_middleware(model, offload_backend)
+            _inherit_summary_budget(force_mw, graph_mw)
         except DEFENSIVE_OP_ERRORS as exc:
             return CompactResult(ok=False, reason="unavailable", error=str(exc))
         mw_cm = nullcontext(force_mw)
