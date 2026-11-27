@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- 手动压缩支持备用摘要模型，并返回实际生成摘要的模型、失败候选和失败阶段（TencentCloud/Octop#3076）。
+
 ## [1.0.13] - 2026-11-26
 
 ### 新增
