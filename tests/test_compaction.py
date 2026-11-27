@@ -656,3 +656,54 @@ async def test_force_compact_drops_reasoning_from_kept_messages(tmp_path) -> Non
     assert _reasoning_blocks(effective[1:]) == 0
     # Dropping reasoning keeps the visible answer.
     assert all(any(b.get("type") == "text" for b in m.content) for m in effective[1:] if isinstance(m.content, list))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback_succeeds", [True, False])
+async def test_fallback_summary_reports_producing_model_and_offloads_once(tmp_path, fallback_succeeds):
+    from deepagents.middleware.summarization import SummarizationMiddleware
+
+    primary = _summary_model("unused")
+    backup = _summary_model("summary written by backup")
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=SimpleNamespace(values={"messages": _long_thread(8)}))
+    graph.aupdate_state = AsyncMock()
+    calls = []
+    original = SummarizationMiddleware._acreate_summary
+    archives = []
+    offload = SummarizationMiddleware._aoffload_to_backend
+
+    async def summarize(mw, messages):
+        calls.append(mw._lc_helper.model)
+        if mw._lc_helper.model is primary or not fallback_succeeds:
+            exc = RuntimeError("insufficient balance")
+            exc.status_code = 402
+            raise exc
+        return await original(mw, messages)
+
+    async def archive(mw, *args):
+        archives.append(args[-1])
+        return await offload(mw, *args)
+
+    with (
+        patch.object(SummarizationMiddleware, "_acreate_summary", summarize),
+        patch.object(SummarizationMiddleware, "_aoffload_to_backend", archive),
+    ):
+        result = await force_compact_thread(
+            graph=graph,
+            backend=_workspace_backend(tmp_path),
+            model=primary,
+            model_ref="provider/primary",
+            fallback=("provider/backup", lambda: backup),
+            thread_id="thread",
+        )
+    assert calls == [primary, backup]
+    assert len(archives) == 1
+    assert result.ok == fallback_succeeds
+    assert result.model_ref == ("provider/backup" if fallback_succeeds else None)
+    assert [failure.reason for failure in result.model_failures] == ["http_402"] * (1 if fallback_succeeds else 2)
+    assert result.model_failures[0].model_ref == "provider/primary"
+    assert graph.aupdate_state.await_count == int(fallback_succeeds)
+    if fallback_succeeds:
+        event = graph.aupdate_state.await_args.args[1]["_summarization_event"]
+        assert "summary written by backup" in str(event["summary_message"].content)

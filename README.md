@@ -547,3 +547,5 @@ that emits `InboundMessage.allowed_tools` and an Octop version that forwards it.
 The Octop release must upgrade both SDKs; older gateways silently lack the field,
 while older harness versions reject the new request parameter. Source integration
 tests are distinct from acceptance with the released, locked dependency set.
+
+Manual compaction accepts an optional fallback with `await agent.acompact_conversation(thread_id, model=primary, fallback_model=secondary)`. The result identifies the producing model (`model_ref`), failed candidates (`model_failures`) and the failure stage. Both attempts share one history offload.

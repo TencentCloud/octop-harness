@@ -959,15 +959,19 @@ class HarnessAgent:
         thread_id: str,
         *,
         model: str | None = None,
+        fallback_model: str | None = None,
     ) -> Any:
         """Force one SummarizationMiddleware cycle: offload history + write summary.
 
         Ignores the auto 85% token trigger. Uses a tighter keep policy than
         auto-compaction (last few messages) so ``/compact`` visibly shrinks
-        model context. The summary LLM follows *model* when provided.
+        model context. A failed summary can use *fallback_model* once. The
+        result records the producing model and failed candidates.
         Does **not** create a new thread.
         """
-        from octop_harness.compaction import CompactResult, force_compact_thread
+        from dataclasses import replace
+
+        from octop_harness.compaction import CompactModelFailure, CompactResult, force_compact_thread
 
         if not thread_id:
             return CompactResult(ok=False, reason="unavailable", error="missing thread_id")
@@ -975,14 +979,27 @@ class HarnessAgent:
         if graph is None:
             return CompactResult(ok=False, reason="unavailable", error="graph not ready")
 
-        model_ref = (model or "").strip() or None
-        if model_ref:
+        primary = (model or "").strip() or self._config.pick_default_model_ref()
+        alternate = (fallback_model or "").strip()
+        refs = list(dict.fromkeys(ref for ref in (primary, alternate) if ref))
+        failures: list[CompactModelFailure] = []
+        for model_ref in refs:
             try:
                 chat_model = self._model_factory.get_chat_model(model_ref)
+                break
             except DEFENSIVE_OP_ERRORS:
-                chat_model = self._build_seed_model()
+                failures.append(CompactModelFailure(model_ref, "model_unavailable"))
         else:
-            chat_model = self._build_seed_model()
+            return CompactResult(
+                ok=False,
+                reason="error",
+                failure_stage="model",
+                model_failures=tuple(failures),
+                error="no usable summary model",
+            )
+        fallback = None
+        if alternate and alternate != model_ref:
+            fallback = (alternate, lambda: self._model_factory.get_chat_model(alternate))
 
         async with self.checkpoint_activity(thread_id):
             result = await force_compact_thread(
@@ -992,7 +1009,10 @@ class HarnessAgent:
                 thread_id=thread_id,
                 model_ref=model_ref,
                 summarization_middleware=self._summarization_mw,
+                fallback=fallback,
             )
+        if failures:
+            result = replace(result, model_failures=(*failures, *result.model_failures))
         # No model call happened, so ContextUsageMiddleware wrote no new
         # snapshot — and its in-process snapshot outranks the message stamp in
         # ``aget_context_usage``. Without this the host context ring keeps

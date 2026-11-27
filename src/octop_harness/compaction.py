@@ -14,9 +14,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from langchain_core.runnables.config import RunnableConfig, var_child_runnable_config
@@ -40,6 +40,23 @@ MIN_SUMMARIZE_MESSAGES = 2
 
 
 @dataclass(frozen=True)
+class CompactModelFailure:
+    """A failed summary candidate and a safe, displayable reason code."""
+
+    model_ref: str
+    reason: str
+
+    @classmethod
+    def from_error(cls, ref: str, exc: Exception) -> CompactModelFailure:
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and 400 <= status < 600:
+            return cls(ref, f"http_{status}")
+        if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
+            return cls(ref, "timeout")
+        return cls(ref, "summary_failed")
+
+
+@dataclass(frozen=True)
 class CompactResult:
     """Outcome of :meth:`HarnessAgent.acompact_conversation`."""
 
@@ -58,6 +75,10 @@ class CompactResult:
     """
     display_path: str | None = None
     """POSIX workspace-relative path for UI (no host drive / home / backslashes)."""
+    model_ref: str | None = None
+    """Model that actually generated the summary, including on a later persistence failure."""
+    model_failures: tuple[CompactModelFailure, ...] = ()
+    failure_stage: str | None = None
 
 
 def display_offload_path(file_path: str | None, session_id: str = "") -> str:
@@ -206,6 +227,15 @@ def _partition_for_force(
     return to_summarize, preserved, cutoff
 
 
+async def _summary_attempt(mw: Any, messages: list[Any]) -> str:
+    from octop_harness.middleware.summarization_limits import SUMMARY_FALLBACK_TEXT
+
+    summary: str = await mw._acreate_summary(messages)
+    if not summary.strip() or summary in (SUMMARY_FALLBACK_TEXT, "Previous conversation was too long to summarize."):
+        raise ValueError("summary model did not produce a summary")
+    return summary
+
+
 async def _summarize_and_offload(
     *,
     work_mw: Any,
@@ -213,37 +243,68 @@ async def _summarize_and_offload(
     to_summarize: list[Any],
     session_id: str,
     config: dict[str, Any],
-    thread_id: str,
-) -> CompactResult | tuple[Any, str]:
-    """Offload history + create summary. ``file_path is None`` is a hard fail."""
+    model_ref: str | None,
+    fallback: tuple[str, Callable[[], Any]] | None,
+) -> CompactResult | tuple[str, str, str | None, tuple[CompactModelFailure, ...]]:
+    """Write history once, even if summary generation needs a second model."""
     token = var_child_runnable_config.set(cast(RunnableConfig, config))
     try:
+        offloaded = to_summarize
         try:
-            # Inline media must finish first (rewrites message content for both paths).
-            # History offload and summary LLM are independent — run concurrently
-            # (same as deepagents SummarizationMiddleware.abefore_model).
-            offloaded = to_summarize
             aoffload_media = getattr(work_mw, "_aoffload_inline_media", None)
             if callable(aoffload_media):
                 offloaded, _failed = await aoffload_media(offload_backend, to_summarize)
 
-            file_path, summary = await asyncio.gather(
+            archive: str | BaseException | None
+            summary: str | BaseException
+            archive, summary = await asyncio.gather(
                 work_mw._aoffload_to_backend(offload_backend, offloaded, session_id),
-                work_mw._acreate_summary(offloaded),
+                _summary_attempt(work_mw, offloaded),
+                return_exceptions=True,
             )
-        except Exception as exc:  # offload/summary failure degrades compaction; pylint: disable=broad-except
-            logger.exception("acompact: summarization failed for thread=%s", thread_id)
-            return CompactResult(ok=False, reason="error", error=str(exc))
+        except Exception as exc:
+            return CompactResult(ok=False, reason="error", failure_stage="offload", error=str(exc))
+        for outcome in (archive, summary):
+            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+                raise outcome
+        failures: tuple[CompactModelFailure, ...] = ()
+        if isinstance(summary, Exception) and model_ref:
+            failures = (CompactModelFailure.from_error(model_ref, summary),)
+        if not isinstance(archive, str) or not archive:
+            return CompactResult(
+                ok=False,
+                reason="error",
+                failure_stage="offload",
+                model_ref=model_ref if isinstance(summary, str) else None,
+                model_failures=failures,
+                error="history offload failed",
+            )
+        if isinstance(summary, Exception):
+            if fallback is None:
+                return CompactResult(
+                    ok=False, reason="error", failure_stage="summary", error=str(summary), model_failures=failures
+                )
+            model_ref, get_fallback = fallback
+            try:
+                fallback_mw = _build_force_summarization_middleware(get_fallback(), offload_backend)
+                fallback_config = {**config, "configurable": {**config["configurable"], "model": model_ref}}
+                retry_token = var_child_runnable_config.set(cast(RunnableConfig, fallback_config))
+                try:
+                    summary = await _summary_attempt(fallback_mw, offloaded)
+                finally:
+                    var_child_runnable_config.reset(retry_token)
+            except Exception as exc:
+                return CompactResult(
+                    ok=False,
+                    reason="error",
+                    failure_stage="summary",
+                    error=str(exc),
+                    model_failures=(*failures, CompactModelFailure.from_error(model_ref, exc)),
+                )
+        assert isinstance(summary, str)
+        return archive, summary, model_ref, failures
     finally:
         var_child_runnable_config.reset(token)
-
-    if file_path is None:
-        logger.error(
-            "acompact: history offload failed for thread=%s; conversation not compacted",
-            thread_id,
-        )
-        return CompactResult(ok=False, reason="error", error="history offload failed")
-    return file_path, summary
 
 
 async def _persist_compact_event(
@@ -294,6 +355,7 @@ async def _persist_compact_event(
         return CompactResult(
             ok=False,
             reason="error",
+            failure_stage="checkpoint",
             error=str(exc),
             summarized_count=len(to_summarize),
             preserved_count=len(preserved),
@@ -319,6 +381,7 @@ async def force_compact_thread(
     thread_id: str,
     model_ref: str | None = None,
     summarization_middleware: Any | None = None,
+    fallback: tuple[str, Callable[[], Any]] | None = None,
 ) -> CompactResult:
     """Summarize+offload older messages for *thread_id*; update ``_summarization_event``.
 
@@ -335,7 +398,7 @@ async def force_compact_thread(
         state = await graph.aget_state(config)
     except DEFENSIVE_OP_ERRORS as exc:
         logger.warning("acompact: aget_state failed for %r", thread_id, exc_info=True)
-        return CompactResult(ok=False, reason="unavailable", error=str(exc))
+        return CompactResult(ok=False, reason="unavailable", failure_stage="checkpoint", error=str(exc))
 
     values = getattr(state, "values", None) or {}
     if not isinstance(values, dict):
@@ -346,7 +409,7 @@ async def force_compact_thread(
     graph_mw = summarization_middleware if _is_summarization_middleware(summarization_middleware) else None
     offload_backend = _resolve_offload_backend(graph_mw, backend)
 
-    reuse = graph_mw is not None and _has_reusable_helper(graph_mw)
+    reuse = model_ref is None and graph_mw is not None and _has_reusable_helper(graph_mw)
     if reuse:
         mw_cm: Any = _force_policy(graph_mw, model)
     else:
@@ -369,12 +432,13 @@ async def force_compact_thread(
             to_summarize=to_summarize,
             session_id=session_id,
             config=config,
-            thread_id=thread_id,
+            model_ref=model_ref,
+            fallback=fallback,
         )
         if isinstance(produced, CompactResult):
             return produced
-        file_path, summary = produced
-        return await _persist_compact_event(
+        file_path, summary, used_ref, failures = produced
+        result = await _persist_compact_event(
             graph=graph,
             config=config,
             work_mw=work_mw,
@@ -388,12 +452,14 @@ async def force_compact_thread(
             messages=messages,
             thread_id=thread_id,
         )
+        return replace(result, model_ref=used_ref, model_failures=failures)
 
 
 __all__ = [
     "FORCE_KEEP_MESSAGES",
     "MIN_EFFECTIVE_MESSAGES",
     "MIN_SUMMARIZE_MESSAGES",
+    "CompactModelFailure",
     "CompactResult",
     "display_offload_path",
     "force_compact_thread",
