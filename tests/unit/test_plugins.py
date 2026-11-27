@@ -202,3 +202,37 @@ def test_channel_registry_update_and_unload(tmp_path: Path) -> None:
     assert [reg.kind for reg in registry.all_channels()] == ["new-kind"]
     registry.unregister("owner")
     assert registry.all_channels() == []
+
+
+def test_load_plugin_dir_purges_submodule_cache_on_reload_and_failure(tmp_path: Path) -> None:
+    import sys
+
+    plugin_dir = tmp_path / "reload-sub"
+    pkg_dir = plugin_dir / "subpkg"
+    pkg_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.yaml").write_text(
+        "id: reload-sub\nversion: 0.1.0\nname: ReloadSub\nkind: tool\nentry: main.py\n",
+        encoding="utf-8",
+    )
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+    helper = pkg_dir / "helper.py"
+    helper.write_text("VALUE = 'v1'\n", encoding="utf-8")
+    (plugin_dir / "main.py").write_text(
+        "from .subpkg.helper import VALUE\ndef setup(ctx):\n    ctx.tool('get_val', lambda: VALUE)\n",
+        encoding="utf-8",
+    )
+
+    first = load_plugin_dir(plugin_dir, install_deps=False)
+    assert first.tools[0].fn() == "v1"
+
+    helper.write_text("VALUE = 'v2_updated'\n", encoding="utf-8")
+    second = load_plugin_dir(plugin_dir, install_deps=False)
+    assert second.tools[0].fn() == "v2_updated"
+
+    (plugin_dir / "main.py").write_text(
+        "from .subpkg.helper import VALUE\ndef setup(ctx):\n    raise RuntimeError('boom after submodule import')\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="boom after submodule import"):
+        load_plugin_dir(plugin_dir, install_deps=False)
+    assert not any(k == "harness_plugin_reload_sub" or k.startswith("harness_plugin_reload_sub.") for k in sys.modules)

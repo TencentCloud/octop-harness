@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import logging
 import subprocess
@@ -42,6 +43,18 @@ def _install_requires(plugin_dir: Path, requires: tuple[str, ...]) -> None:
         )
 
 
+def _purge_plugin_modules(plugin_id: str) -> None:
+    """Evict a plugin's cached entry and submodule imports before reload or unload."""
+    safe_id = plugin_id.replace("-", "_")
+    module_name = f"harness_plugin_{safe_id}"
+    sys.modules.pop(module_name, None)
+    prefix = module_name + "."
+    for key in list(sys.modules):
+        if key.startswith(prefix):
+            sys.modules.pop(key, None)
+    importlib.invalidate_caches()
+
+
 def load_plugin_dir(
     plugin_dir: Path,
     *,
@@ -57,6 +70,7 @@ def load_plugin_dir(
 
     safe_id = manifest.id.replace("-", "_")
     module_name = f"harness_plugin_{safe_id}"
+    _purge_plugin_modules(manifest.id)
     spec = importlib.util.spec_from_file_location(
         module_name,
         entry_path,
@@ -72,17 +86,17 @@ def load_plugin_dir(
     loaded = False
     try:
         spec.loader.exec_module(module)
+        ctx = PluginContext(manifest=manifest, source_path=plugin_dir)
+        setup = getattr(module, "setup", None)
+        if not callable(setup):
+            raise AttributeError(f"plugin entry must define setup(ctx): {entry_path}")
+        setup(ctx)
+        result = register_loaded(ctx)
         loaded = True
+        return result
     finally:
         if not loaded:
-            sys.modules.pop(module_name, None)
-
-    ctx = PluginContext(manifest=manifest, source_path=plugin_dir)
-    setup = getattr(module, "setup", None)
-    if not callable(setup):
-        raise AttributeError(f"plugin entry must define setup(ctx): {entry_path}")
-    setup(ctx)
-    return register_loaded(ctx)
+            _purge_plugin_modules(manifest.id)
 
 
 def load_all(plugins_root: Path, *, install_deps: bool = True) -> list[LoadedPlugin]:
@@ -104,11 +118,5 @@ def unload_plugin(plugin_id: str) -> bool:
     removed = registry.unregister(plugin_id)
     if removed is None:
         return False
-    safe_id = plugin_id.replace("-", "_")
-    module_name = f"harness_plugin_{safe_id}"
-    sys.modules.pop(module_name, None)
-    prefix = module_name + "."
-    for key in list(sys.modules):
-        if key.startswith(prefix):
-            sys.modules.pop(key, None)
+    _purge_plugin_modules(plugin_id)
     return True
