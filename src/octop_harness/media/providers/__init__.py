@@ -2,6 +2,12 @@
 
 from octop_harness.media.providers.dashscope import DashScopeMediaProvider
 from octop_harness.media.providers.minimax import MiniMaxMediaProvider
+from octop_harness.media.providers.tencent_tokenhub import TencentTokenHubMediaProvider
 from octop_harness.media.providers.volcengine import VolcengineMediaProvider
 
-__all__ = ["DashScopeMediaProvider", "MiniMaxMediaProvider", "VolcengineMediaProvider"]
+__all__ = [
+    "DashScopeMediaProvider",
+    "MiniMaxMediaProvider",
+    "TencentTokenHubMediaProvider",
+    "VolcengineMediaProvider",
+]

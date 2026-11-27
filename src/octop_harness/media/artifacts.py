@@ -16,7 +16,20 @@ from octop_harness.media.models import (
     GeneratedMedia,
     ImageGenerationRequest,
     StoredMedia,
+    ThreeDGenerationRequest,
     VideoGenerationRequest,
+)
+
+VALID_3D_VIEWS: frozenset[str] = frozenset(
+    {
+        "back",
+        "left",
+        "right",
+        "top",
+        "bottom",
+        "left_front",
+        "right_front",
+    }
 )
 
 
@@ -56,6 +69,33 @@ class WorkspaceMediaArtifactStore:
             reference_images=references,
         )
 
+    async def normalize_3d_request(self, request: ThreeDGenerationRequest) -> ThreeDGenerationRequest:
+        prompt = request.prompt.strip() if request.prompt is not None else None
+        if prompt == "":
+            prompt = None
+        image = await self._normalize_optional_reference(request.image)
+        if prompt is None and image is None:
+            raise ValueError("3D generation requires either prompt or image")
+        normalized_views: list[tuple[str, str]] = []
+        seen_views: set[str] = set()
+        for view_type, raw_url in request.multi_view_images:
+            view = view_type.strip()
+            url = raw_url.strip()
+            if view not in VALID_3D_VIEWS:
+                raise ValueError(f"unsupported 3D view type: {view_type!r}")
+            if view in seen_views:
+                raise ValueError(f"duplicate 3D view type: {view!r}")
+            if urlsplit(url).scheme not in {"http", "https"}:
+                raise ValueError(f"multi_view_images[{view}] must be an HTTP(S) URL")
+            seen_views.add(view)
+            normalized_views.append((view, url))
+        return replace(
+            request,
+            prompt=prompt,
+            image=image,
+            multi_view_images=tuple(normalized_views),
+        )
+
     async def store(self, generated: list[GeneratedMedia], *, kind: str, prefix: str) -> tuple[StoredMedia, ...]:
         if not generated:
             raise RuntimeError("media provider returned no artifacts")
@@ -63,7 +103,8 @@ class WorkspaceMediaArtifactStore:
         stored: list[StoredMedia] = []
         for artifact in generated:
             extension = artifact.extension.strip(".") or "bin"
-            filename = f"{prefix}-{timestamp}-{uuid4().hex[:12]}.{extension}"
+            item_prefix = f"{prefix}-preview" if artifact.role == "preview" else prefix
+            filename = f"{item_prefix}-{timestamp}-{uuid4().hex[:12]}.{extension}"
             path = str(PurePosixPath(self._output_dir) / kind / filename)
             await self._workspace.aupload_bytes(path, artifact.data)
             local = await asyncio.to_thread(self._workspace.materialize_local, path)
@@ -73,6 +114,7 @@ class WorkspaceMediaArtifactStore:
                     local_path=str(local) if local is not None else path,
                     media_type=artifact.media_type,
                     size_bytes=len(artifact.data),
+                    role=artifact.role,
                 )
             )
         return tuple(stored)
@@ -103,4 +145,4 @@ class WorkspaceMediaArtifactStore:
         return tuple(normalized)
 
 
-__all__ = ["WorkspaceMediaArtifactStore"]
+__all__ = ["VALID_3D_VIEWS", "WorkspaceMediaArtifactStore"]

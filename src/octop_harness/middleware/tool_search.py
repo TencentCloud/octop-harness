@@ -95,6 +95,12 @@ def _is_self_deferred(tool: BaseTool) -> bool:
     return extras.get("defer_loading") is True
 
 
+def _is_decision_delivered(tool: BaseTool) -> bool:
+    """True when DecisionMiddleware already relocated this long-tail tool with its full schema."""
+    extras = tool.extras if isinstance(tool.extras, dict) else {}
+    return extras.get("_octop_decision_schema_delivered") is True
+
+
 def _make_eager(tool: Any) -> Any:
     """Return a tool copy without a provider-specific defer marker."""
     if not isinstance(tool, BaseTool) or not _is_self_deferred(tool):
@@ -357,6 +363,8 @@ class ToolSearchMiddleware(AgentMiddleware[ClientToolSearchState, Any]):
     def _unloaded_error(self, request: ToolCallRequest) -> ToolMessage | Command[Any] | None:
         name = str(request.tool_call.get("name", ""))
         if name == _TOOL_SEARCH_NAME:
+            return None
+        if request.tool is not None and _is_decision_delivered(request.tool):
             return None
         catalog = self._catalog(_thread_key(request.runtime.config))
         deferred = name in self._deferred_tools or name in catalog

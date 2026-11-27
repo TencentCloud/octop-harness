@@ -83,7 +83,7 @@ class MediaGenerationError(ToolException):
         if self.provider_task_id:
             execution["provider_task_id"] = self.provider_task_id
 
-        return {
+        payload: dict[str, object] = {
             "schema_version": 1,
             "type": result_type,
             "tool": tool_name,
@@ -98,8 +98,15 @@ class MediaGenerationError(ToolException):
                 "model_instruction": self.model_instruction,
             },
             "execution": execution,
-            "images" if result_type == "image_gen_tool_result" else "videos": [],
         }
+        if result_type == "image_gen_tool_result":
+            payload["images"] = []
+        elif result_type == "3d_gen_tool_result":
+            payload["models"] = []
+            payload["previews"] = []
+        else:
+            payload["videos"] = []
+        return payload
 
 
 __all__ = ["MediaErrorCategory", "MediaGenerationError"]

@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from octop_harness.backends.workspace import BackendWorkspace
 from octop_harness.media.artifacts import WorkspaceMediaArtifactStore
-from octop_harness.media.base import MediaGenerationProvider
+from octop_harness.media.base import MediaGenerationProvider, ThreeDMediaProvider
 from octop_harness.media.errors import MediaGenerationError
 from octop_harness.media.models import (
     ImageGenerationRequest,
@@ -20,6 +20,7 @@ from octop_harness.media.models import (
     MediaKind,
     MediaSubmission,
     RemoteArtifact,
+    ThreeDGenerationRequest,
     VideoGenerationRequest,
 )
 
@@ -71,6 +72,7 @@ class _ProviderEntry:
     provider: MediaGenerationProvider
     image_enabled: bool
     video_enabled: bool
+    three_d_enabled: bool = False
 
 
 class MediaManager:
@@ -97,6 +99,7 @@ class MediaManager:
         *,
         image_enabled: bool = True,
         video_enabled: bool = True,
+        three_d_enabled: bool = False,
     ) -> None:
         """Register one provider instance under a unique routing id."""
         provider_id = provider_id.strip()
@@ -108,17 +111,24 @@ class MediaManager:
             raise ValueError(f"media provider {provider_id!r} does not support image generation")
         if video_enabled and not provider.capabilities.video_generation:
             raise ValueError(f"media provider {provider_id!r} does not support video generation")
+        if three_d_enabled and (
+            not provider.capabilities.three_d_generation or not isinstance(provider, ThreeDMediaProvider)
+        ):
+            raise ValueError(f"media provider {provider_id!r} does not support 3D generation")
         entry = _ProviderEntry(
             id=provider_id,
             provider=provider,
             image_enabled=image_enabled,
             video_enabled=video_enabled,
+            three_d_enabled=three_d_enabled,
         )
         self._providers[provider_id] = entry
         if image_enabled:
             self._routes.setdefault("image", provider_id)
         if video_enabled:
             self._routes.setdefault("video", provider_id)
+        if three_d_enabled:
+            self._routes.setdefault("3d", provider_id)
 
     def set_default_route(self, kind: MediaKind, provider_id: str) -> None:
         """Select the provider instance used when a request has no override."""
@@ -136,7 +146,7 @@ class MediaManager:
     def route_info(self, kind: MediaKind, provider_id: str | None = None) -> MediaRouteInfo:
         """Resolve routing metadata without submitting a request."""
         entry = self._resolve_entry(kind, provider_id)
-        model = entry.provider.image_model if kind == "image" else entry.provider.video_model
+        model = _provider_model_for_kind(entry.provider, kind)
         return MediaRouteInfo(
             provider_id=entry.id,
             provider_type=entry.provider.provider_id,
@@ -190,6 +200,37 @@ class MediaManager:
         entry = self._resolve_entry("video", provider_id)
         submission = await entry.provider.submit_video(normalized)
         return await self._record_submission(entry, "video", normalized.prompt, submission)
+
+    async def generate_3d(
+        self,
+        request: ThreeDGenerationRequest,
+        *,
+        provider_id: str | None = None,
+    ) -> MediaGenerationResult:
+        """Route, complete, and persist one 3D generation request."""
+        started = await self.submit_3d(request, provider_id=provider_id)
+        if isinstance(started, MediaGenerationResult):
+            return started
+        return await self.wait(started.id)
+
+    async def submit_3d(
+        self,
+        request: ThreeDGenerationRequest,
+        *,
+        provider_id: str | None = None,
+    ) -> MediaGenerationResult | MediaJob:
+        """Submit a 3D request, returning an immediate result or async job."""
+        normalized = await self._artifacts.normalize_3d_request(request)
+        entry = self._resolve_entry("3d", provider_id)
+        if not isinstance(entry.provider, ThreeDMediaProvider):
+            raise MediaGenerationError(
+                f"Media provider {entry.id!r} does not support 3D generation.",
+                code="media_capability_disabled",
+                category="configuration",
+                remediation="configure_provider",
+            )
+        submission = await entry.provider.submit_3d(normalized)
+        return await self._record_submission(entry, "3d", normalized.prompt or "", submission)
 
     async def get_job(self, job_id: str) -> MediaJob | None:
         """Return manager-owned state for an async provider task."""
@@ -320,7 +361,11 @@ class MediaManager:
 
     @staticmethod
     def _is_enabled(entry: _ProviderEntry, kind: MediaKind) -> bool:
-        return entry.image_enabled if kind == "image" else entry.video_enabled
+        if kind == "image":
+            return entry.image_enabled
+        if kind == "video":
+            return entry.video_enabled
+        return entry.three_d_enabled
 
     async def _record_submission(
         self,
@@ -378,7 +423,7 @@ class MediaManager:
                         updated_at=_utc_now(),
                     )
                     await self._job_store.save(failed)
-                    label = "Image" if job.task.kind == "image" else "Video"
+                    label = {"image": "Image", "video": "Video", "3d": "3D"}[job.task.kind]
                     raise MediaGenerationError(
                         f"{label} generation timed out after {entry.provider.task_timeout_seconds:g} seconds",
                         code="provider_timeout",
@@ -408,12 +453,13 @@ class MediaManager:
         if not artifacts:
             raise MediaGenerationError("Media provider returned no artifacts")
         generated = [await entry.provider.load_artifact(artifact) for artifact in artifacts]
+        kind_dir = {"image": "images", "video": "videos", "3d": "3d"}[kind]
         stored = await self._artifacts.store(
             generated,
-            kind="images" if kind == "image" else "videos",
+            kind=kind_dir,
             prefix=kind,
         )
-        model = entry.provider.image_model if kind == "image" else entry.provider.video_model
+        model = _provider_model_for_kind(entry.provider, kind)
         return MediaGenerationResult(
             kind=kind,
             prompt=prompt,
@@ -434,6 +480,16 @@ class MediaManager:
                 remediation="check_task_status",
             )
         return job
+
+
+def _provider_model_for_kind(provider: MediaGenerationProvider, kind: MediaKind) -> str:
+    if kind == "image":
+        return provider.image_model
+    if kind == "video":
+        return provider.video_model
+    if isinstance(provider, ThreeDMediaProvider):
+        return provider.three_d_model
+    return ""
 
 
 __all__ = ["InMemoryMediaJobStore", "MediaJobStore", "MediaManager", "MediaRouteInfo"]
