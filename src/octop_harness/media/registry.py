@@ -10,12 +10,14 @@ from octop_harness.media.base import BaseMediaProvider
 from octop_harness.media.manager import MediaJobStore, MediaManager
 from octop_harness.media.providers.dashscope import DashScopeMediaProvider
 from octop_harness.media.providers.minimax import MiniMaxMediaProvider
+from octop_harness.media.providers.tencent_tokenhub import TencentTokenHubMediaProvider
 from octop_harness.media.providers.volcengine import VolcengineMediaProvider
 
 BUILTIN_MEDIA_PROVIDERS: dict[str, type[BaseMediaProvider]] = {
     "volcengine": VolcengineMediaProvider,
     "dashscope": DashScopeMediaProvider,
     "minimax": MiniMaxMediaProvider,
+    "tencent-tokenhub": TencentTokenHubMediaProvider,
 }
 
 
@@ -46,13 +48,17 @@ def create_media_manager(
             create_media_provider(item),
             image_enabled=item.image_enabled,
             video_enabled=item.video_enabled,
+            three_d_enabled=item.three_d_enabled,
         )
     image_route = config.default_image_provider or _preferred_route(configured, kind="image")
     video_route = config.default_video_provider or _preferred_route(configured, kind="video")
+    three_d_route = config.default_three_d_provider or _preferred_route(configured, kind="three_d")
     if image_route is not None:
         manager.set_default_route("image", image_route)
     if video_route is not None:
         manager.set_default_route("video", video_route)
+    if three_d_route is not None:
+        manager.set_default_route("3d", three_d_route)
     return manager
 
 

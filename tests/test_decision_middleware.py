@@ -1541,3 +1541,68 @@ def test_tool_search_still_guards_a_deferred_core_tool() -> None:
     assert loaded.content == "ran"
     assert loaded.name == "call_deferred_tool"
     assert loaded.additional_kwargs["octop_forwarded_tool"] == "read_file"
+
+
+def test_tool_search_allows_decision_relocated_deferred_long_tail_tool() -> None:
+    """DecisionMiddleware delivers full schemas for selected long-tail tools in the turn note.
+
+    When a media or MCP tool is also in ``ToolSearchMiddleware.deferred_tools``,
+    DecisionMiddleware strips it from ``request.tools`` before ToolSearchMiddleware
+    sees it. Forwarded ``call_deferred_tool`` calls for that tool must run instead
+    of failing with ``tool_not_authorized``.
+    """
+    gen_image = _structured_tool("generate_image", "生成图片")
+    tools: list[Any] = [
+        _structured_tool("read_file", "读取文件"),
+        gen_image,
+        *(_structured_tool(f"misc_{index}", "unrelated") for index in range(6)),
+    ]
+    decision = DecisionMiddleware(
+        config=_config(skills=False, team=False, tool_min_count=2),
+        scorer=_Scorer({"tool:generate_image": 0.95, **{f"tool:misc_{index}": 0.1 for index in range(6)}}),
+    )
+    search = ToolSearchMiddleware(deferred_tools=frozenset({"generate_image"}))
+    seen: list[str] = []
+
+    def tool_node(item: ToolCallRequest) -> ToolMessage:
+        seen.append(str(item.tool_call["name"]))
+        return ToolMessage(content="image-ok", name=str(item.tool_call["name"]), tool_call_id=str(item.tool_call["id"]))
+
+    def through_search(item: ToolCallRequest) -> ToolMessage | Command[Any]:
+        return search.wrap_tool_call(item, tool_node)
+
+    runtime = type("Runtime", (), {"config": {"configurable": {"thread_id": "room-media"}}})()
+    with _configurable(run_id="run-media", thread_id="room-media"):
+        narrowed = decision.wrap_model_call(_request(tools=tools, text="画一个小鸡啄米"), lambda item: item)
+        search.wrap_model_call(narrowed, lambda item: item)
+        forwarded = decision.wrap_tool_call(
+            ToolCallRequest(
+                tool_call={
+                    "name": "call_deferred_tool",
+                    "args": {"name": "generate_image", "arguments": {"prompt": "小鸡啄米"}},
+                    "id": "c-img",
+                },
+                tool=None,  # type: ignore[arg-type]
+                state={},  # type: ignore[arg-type]
+                runtime=runtime,  # type: ignore[arg-type]
+            ),
+            through_search,
+        )
+        # A direct forged call (not forwarded by DecisionMiddleware) is still blocked.
+        forged = decision.wrap_tool_call(
+            ToolCallRequest(
+                tool_call={"name": "generate_image", "args": {"prompt": "x"}, "id": "c-forge"},
+                tool=gen_image,
+                state={},  # type: ignore[arg-type]
+                runtime=runtime,  # type: ignore[arg-type]
+            ),
+            through_search,
+        )
+
+    assert seen == ["generate_image"]
+    assert isinstance(forwarded, ToolMessage)
+    assert forwarded.content == "image-ok"
+    assert forwarded.name == "call_deferred_tool"
+    assert forwarded.additional_kwargs["octop_forwarded_tool"] == "generate_image"
+    assert isinstance(forged, ToolMessage)
+    assert "tool_not_authorized" in forged.content

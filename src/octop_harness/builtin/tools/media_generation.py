@@ -1,10 +1,10 @@
-"""Built-in ``generate_image`` and ``generate_video`` tools."""
+"""Built-in ``generate_image``, ``generate_video``, and ``generate_3d`` tools."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.tools import ToolException, tool
 from pydantic import BaseModel, Field, ValidationError
@@ -19,6 +19,7 @@ from octop_harness.media.models import (
     ImageGenerationRequest,
     MediaGenerationResult,
     StoredMedia,
+    ThreeDGenerationRequest,
     VideoGenerationRequest,
 )
 from octop_harness.media.registry import create_media_manager
@@ -37,6 +38,16 @@ Use for text-to-video, image-to-video, animation, and cinematic scene requests.
 Do not use for video analysis or trimming existing videos. This operation is
 billable and may take minutes. The runtime selects the provider/model; do not
 retry manually after an error. Outputs are saved in the agent workspace.
+"""
+
+_THREE_D_DESCRIPTION = """Generate a 3D model from an image or text description.
+
+Use for 3D asset generation (GLB/OBJ/STL/USDZ/FBX) with optional PBR textures.
+This operation is billable and may take minutes. The runtime selects the
+provider/model; do not retry manually after an error. Note: image-only models
+such as hy-3d-3.6 require an input image — if the user only provides text, call
+generate_image first to create a clean single-subject reference image, then pass
+that workspace image path to generate_3d. Outputs are saved in the agent workspace.
 """
 
 
@@ -131,6 +142,54 @@ class GenerateVideoInput(BaseModel):
     )
 
 
+class Generate3DInput(BaseModel):
+    """Provider-neutral arguments exposed by ``generate_3d``."""
+
+    prompt: str | None = Field(
+        default=None,
+        description=(
+            "Text description for text-to-3D models (e.g., hy-3d-3.1, hy-3d-express). "
+            "Leave unset when supplying an input image unless using Sketch mode."
+        ),
+    )
+    image: str | None = Field(
+        default=None,
+        description=(
+            "Workspace path, HTTP(S) URL, or data URL of the front-view reference image. "
+            "Required for image-to-3D models such as hy-3d-3.6."
+        ),
+    )
+    multi_view_images: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Optional mapping from view angle (back, left, right, top, bottom, left_front, right_front) "
+            "to HTTP(S) image URLs; requires an HTTP(S) image URL as the primary front image."
+        ),
+    )
+    generate_type: Literal["Normal", "Geometry", "LowPoly", "Sketch"] = Field(
+        default="Normal",
+        description="3D generation mode: Normal (textured), Geometry (white mesh), LowPoly, or Sketch.",
+    )
+    enable_pbr: bool = Field(
+        default=False,
+        description="Whether to generate PBR material maps (roughness, metalness, etc.) in Normal mode.",
+    )
+    face_count: int | None = Field(
+        default=None,
+        ge=1000,
+        le=2_000_000,
+        description="Optional target polygon face count (leave unset for provider default).",
+    )
+    result_format: Literal["glb", "obj", "stl", "usdz", "fbx"] | None = Field(
+        default=None,
+        description="Optional single output format override; omit to use the provider default.",
+    )
+    tex_res: Literal["2k", "4k", "8k"] | None = Field(
+        default=None,
+        description="Optional texture resolution (2k, 4k, 8k) for supported models in Normal mode.",
+    )
+
+
 def _tool_error_formatter(
     *,
     result_type: str,
@@ -204,8 +263,6 @@ def _request_error(exc: ValueError | FileNotFoundError) -> MediaGenerationError:
 
 def _media_result_payload(result: MediaGenerationResult) -> dict[str, object]:
     """Render a manager result into the stable tool-result envelope."""
-    singular = result.kind
-    plural = "images" if result.kind == "image" else "videos"
     execution: dict[str, object] = {
         "provider": result.provider_type,
         "model": result.model,
@@ -215,6 +272,27 @@ def _media_result_payload(result: MediaGenerationResult) -> dict[str, object]:
         execution["provider_instance"] = result.provider_id
     if result.provider_task_id is not None:
         execution["provider_task_id"] = result.provider_task_id
+    if result.kind == "3d":
+        models = [_stored_payload(item) for item in result.artifacts if item.role == "primary"]
+        previews = [_stored_payload(item) for item in result.artifacts if item.role == "preview"]
+        return {
+            "schema_version": 1,
+            "type": "3d_gen_tool_result",
+            "tool": "generate_3d",
+            "prompt": result.prompt,
+            "status": "completed",
+            "is_error": False,
+            "message": f"Generated {len(models)} 3D model artifact(s) and {len(previews)} preview(s).",
+            "provider": result.provider_type,
+            "model": result.model,
+            "error": None,
+            "remediation": None,
+            "execution": execution,
+            "models": models,
+            "previews": previews,
+        }
+    singular = result.kind
+    plural = "images" if result.kind == "image" else "videos"
     return {
         "schema_version": 1,
         "type": f"{singular}_gen_tool_result",
@@ -241,6 +319,29 @@ def _stored_payload(item: StoredMedia) -> dict[str, object]:
     }
 
 
+def _bind_tool_error_handlers(
+    tool_obj: Any,
+    *,
+    result_type: str,
+    tool_name: str,
+    provider: str,
+    model: str,
+) -> Any:
+    tool_obj.handle_tool_error = _tool_error_formatter(
+        result_type=result_type,
+        tool_name=tool_name,
+        provider=provider,
+        model=model,
+    )
+    tool_obj.handle_validation_error = _validation_error_formatter(
+        result_type=result_type,
+        tool_name=tool_name,
+        provider=provider,
+        model=model,
+    )
+    return tool_obj
+
+
 def build_media_generation_tools(
     workspace: BackendWorkspace,
     config: MediaGenerationConfig,
@@ -260,6 +361,7 @@ def build_media_generation_tools(
             provider,
             image_enabled=config.image_enabled,
             video_enabled=config.video_enabled,
+            three_d_enabled=config.three_d_enabled and provider.capabilities.three_d_generation,
         )
     else:
         resolved_manager = create_media_manager(config, workspace)
@@ -326,37 +428,76 @@ def build_media_generation_tools(
         except (ValueError, FileNotFoundError) as exc:
             raise _request_error(exc) from exc
 
+    @tool(args_schema=Generate3DInput, description=_THREE_D_DESCRIPTION)
+    async def generate_3d(
+        prompt: str | None = None,
+        *,
+        image: str | None = None,
+        multi_view_images: dict[str, str] | None = None,
+        generate_type: Literal["Normal", "Geometry", "LowPoly", "Sketch"] = "Normal",
+        enable_pbr: bool = False,
+        face_count: int | None = None,
+        result_format: Literal["glb", "obj", "stl", "usdz", "fbx"] | None = None,
+        tex_res: Literal["2k", "4k", "8k"] | None = None,
+    ) -> dict[str, object]:
+        try:
+            result = await resolved_manager.generate_3d(
+                ThreeDGenerationRequest(
+                    prompt=prompt,
+                    image=image,
+                    multi_view_images=tuple(multi_view_images.items()) if multi_view_images else (),
+                    generate_type=generate_type,
+                    enable_pbr=enable_pbr,
+                    face_count=face_count,
+                    result_format=result_format,
+                    tex_res=tex_res,
+                )
+            )
+            return _media_result_payload(result)
+        except MediaGenerationError:
+            raise
+        except (ValueError, FileNotFoundError) as exc:
+            raise _request_error(exc) from exc
+
     tools: list[Any] = []
     image_available = manager is not None or provider is not None or config.has_image_provider()
     video_available = manager is not None or provider is not None or config.has_video_provider()
+    three_d_available = (
+        manager is not None
+        or (provider is not None and config.three_d_enabled and provider.capabilities.three_d_generation)
+        or (manager is None and provider is None and config.has_three_d_provider())
+    )
     if image_available and resolved_manager.has_route("image"):
         image_route = resolved_manager.route_info("image")
-        generate_image.handle_tool_error = _tool_error_formatter(
-            result_type="image_gen_tool_result",
-            tool_name="generate_image",
-            provider=image_route.provider_type,
-            model=image_route.model,
+        tools.append(
+            _bind_tool_error_handlers(
+                generate_image,
+                result_type="image_gen_tool_result",
+                tool_name="generate_image",
+                provider=image_route.provider_type,
+                model=image_route.model,
+            )
         )
-        generate_image.handle_validation_error = _validation_error_formatter(
-            result_type="image_gen_tool_result",
-            tool_name="generate_image",
-            provider=image_route.provider_type,
-            model=image_route.model,
-        )
-        tools.append(generate_image)
     if video_available and resolved_manager.has_route("video"):
         video_route = resolved_manager.route_info("video")
-        generate_video.handle_tool_error = _tool_error_formatter(
-            result_type="video_gen_tool_result",
-            tool_name="generate_video",
-            provider=video_route.provider_type,
-            model=video_route.model,
+        tools.append(
+            _bind_tool_error_handlers(
+                generate_video,
+                result_type="video_gen_tool_result",
+                tool_name="generate_video",
+                provider=video_route.provider_type,
+                model=video_route.model,
+            )
         )
-        generate_video.handle_validation_error = _validation_error_formatter(
-            result_type="video_gen_tool_result",
-            tool_name="generate_video",
-            provider=video_route.provider_type,
-            model=video_route.model,
+    if three_d_available and resolved_manager.has_route("3d"):
+        three_d_route = resolved_manager.route_info("3d")
+        tools.append(
+            _bind_tool_error_handlers(
+                generate_3d,
+                result_type="3d_gen_tool_result",
+                tool_name="generate_3d",
+                provider=three_d_route.provider_type,
+                model=three_d_route.model,
+            )
         )
-        tools.append(generate_video)
     return tools

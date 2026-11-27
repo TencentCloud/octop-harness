@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
-MediaKind = Literal["image", "video"]
+MediaKind = Literal["image", "video", "3d"]
+MediaArtifactRole = Literal["primary", "preview"]
 MediaJobStatus = Literal["pending", "running", "succeeded"]
 MediaManagerJobStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 
@@ -40,12 +41,29 @@ class VideoGenerationRequest:
 
 
 @dataclass(frozen=True)
+class ThreeDGenerationRequest:
+    """Normalized 3D-generation request passed to a media provider."""
+
+    prompt: str | None = None
+    image: str | None = None
+    multi_view_images: tuple[tuple[str, str], ...] = ()
+    generate_type: str = "Normal"
+    enable_pbr: bool = False
+    face_count: int | None = None
+    result_format: str | None = None
+    tex_res: str | None = None
+    seam_less: bool | None = None
+    bake_lighting: bool | None = None
+
+
+@dataclass(frozen=True)
 class GeneratedMedia:
     """One generated binary artifact returned by a media provider."""
 
     data: bytes
     media_type: str
     extension: str
+    role: MediaArtifactRole = "primary"
 
 
 @dataclass(frozen=True)
@@ -56,6 +74,7 @@ class RemoteArtifact:
     data: bytes | None = None
     media_type: str | None = None
     extension: str | None = None
+    role: MediaArtifactRole = "primary"
 
     def __post_init__(self) -> None:
         if (self.url is None) == (self.data is None):
@@ -109,6 +128,11 @@ class MediaCapabilities:
     video_last_frame: bool = False
     video_references: bool = False
     video_audio: bool = False
+    three_d_generation: bool = False
+    three_d_text_to_3d: bool = False
+    three_d_image_to_3d: bool = False
+    three_d_multi_view: bool = False
+    three_d_pbr: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,6 +143,7 @@ class StoredMedia:
     local_path: str
     media_type: str
     size_bytes: int
+    role: MediaArtifactRole = "primary"
 
 
 @dataclass(frozen=True)

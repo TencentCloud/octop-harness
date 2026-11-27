@@ -48,28 +48,38 @@ else:
 
 ProtocolName = Literal["openai", "anthropic", "bedrock"]
 InputModality = Literal["text", "image", "audio", "video"]
-MediaProviderName = Literal["volcengine", "dashscope", "minimax"]
+MediaProviderName = Literal["volcengine", "dashscope", "minimax", "tencent-tokenhub"]
 
 DEFAULT_CONFIG_FILENAME = "octop-harness.json"
 
-_MEDIA_PROVIDER_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
+_MEDIA_PROVIDER_DEFAULTS: dict[str, tuple[str, str, str, str, str]] = {
     "volcengine": (
         "ARK_API_KEY",
         "https://ark.cn-beijing.volces.com/api/v3",
         "doubao-seedream-5-0-lite-260128",
         "doubao-seedance-2-0-mini-260615",
+        "",
     ),
     "dashscope": (
         "DASHSCOPE_API_KEY",
         "https://dashscope.aliyuncs.com/api/v1",
         "wan2.7-image-pro",
         "wan3.0-video-prime",
+        "",
     ),
     "minimax": (
         "MINIMAX_API_KEY",
         "https://api.minimax.cn",
         "image-01",
         "MiniMax-H3",
+        "",
+    ),
+    "tencent-tokenhub": (
+        "TENCENT_TOKENHUB_API_KEY",
+        "https://tokenhub.tencentmaas.com/v1",
+        "hy-image-v3.5-preview",
+        "hy-video-v1.5",
+        "hy-3d-3.6",
     ),
 }
 
@@ -90,9 +100,11 @@ class MediaProviderConfig:
     base_url: str = ""
     image_model: str = ""
     video_model: str = ""
+    three_d_model: str = ""
     enabled: bool = True
     image_enabled: bool = True
     video_enabled: bool = True
+    three_d_enabled: bool = False
     request_timeout_seconds: float = 120.0
     video_poll_interval_seconds: float = 5.0
     video_timeout_seconds: float = 600.0
@@ -112,10 +124,14 @@ class MediaProviderConfig:
             self.image_model = defaults[2]
         if not self.video_model:
             self.video_model = defaults[3]
+        if not self.three_d_model:
+            self.three_d_model = defaults[4]
         if not self.base_url.startswith(("https://", "http://")):
             raise ValueError(f"MediaProviderConfig({self.id}).base_url must be an HTTP(S) URL")
-        if self.enabled and not self.image_enabled and not self.video_enabled:
-            raise ValueError(f"MediaProviderConfig({self.id}) must enable image or video generation")
+        if self.enabled and not self.image_enabled and not self.video_enabled and not self.three_d_enabled:
+            raise ValueError(f"MediaProviderConfig({self.id}) must enable image, video, or 3D generation")
+        if self.enabled and self.three_d_enabled and not self.three_d_model:
+            raise ValueError(f"MediaProviderConfig({self.id}).three_d_model is required when 3D generation is enabled")
         if self.request_timeout_seconds <= 0:
             raise ValueError(f"MediaProviderConfig({self.id}).request_timeout_seconds must be positive")
         if self.video_poll_interval_seconds <= 0:
@@ -147,9 +163,11 @@ class MediaProviderConfig:
             "base_url": self.base_url,
             "image_model": self.image_model,
             "video_model": self.video_model,
+            "three_d_model": self.three_d_model,
             "enabled": self.enabled,
             "image_enabled": self.image_enabled,
             "video_enabled": self.video_enabled,
+            "three_d_enabled": self.three_d_enabled,
             "request_timeout_seconds": self.request_timeout_seconds,
             "video_poll_interval_seconds": self.video_poll_interval_seconds,
             "video_timeout_seconds": self.video_timeout_seconds,
@@ -164,11 +182,11 @@ class MediaProviderConfig:
 
 @dataclass
 class MediaGenerationConfig:
-    """Configuration for the built-in image and video generation tools.
+    """Configuration for the built-in image, video, and 3D generation tools.
 
-    Built-in adapters cover Volcengine Ark, Alibaba Cloud Model Studio and
-    MiniMax. Model identifiers remain explicit so deployments can upgrade
-    versions without changing octop-harness.
+    Built-in adapters cover Volcengine Ark, Alibaba Cloud Model Studio,
+    MiniMax, and Tencent Cloud TokenHub. Model identifiers remain explicit so
+    deployments can upgrade versions without changing octop-harness.
     """
 
     provider: MediaProviderName = "volcengine"
@@ -177,8 +195,10 @@ class MediaGenerationConfig:
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     image_model: str = "doubao-seedream-5-0-lite-260128"
     video_model: str = "doubao-seedance-2-0-mini-260615"
+    three_d_model: str = ""
     image_enabled: bool = True
     video_enabled: bool = True
+    three_d_enabled: bool = False
     output_dir: str = "generated"
     defer_tools: bool = True
     request_timeout_seconds: float = 120.0
@@ -187,6 +207,7 @@ class MediaGenerationConfig:
     providers: list[MediaProviderConfig] = field(default_factory=list)
     default_image_provider: str | None = None
     default_video_provider: str | None = None
+    default_three_d_provider: str | None = None
 
     def __post_init__(self) -> None:
         if self.provider not in _MEDIA_PROVIDER_DEFAULTS:
@@ -202,16 +223,20 @@ class MediaGenerationConfig:
                 self.image_model = provider_defaults[2]
             if self.video_model == volcengine_defaults[3]:
                 self.video_model = provider_defaults[3]
+            if self.three_d_model == volcengine_defaults[4]:
+                self.three_d_model = provider_defaults[4]
         if not self.api_key_env:
             raise ValueError("MediaGenerationConfig.api_key_env is required")
         if not self.base_url.startswith(("https://", "http://")):
             raise ValueError("MediaGenerationConfig.base_url must be an HTTP(S) URL")
-        if not self.providers and not self.image_enabled and not self.video_enabled:
-            raise ValueError("MediaGenerationConfig must enable image or video generation")
+        if not self.providers and not self.image_enabled and not self.video_enabled and not self.three_d_enabled:
+            raise ValueError("MediaGenerationConfig must enable image, video, or 3D generation")
         if not self.providers and self.image_enabled and not self.image_model:
             raise ValueError("MediaGenerationConfig.image_model is required")
         if not self.providers and self.video_enabled and not self.video_model:
             raise ValueError("MediaGenerationConfig.video_model is required")
+        if not self.providers and self.three_d_enabled and not self.three_d_model:
+            raise ValueError("MediaGenerationConfig.three_d_model is required when 3D generation is enabled")
         output = Path(self.output_dir)
         if output.is_absolute() or ".." in output.parts or not self.output_dir.strip("/."):
             raise ValueError("MediaGenerationConfig.output_dir must stay inside the workspace")
@@ -233,16 +258,17 @@ class MediaGenerationConfig:
         if not enabled:
             raise ValueError("MediaGenerationConfig.providers must enable at least one provider")
         by_id = {item.id: item for item in enabled}
-        for kind, route in (
-            ("image", self.default_image_provider),
-            ("video", self.default_video_provider),
+        for kind, attr, route in (
+            ("image", "image_enabled", self.default_image_provider),
+            ("video", "video_enabled", self.default_video_provider),
+            ("3D", "three_d_enabled", self.default_three_d_provider),
         ):
             if route is None:
                 continue
             provider = by_id.get(route)
             if provider is None:
                 raise ValueError(f"Default {kind} provider {route!r} is missing or disabled")
-            if not getattr(provider, f"{kind}_enabled"):
+            if not getattr(provider, attr):
                 raise ValueError(f"Default {kind} provider {route!r} does not enable {kind} generation")
 
     def to_dict(self) -> dict[str, Any]:
@@ -253,8 +279,10 @@ class MediaGenerationConfig:
             "base_url": self.base_url,
             "image_model": self.image_model,
             "video_model": self.video_model,
+            "three_d_model": self.three_d_model,
             "image_enabled": self.image_enabled,
             "video_enabled": self.video_enabled,
+            "three_d_enabled": self.three_d_enabled,
             "output_dir": self.output_dir,
             "defer_tools": self.defer_tools,
             "request_timeout_seconds": self.request_timeout_seconds,
@@ -267,6 +295,8 @@ class MediaGenerationConfig:
             result["default_image_provider"] = self.default_image_provider
         if self.default_video_provider is not None:
             result["default_video_provider"] = self.default_video_provider
+        if self.default_three_d_provider is not None:
+            result["default_three_d_provider"] = self.default_three_d_provider
         return result
 
     def configured_providers(self) -> list[MediaProviderConfig]:
@@ -282,8 +312,10 @@ class MediaGenerationConfig:
                 base_url=self.base_url,
                 image_model=self.image_model,
                 video_model=self.video_model,
+                three_d_model=self.three_d_model,
                 image_enabled=self.image_enabled,
                 video_enabled=self.video_enabled,
+                three_d_enabled=self.three_d_enabled,
                 request_timeout_seconds=self.request_timeout_seconds,
                 video_poll_interval_seconds=self.video_poll_interval_seconds,
                 video_timeout_seconds=self.video_timeout_seconds,
@@ -310,6 +342,10 @@ class MediaGenerationConfig:
     def has_video_provider(self) -> bool:
         """Return whether a usable video route is configured."""
         return any(item.enabled and item.video_enabled and item.has_api_key() for item in self.configured_providers())
+
+    def has_three_d_provider(self) -> bool:
+        """Return whether a usable 3D route is configured."""
+        return any(item.enabled and item.three_d_enabled and item.has_api_key() for item in self.configured_providers())
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MediaGenerationConfig:

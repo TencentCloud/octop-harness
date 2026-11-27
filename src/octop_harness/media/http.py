@@ -106,7 +106,12 @@ class BearerJsonMediaProvider(BaseMediaProvider):
             fallback_type=artifact.media_type or "application/octet-stream",
             fallback_extension=artifact.extension or "bin",
         )
-        return GeneratedMedia(data=data, media_type=media_type, extension=extension)
+        return GeneratedMedia(
+            data=data,
+            media_type=media_type,
+            extension=extension,
+            role=artifact.role,
+        )
 
     @staticmethod
     async def _download(client: httpx.AsyncClient, url: str) -> bytes:
@@ -199,7 +204,19 @@ def classified_provider_error(  # noqa: PLR0911 - explicit categories keep remed
     haystack = f"{provider_code or ''} {message}".lower().replace("_", " ")
     if http_status == 401 or any(
         token in haystack
-        for token in ("invalid api key", "invalidapikey", "unauthorized", "authorized error", "1004", "2049")
+        for token in (
+            "invalid api key",
+            "invalidapikey",
+            "unauthorized",
+            "authorized error",
+            "authorization is invalid",
+            "authorization is empty",
+            "authorization has expired",
+            "1004",
+            "2049",
+            "401001",
+            "401002",
+        )
     ):
         return MediaGenerationError(
             "The media provider rejected the configured credentials.",
@@ -212,17 +229,24 @@ def classified_provider_error(  # noqa: PLR0911 - explicit categories keep remed
             http_status=http_status,
             retry_after_seconds=retry_after_seconds,
         )
-    if http_status == 422 or any(
+    if http_status in {422, 451} or any(
         token in haystack
         for token in (
             "unsafe",
             "safety",
             "sensitive",
             "content policy",
+            "content filter",
             "moderation",
             "datainspectionfailed",
             "ipinfringement",
+            "policyviolation",
+            "auditsubmitillegal",
+            "auditfailed",
             "1026",
+            "1300",
+            "1301",
+            "451001",
         )
     ):
         return MediaGenerationError(
@@ -236,7 +260,25 @@ def classified_provider_error(  # noqa: PLR0911 - explicit categories keep remed
             http_status=http_status,
             retry_after_seconds=retry_after_seconds,
         )
-    if http_status == 429 or any(token in haystack for token in ("rate limit", "too many requests", "1002")):
+    if http_status == 429 or any(
+        token in haystack
+        for token in (
+            "rate limit",
+            "too many requests",
+            "toomanyrequests",
+            "systemthrottling",
+            "jobnumexceed",
+            "1002",
+            "1302",
+            "1303",
+            "429001",
+            "429002",
+            "429003",
+            "429004",
+            "429005",
+            "429006",
+        )
+    ):
         return MediaGenerationError(
             "The media provider is rate limited.",
             code="rate_limited",
@@ -250,7 +292,21 @@ def classified_provider_error(  # noqa: PLR0911 - explicit categories keep remed
             http_status=http_status,
             retry_after_seconds=retry_after_seconds,
         )
-    if http_status == 402 or any(token in haystack for token in ("insufficient", "balance", "quota", "1008")):
+    if http_status == 402 or any(
+        token in haystack
+        for token in (
+            "insufficient",
+            "balance",
+            "quota",
+            "creditinsufficient",
+            "balancenotenough",
+            "1008",
+            "1100",
+            "1101",
+            "1102",
+            "401007",
+        )
+    ):
         return MediaGenerationError(
             message,
             code="quota_exhausted",
@@ -263,7 +319,8 @@ def classified_provider_error(  # noqa: PLR0911 - explicit categories keep remed
             retry_after_seconds=retry_after_seconds,
         )
     if http_status in {403, 404} or any(
-        token in haystack for token in ("model not found", "model access", "not activated", "permission")
+        token in haystack
+        for token in ("model not found", "model access", "not activated", "permission", "1103", "403002", "400004")
     ):
         return MediaGenerationError(
             message,
@@ -342,14 +399,21 @@ def response_error_message(response: httpx.Response) -> str:
     return str(payload)[:500]
 
 
+_MAGIC_PREFIXES: tuple[tuple[bytes, str, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
+    (b"\xff\xd8\xff", "image/jpeg", "jpg"),
+    (b"GIF87a", "image/gif", "gif"),
+    (b"GIF89a", "image/gif", "gif"),
+    (b"glTF", "model/gltf-binary", "glb"),
+    (b"PK\x03\x04", "application/zip", "zip"),
+)
+
+
 def detect_media(data: bytes, *, fallback_type: str, fallback_extension: str) -> tuple[str, str]:
     """Detect the small set of media formats supported by built-in tools."""
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png", "png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg", "jpg"
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif", "gif"
+    for prefix, media_type, extension in _MAGIC_PREFIXES:
+        if data.startswith(prefix):
+            return media_type, extension
     if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "image/webp", "webp"
     if len(data) >= 12 and data[4:8] == b"ftyp":

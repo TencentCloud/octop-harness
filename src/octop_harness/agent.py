@@ -1868,6 +1868,8 @@ class HarnessAgent:
                 media_tools.add("generate_image")
             if cfg.media_generation.has_video_provider():
                 media_tools.add("generate_video")
+            if cfg.media_generation.has_three_d_provider():
+                media_tools.add("generate_3d")
             deferred_tools = deferred_tools | media_tools
         if not (deferred_tools or cfg.defer_mcp_tools) or cfg.tool_search_mode == "eager":
             return None
@@ -2020,13 +2022,13 @@ class HarnessAgent:
         )
         if cfg.media_generation is None:
             directive += (
-                " Image and video generation tools are not configured in this runtime. "
+                " Image, video, and 3D generation tools are not configured in this runtime. "
                 "If the user asks for generated media, state that configuration is required; "
                 "do not claim that media was generated."
             )
         elif not cfg.media_generation.has_api_key():
             directive += (
-                " Image and video generation tools are unavailable because media-provider "
+                " Image, video, and 3D generation tools are unavailable because media-provider "
                 "credentials are missing. If the user asks for generated media, ask them to "
                 "configure credentials in the host application; do not retry or claim success."
             )

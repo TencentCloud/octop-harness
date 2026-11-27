@@ -210,13 +210,14 @@ config = HarnessAgentConfig(
 )
 ```
 
-Generated files are stored under `generated/images/` and `generated/videos/` in the agent workspace. The tools
-are deferred by default and become visible through the configured tool-search strategy only when needed.
-Expected provider failures return a structured, model-visible error envelope with retry guidance instead of
-terminating the agent stream.
+Generated files are stored under `generated/images/`, `generated/videos/`, and `generated/3d/` in the agent
+workspace. The tools (`generate_image`, `generate_video`, `generate_3d`) are deferred by default and become visible
+through the configured tool-search strategy only when needed. Expected provider failures return a structured,
+model-visible error envelope with retry guidance instead of terminating the agent stream.
 
-For separate image and video routes, configure named providers. Built-in adapters cover Volcengine Ark
-(Seedream/Seedance), Alibaba Cloud Model Studio (Wan), and MiniMax (image-01/H3):
+For separate image, video, and 3D routes, configure named providers. Built-in adapters cover Volcengine Ark
+(Seedream/Seedance), Alibaba Cloud Model Studio (Wan), MiniMax (image-01/H3), and Tencent Cloud TokenHub
+(Hy-Image / Hy-Video / Hy3D 3.6):
 
 ```python
 from octop_harness import HarnessAgentConfig, MediaGenerationConfig, MediaProviderConfig

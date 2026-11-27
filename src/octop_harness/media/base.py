@@ -7,7 +7,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import httpx
 
@@ -21,6 +21,7 @@ from octop_harness.media.models import (
     MediaSubmission,
     ProviderTask,
     RemoteArtifact,
+    ThreeDGenerationRequest,
     VideoGenerationRequest,
 )
 
@@ -76,6 +77,20 @@ class MediaGenerationProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class ThreeDMediaProvider(Protocol):
+    """Optional extension protocol for providers that also support 3D generation."""
+
+    @property
+    def three_d_model(self) -> str:
+        """Model id used for 3D generation."""
+        ...
+
+    async def submit_3d(self, request: ThreeDGenerationRequest) -> MediaSubmission:
+        """Start a 3D generation job and return its initial submission state."""
+        ...
+
+
 class BaseMediaProvider(ABC):
     """Stable generation lifecycle shared by all vendor adapters.
 
@@ -105,6 +120,10 @@ class BaseMediaProvider(ABC):
         return self._config.video_model
 
     @property
+    def three_d_model(self) -> str:
+        return self._config.three_d_model
+
+    @property
     def poll_interval_seconds(self) -> float:
         return self._config.video_poll_interval_seconds
 
@@ -124,6 +143,12 @@ class BaseMediaProvider(ABC):
             submission = await self._submit_video(client, request)
             return await self._complete_submission(client, submission)
 
+    async def generate_3d(self, request: ThreeDGenerationRequest) -> list[GeneratedMedia]:
+        """Submit a 3D request and return materialized artifacts."""
+        async with self._client_scope() as client:
+            submission = await self._submit_3d(client, request)
+            return await self._complete_submission(client, submission)
+
     async def submit_image(self, request: ImageGenerationRequest) -> MediaSubmission:
         """Submit without waiting, for applications that persist async jobs."""
         async with self._client_scope() as client:
@@ -133,6 +158,11 @@ class BaseMediaProvider(ABC):
         """Submit without waiting, for applications that persist async jobs."""
         async with self._client_scope() as client:
             return await self._submit_video(client, request)
+
+    async def submit_3d(self, request: ThreeDGenerationRequest) -> MediaSubmission:
+        """Submit a 3D request without waiting, for applications that persist async jobs."""
+        async with self._client_scope() as client:
+            return await self._submit_3d(client, request)
 
     async def poll(self, task: ProviderTask) -> MediaJobUpdate:
         """Fetch one normalized state update for an existing provider task."""
@@ -164,6 +194,21 @@ class BaseMediaProvider(ABC):
         request: VideoGenerationRequest,
     ) -> MediaSubmission:
         """Translate and submit one video request."""
+
+    async def _submit_3d(
+        self,
+        client: httpx.AsyncClient,
+        request: ThreeDGenerationRequest,
+    ) -> MediaSubmission:
+        """Translate and submit one 3D generation request."""
+        del client, request
+        raise MediaGenerationError(
+            f"Media provider {self.provider_id!r} does not support 3D generation.",
+            code="unsupported_capability",
+            category="configuration",
+            remediation="configure_provider",
+            model_instruction="Ask the user to configure a media provider that supports 3D generation.",
+        )
 
     @abstractmethod
     async def _poll_task(
@@ -210,7 +255,7 @@ class BaseMediaProvider(ABC):
                     return await self._materialize(client, update.artifacts)
                 if time.monotonic() >= deadline:
                     await self._cancel_task(client, task)
-                    label = "Image" if task.kind == "image" else "Video"
+                    label = {"image": "Image", "video": "Video", "3d": "3D"}[task.kind]
                     raise MediaGenerationError(
                         f"{label} generation timed out after {self._config.video_timeout_seconds:g} seconds",
                         code="provider_timeout",
@@ -238,4 +283,4 @@ class BaseMediaProvider(ABC):
         return [await self._load_artifact(client, artifact) for artifact in artifacts]
 
 
-__all__ = ["BaseMediaProvider", "MediaGenerationProvider"]
+__all__ = ["BaseMediaProvider", "MediaGenerationProvider", "ThreeDMediaProvider"]

@@ -35,15 +35,19 @@ from octop_harness.media.models import (
     MediaSubmission,
     ProviderTask,
     RemoteArtifact,
+    ThreeDGenerationRequest,
     VideoGenerationRequest,
 )
 from octop_harness.media.providers.dashscope import DashScopeMediaProvider
 from octop_harness.media.providers.minimax import MiniMaxMediaProvider
+from octop_harness.media.providers.tencent_tokenhub import TencentTokenHubMediaProvider
 from octop_harness.media.providers.volcengine import VolcengineMediaProvider
 from octop_harness.media.registry import create_media_manager, create_media_provider
 
 _PNG = b"\x89PNG\r\n\x1a\nimage-bytes"
 _MP4 = b"\x00\x00\x00\x18ftypmp42video-bytes"
+_GLB = b"glTF\x02\x00\x00\x00glb-bytes"
+_ZIP = b"PK\x03\x04zip-bytes"
 
 
 class _FakeProvider:
@@ -487,6 +491,13 @@ async def test_volcengine_video_timeout_cancels_remote_task() -> None:
             "wan3.0-video-prime",
         ),
         ("minimax", MiniMaxMediaProvider, "MINIMAX_API_KEY", "image-01", "MiniMax-H3"),
+        (
+            "tencent-tokenhub",
+            TencentTokenHubMediaProvider,
+            "TENCENT_TOKENHUB_API_KEY",
+            "hy-image-v3.5-preview",
+            "hy-video-v1.5",
+        ),
     ],
 )
 def test_media_provider_registry_applies_provider_defaults(
@@ -1055,3 +1066,628 @@ def test_agent_registers_only_enabled_media_tools(
     assert media_names == expected
     search = next(item for item in captured["middleware"] if type(item).__name__ == "ToolSearchMiddleware")
     assert search._deferred_tools & {"generate_image", "generate_video"} == expected
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_hy_image_v35_sync_request_and_download() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cos.example":
+            seen["download_auth"] = request.headers.get("Authorization")
+            return httpx.Response(200, content=_PNG)
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "req-img",
+                "object": "image.chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "type": "image",
+                            "image": {"url": "https://cos.example/main.png", "width": 1024, "height": 1024},
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+        )
+
+    config = _media_config(provider="tencent-tokenhub")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = TencentTokenHubMediaProvider(config, client=client)
+        result = await provider.generate_image(
+            ImageGenerationRequest(
+                prompt="画一只橘猫",
+                reference_images=("data:image/jpg;base64,eA==",),
+                size="1024X1024",
+                seed=7,
+            )
+        )
+
+    assert seen["path"] == "/v1/wand/hunyuan-image/v35-generation"
+    assert seen["auth"] == "Bearer ark-test-key"
+    assert seen["download_auth"] is None
+    assert seen["body"] == {
+        "model": "hy-image-v3.5-preview",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "画一只橘猫"},
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,eA=="}},
+                ],
+            }
+        ],
+        "size": "1024x1024",
+        "seed": 7,
+    }
+    assert result == [GeneratedMedia(data=_PNG, media_type="image/png", extension="png")]
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_hy_image_v3_and_error_envelope() -> None:
+    seen_body: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cos.example":
+            return httpx.Response(200, content=_PNG)
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "v3-1",
+                "data": [{"url": "https://cos.example/v3.png"}],
+            },
+        )
+
+    config = _media_config(provider="tencent-tokenhub", image_model="hy-image-v3")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = TencentTokenHubMediaProvider(config, client=client)
+        result = await provider.generate_image(
+            ImageGenerationRequest(prompt="一只小猫", reference_images=("https://example.com/a.png",))
+        )
+
+    assert seen_body == {
+        "model": "hy-image-v3",
+        "prompt": "一只小猫",
+        "images": ["https://example.com/a.png"],
+    }
+    assert result == [GeneratedMedia(data=_PNG, media_type="image/png", extension="png")]
+
+    def fail_handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            451,
+            json={
+                "error": {
+                    "code": "451001",
+                    "message": "content filter triggered",
+                    "type": "gateway_error",
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_handler)) as client:
+        provider = TencentTokenHubMediaProvider(config, client=client)
+        with pytest.raises(MediaGenerationError) as exc_info:
+            await provider.generate_image(ImageGenerationRequest(prompt="blocked"))
+    assert exc_info.value.code == "content_rejected"
+    assert exc_info.value.category == "safety"
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_hy_video_submit_and_poll_image_to_video() -> None:
+    seen_bodies: list[dict[str, Any]] = []
+    polls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal polls
+        if request.url.host == "cos.example":
+            return httpx.Response(200, content=_MP4)
+        if request.method == "POST":
+            seen_bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={"task_id": "vid-1", "created": 1700000000})
+        polls += 1
+        if polls == 1:
+            return httpx.Response(200, json={"task_id": "vid-1", "status": "running"})
+        return httpx.Response(
+            200,
+            json={
+                "task_id": "vid-1",
+                "status": "succeeded",
+                "videos": [{"url": "https://cos.example/out.mp4"}],
+            },
+        )
+
+    config = _media_config(provider="tencent-tokenhub", video_poll_interval_seconds=0.001)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = TencentTokenHubMediaProvider(config, client=client)
+        result = await provider.generate_video(
+            VideoGenerationRequest(
+                prompt="微风吹拂",
+                first_frame="data:image/jpg;base64,eA==",
+                resolution="480p",
+                aspect_ratio="16:9",
+            )
+        )
+
+    assert seen_bodies == [
+        {
+            "model": "hy-video-v1.5",
+            "prompt": "微风吹拂",
+            "duration": 5,
+            "resolution": "720p",
+            "image": "data:image/jpeg;base64,eA==",
+        }
+    ]
+    assert result == [GeneratedMedia(data=_MP4, media_type="video/mp4", extension="mp4")]
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_hy3d_v36_image_to_3d_strips_data_url_and_downloads_artifacts(tmp_path: Path) -> None:
+    seen_submit: dict[str, Any] = {}
+    seen_query: dict[str, Any] = {}
+    polls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal polls
+        if request.url.host == "cos.example":
+            if request.url.path.endswith(".glb"):
+                return httpx.Response(200, content=_GLB)
+            if request.url.path.endswith(".zip"):
+                return httpx.Response(200, content=_ZIP)
+            return httpx.Response(200, content=_PNG)
+        if request.url.path.endswith("/api/3d/submit"):
+            seen_submit.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "3d-job-1", "status": "queued"})
+        if request.url.path.endswith("/api/3d/query"):
+            seen_query.update(json.loads(request.content))
+            polls += 1
+            if polls == 1:
+                return httpx.Response(200, json={"status": "in_progress"})
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "data": [
+                        {
+                            "type": "obj",
+                            "url": "https://cos.example/model.zip?sign=1",
+                            "preview_image_url": "https://cos.example/preview.png",
+                        },
+                        {
+                            "type": "glb",
+                            "url": "https://cos.example/model.glb?sign=2",
+                            "preview_image_url": "https://cos.example/preview.png",
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    workspace = _workspace(tmp_path)
+    workspace.upload_bytes("refs/cat.png", _PNG)
+    config = MediaGenerationConfig(
+        providers=[
+            MediaProviderConfig(
+                id="tokenhub-main",
+                provider="tencent-tokenhub",
+                api_key="th-secret",
+                three_d_enabled=True,
+                three_d_model="hy-3d-3.6",
+                video_poll_interval_seconds=0.001,
+            )
+        ],
+        default_three_d_provider="tokenhub-main",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = TencentTokenHubMediaProvider(config.configured_providers()[0], client=client)
+        manager = MediaManager(workspace, output_dir="generated")
+        manager.add_provider(
+            "tokenhub-main",
+            provider,
+            image_enabled=True,
+            video_enabled=True,
+            three_d_enabled=True,
+        )
+        _, _, three_d_tool = build_media_generation_tools(workspace, config, manager=manager)
+        result = await three_d_tool.ainvoke(
+            {
+                "image": "refs/cat.png",
+                "enable_pbr": True,
+                "tex_res": "4k",
+                "face_count": 500000,
+            }
+        )
+
+    assert seen_submit == {
+        "model": "hy-3d-3.6",
+        "image_base64": base64.b64encode(_PNG).decode("ascii"),
+        "generate_type": "Normal",
+        "enable_pbr": True,
+        "tex_res": "4k",
+        "face_count": 500000,
+    }
+    assert seen_query == {"model": "hy-3d-3.6", "id": "3d-job-1"}
+    assert result["type"] == "3d_gen_tool_result"
+    assert result["tool"] == "generate_3d"
+    assert len(result["models"]) == 2
+    assert len(result["previews"]) == 1
+    assert result["models"][0]["path"].startswith("generated/3d/3d-")
+    assert result["models"][0]["path"].endswith(".zip")
+    assert result["models"][1]["path"].endswith(".glb")
+    assert result["previews"][0]["path"].startswith("generated/3d/3d-preview-")
+    assert result["previews"][0]["path"].endswith(".png")
+    assert Path(result["models"][1]["localPath"]).read_bytes() == _GLB
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_hy3d_v36_text_only_guides_model_to_generate_image_first(tmp_path: Path) -> None:
+    config = MediaGenerationConfig(
+        provider="tencent-tokenhub",
+        api_key="th-secret",
+        three_d_enabled=True,
+        three_d_model="hy-3d-3.6",
+    )
+    three_d_tool = next(
+        t for t in build_media_generation_tools(_workspace(tmp_path), config) if t.name == "generate_3d"
+    )
+
+    result = await three_d_tool.ainvoke(
+        {
+            "name": "generate_3d",
+            "args": {"prompt": "一只陶瓷小猫"},
+            "id": "3d-text-1",
+            "type": "tool_call",
+        }
+    )
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
+    payload = json.loads(result.text)
+    assert payload["type"] == "3d_gen_tool_result"
+    assert payload["error"]["code"] == "unsupported_input"
+    assert "generate_image" in payload["remediation"]["model_instruction"]
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_hy3d_v31_and_express_support_text_to_3d() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "3d-txt-1", "status": "queued"})
+
+    for model, generate_type in (("hy-3d-3.1", "Normal"), ("hy-3d-express", "Geometry")):
+        cfg = _media_config(provider="tencent-tokenhub", three_d_enabled=True, three_d_model=model)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = TencentTokenHubMediaProvider(cfg, client=client)
+            sub = await provider.submit_3d(
+                ThreeDGenerationRequest(prompt="一只赛博朋克机械猫", generate_type=generate_type, enable_pbr=True)
+            )
+            assert sub.task == ProviderTask(task_id="3d-txt-1", kind="3d", model=model, metadata={"family": "hy"})
+
+    assert bodies[0] == {
+        "model": "hy-3d-3.1",
+        "prompt": "一只赛博朋克机械猫",
+        "generate_type": "Normal",
+        "enable_pbr": True,
+    }
+    assert bodies[1] == {
+        "model": "hy-3d-express",
+        "prompt": "一只赛博朋克机械猫",
+        "enable_geometry": True,
+    }
+
+
+def test_tokenhub_auth_1002_error_maps_to_credential_invalid() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={"error": {"code": "1002", "message": "Authorization is invalid"}},
+        )
+
+    async def _run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = TencentTokenHubMediaProvider(_media_config(provider="tencent-tokenhub"), client=client)
+            with pytest.raises(MediaGenerationError) as exc_info:
+                await provider.submit_video(VideoGenerationRequest(prompt="x"))
+            assert exc_info.value.code == "credential_invalid"
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_agent_registers_and_defers_generate_3d_when_enabled(tmp_path: Path) -> None:
+    config = HarnessAgentConfig(
+        workspace_dir=tmp_path,
+        backend={"type": "filesystem", "root_dir": str(tmp_path), "virtual_mode": False},
+        providers=[
+            ProviderConfig(
+                id="p",
+                base_url="https://example.com/v1",
+                api_key="test",
+                models=[ModelConfig(id="text")],
+            )
+        ],
+        default_model="p/text",
+        media_generation=MediaGenerationConfig(
+            provider="tencent-tokenhub",
+            api_key="th-test",
+            three_d_enabled=True,
+        ),
+        web_search_tools=False,
+        memory_enabled=False,
+        checkpointer=False,
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_create(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return MagicMock()
+
+    with (
+        patch("langchain_openai.ChatOpenAI", return_value=MagicMock()),
+        patch("deepagents.create_deep_agent", side_effect=fake_create),
+    ):
+        HarnessAgent(config)
+
+    tool_names = {tool.name for tool in captured["tools"]}
+    assert {"generate_image", "generate_video", "generate_3d"} <= tool_names
+    search = next(item for item in captured["middleware"] if type(item).__name__ == "ToolSearchMiddleware")
+    assert {"generate_image", "generate_video", "generate_3d"} <= search._deferred_tools
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_expanded_image_families_wand_vidu_seedream_kling_hidream_minimax() -> None:
+    seen_paths: list[str] = []
+    responses: dict[str, dict[str, Any]] = {
+        "/v1/wand/vega-images/generations": {"task_id": "w-img-1", "status": "queued"},
+        "/v1/wand/vega-images/tasks/w-img-1": {"status": "completed", "data": [{"url": "https://cos.example/w.png"}]},
+        "/v1/wand/vidu-image/generation": {"task_id": "v-img-1", "state": "created"},
+        "/v1/wand/vidu-image/tasks/v-img-1": {
+            "state": "success",
+            "creations": [{"url": "https://cos.example/v.png"}],
+        },
+        "/v1/wand/si-image/generation": {"data": [{"url": "https://cos.example/s.png"}]},
+        "/v1/wand/kling/image-generation": {"code": 0, "data": {"id": "k-img-1"}},
+        "/v1/wand/kling-image/tasks/k-img-1": {
+            "code": 0,
+            "data": [
+                {
+                    "id": "k-img-1",
+                    "status": "succeeded",
+                    "outputs": [{"url": "https://cos.example/k.png"}],
+                }
+            ],
+        },
+        "/v1/wand/hidream-image/images/edits": {"data": [{"url": "https://cos.example/hm.png"}]},
+        "/v1/wand/minimax-image/generation": {"data": [{"url": "https://cos.example/hm.png"}]},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cos.example":
+            return httpx.Response(200, content=_PNG)
+        seen_paths.append(f"{request.method} {request.url.path}")
+        payload = responses.get(request.url.path)
+        if payload is None:
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+        return httpx.Response(200, json=payload)
+
+    cases = [
+        ("wand-vega-image-1.5-pro", ImageGenerationRequest(prompt="cat")),
+        ("vidu-image-q2", ImageGenerationRequest(prompt="cat")),
+        ("seedream-image-v5.5", ImageGenerationRequest(prompt="cat")),
+        ("kling-image-v4", ImageGenerationRequest(prompt="cat")),
+        (
+            "hidream-image-o1-1.5-edit",
+            ImageGenerationRequest(prompt="edit", reference_images=("https://example.com/a.png",)),
+        ),
+        ("minimax-image-h3", ImageGenerationRequest(prompt="cat")),
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for model, req in cases:
+            cfg = _media_config(
+                provider="tencent-tokenhub",
+                image_model=model,
+                video_poll_interval_seconds=0.001,
+            )
+            provider = TencentTokenHubMediaProvider(cfg, client=client)
+            result = await provider.generate_image(req)
+            assert result == [GeneratedMedia(data=_PNG, media_type="image/png", extension="png")]
+
+    assert "POST /v1/wand/vega-images/generations" in seen_paths
+    assert "GET /v1/wand/vega-images/tasks/w-img-1" in seen_paths
+    assert "POST /v1/wand/vidu-image/generation" in seen_paths
+    assert "GET /v1/wand/vidu-image/tasks/v-img-1" in seen_paths
+    assert "POST /v1/wand/si-image/generation" in seen_paths
+    assert "POST /v1/wand/kling/image-generation" in seen_paths
+    assert "GET /v1/wand/kling-image/tasks/k-img-1" in seen_paths
+    assert "POST /v1/wand/hidream-image/images/edits" in seen_paths
+    assert "POST /v1/wand/minimax-image/generation" in seen_paths
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_expanded_video_families_wand_kling_vidu_pixverse_minimax_yt() -> None:
+    seen_paths: list[str] = []
+    responses: dict[str, dict[str, Any]] = {
+        "/v1/wand/vega-videos/tasks": {"id": "wv-1", "status": "queued"},
+        "/v1/wand/vega-videos/tasks/wv-1": {
+            "status": "succeeded",
+            "content": {"video_url": "https://cos.example/v.mp4"},
+        },
+        "/v1/wand/kling/text-to-video": {"code": 0, "data": {"id": "kv-1"}},
+        "/v1/wand/kling/tasks/kv-1": {
+            "code": 0,
+            "data": [
+                {
+                    "id": "kv-1",
+                    "status": "succeeded",
+                    "outputs": [{"url": "https://cos.example/k.mp4"}],
+                }
+            ],
+        },
+        "/v1/wand/vidu/text-to-video": {"task_id": "vv-1", "state": "created"},
+        "/v1/wand/vidu/tasks/vv-1": {"state": "success", "creations": [{"url": "https://cos.example/vi.mp4"}]},
+        "/v1/wand/pixverse/text-to-video": {"ErrCode": 0, "Resp": {"video_id": 12345}},
+        "/v1/wand/pixverse/tasks/12345": {"ErrCode": 0, "Resp": {"status": 1, "url": "https://cos.example/p.mp4"}},
+        "/v1/wand/minimax-video-v2/generation": {"task_id": "mmv2-1"},
+        "/v1/wand/minimax-video-v2/tasks/mmv2-1": {
+            "task": {"id": "mmv2-1", "status": "succeeded", "content": {"url": "https://cos.example/m2.mp4"}}
+        },
+        "/v1/api/video/submit": {"id": "yt-1", "status": "queued"},
+        "/v1/api/video/query": {"status": "completed", "data": {"url": "https://cos.example/yt.mp4"}},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cos.example":
+            return httpx.Response(200, content=_MP4)
+        seen_paths.append(f"{request.method} {request.url.path}")
+        payload = responses.get(request.url.path)
+        if payload is None:
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+        return httpx.Response(200, json=payload)
+
+    cases = [
+        ("wand-vega-video-1.0-lite", VideoGenerationRequest(prompt="waves")),
+        ("kling-video-v4", VideoGenerationRequest(prompt="waves")),
+        ("vidu-video-q3-pro", VideoGenerationRequest(prompt="waves")),
+        ("pixverse-video-v6.0", VideoGenerationRequest(prompt="waves")),
+        ("minimax-video-h3", VideoGenerationRequest(prompt="waves")),
+        ("yt-video-2.0", VideoGenerationRequest(prompt="waves", first_frame="https://example.com/a.png")),
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for model, req in cases:
+            cfg = _media_config(
+                provider="tencent-tokenhub",
+                video_model=model,
+                video_poll_interval_seconds=0.001,
+            )
+            provider = TencentTokenHubMediaProvider(cfg, client=client)
+            result = await provider.generate_video(req)
+            assert result == [GeneratedMedia(data=_MP4, media_type="video/mp4", extension="mp4")]
+
+    assert "POST /v1/wand/pixverse/text-to-video" in seen_paths
+    assert "GET /v1/wand/pixverse/tasks/12345" in seen_paths
+    assert "POST /v1/api/video/submit" in seen_paths
+    assert "POST /v1/api/video/query" in seen_paths
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_expanded_3d_families_tripo_hi3d_rodin() -> None:
+    submits: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cos.example":
+            if request.url.path.endswith(".glb"):
+                return httpx.Response(200, content=_GLB)
+            return httpx.Response(200, content=_PNG)
+        body = json.loads(request.content)
+        if request.url.path.endswith("/api/3d/submit"):
+            submits.append(body)
+            return httpx.Response(200, json={"id": f"job-{body['model']}", "status": "queued"})
+        if request.url.path.endswith("/api/3d/query"):
+            model = body["model"]
+            if model.startswith("tripo-"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "completed",
+                        "output": {
+                            "model_url": "https://cos.example/tripo.glb",
+                            "rendered_image_url": "https://cos.example/tripo.png",
+                        },
+                    },
+                )
+            if model.startswith("hi3d-"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "completed",
+                        "data": {
+                            "url": "https://cos.example/hi3d.glb",
+                            "cover_url": "https://cos.example/hi3d.png",
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "data": [
+                        {"name": "model.glb", "url": "https://cos.example/rodin.glb"},
+                        {"name": "preview.png", "url": "https://cos.example/rodin.png"},
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for model, req in (
+            ("tripo-3d-3.1", ThreeDGenerationRequest(prompt="a clay robot", enable_pbr=True)),
+            ("hi3d-3.0", ThreeDGenerationRequest(image="https://example.com/cat.png")),
+            ("rodin-gen-3d-2.5", ThreeDGenerationRequest(prompt="a wooden chair")),
+        ):
+            cfg = _media_config(
+                provider="tencent-tokenhub",
+                three_d_enabled=True,
+                three_d_model=model,
+                video_poll_interval_seconds=0.001,
+            )
+            provider = TencentTokenHubMediaProvider(cfg, client=client)
+            items = await provider.generate_3d(req)
+            assert any(item.role == "primary" and item.data == _GLB for item in items)
+            assert any(item.role == "preview" and item.data == _PNG for item in items)
+
+    assert submits[0]["model"] == "tripo-3d-3.1"
+    assert submits[0]["pbr"] is True
+    assert submits[1] == {
+        "model": "hi3d-3.0",
+        "image_url": "https://example.com/cat.png",
+        "request_type": 3,
+        "format": 2,
+        "pbr": 0,
+    }
+    assert submits[2]["model"] == "rodin-gen-3d-2.5"
+    assert submits[2]["tier"] == "Gen-2.5-Medium"
+
+
+@pytest.mark.asyncio
+async def test_tokenhub_hy_image_size_aliases_and_hy3d_result_format_rules() -> None:
+    seen_img_bodies: list[dict[str, Any]] = []
+    seen_3d_bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cos.example":
+            return httpx.Response(200, content=_PNG)
+        body = json.loads(request.content)
+        if request.url.path.endswith("/v35-generation"):
+            seen_img_bodies.append(body)
+            return httpx.Response(
+                200,
+                json={"choices": [{"delta": {"type": "image", "image": {"url": "https://cos.example/a.png"}}}]},
+            )
+        seen_3d_bodies.append(body)
+        return httpx.Response(200, json={"id": "job-1", "status": "queued"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        img_provider = TencentTokenHubMediaProvider(_media_config(provider="tencent-tokenhub"), client=client)
+        await img_provider.submit_image(ImageGenerationRequest(prompt="cat", size="4K"))
+        await img_provider.submit_image(ImageGenerationRequest(prompt="cat", size="16:9"))
+
+        d3_provider = TencentTokenHubMediaProvider(
+            _media_config(provider="tencent-tokenhub", three_d_enabled=True, three_d_model="hy-3d-3.6"),
+            client=client,
+        )
+        await d3_provider.submit_3d(ThreeDGenerationRequest(image="https://example.com/in.png", result_format="glb"))
+        await d3_provider.submit_3d(ThreeDGenerationRequest(image="https://example.com/in.png", result_format="fbx"))
+
+    assert seen_img_bodies[0]["size"] == "4096x4096"
+    assert seen_img_bodies[1]["size"] == "2048x1152"
+    assert "result_format" not in seen_3d_bodies[0]
+    assert seen_3d_bodies[1]["result_format"] == "fbx"

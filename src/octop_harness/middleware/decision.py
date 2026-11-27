@@ -138,6 +138,9 @@ _HOST_DISPATCH_TOOLS = ("ask_agent", "agent_list")
 # Stable entry for long-tail tools. Its schema never changes, so it can sit in
 # the cached tool prefix while the selected schemas move to the turn note.
 _DEFERRED_TOOL_NAME = "call_deferred_tool"
+# Marks a relocated long-tail tool whose full JSON schema was already delivered
+# in the turn note, so downstream ToolSearchMiddleware allows forwarded calls.
+_DECISION_DELIVERED_EXTRA = "_octop_decision_schema_delivered"
 # Matches no teammate. A wrap-up that clears nobody closes dispatch for the
 # rest of that turn.
 _DISPATCH_CLOSED = frozenset({"\x00"})
@@ -755,7 +758,8 @@ class DecisionMiddleware(AgentMiddleware[Any, Any]):
             stable.append(self._deferred_call_tool)
         if has_long_tail or saw_dispatcher:
             request = request.override(tools=stable)
-        self._remember_deferred(request, [*direct, *deferred] if has_long_tail else [])
+        relocated = [_mark_decision_delivered(tool) for tool in deferred]
+        self._remember_deferred(request, [*direct, *relocated] if has_long_tail else [])
         return request, _deferred_tool_note(deferred, chinese=self._chinese)
 
     def _remember_deferred(self, request: ModelRequest, tools: list[Any]) -> None:
@@ -1485,6 +1489,15 @@ def finalize_decision_skill_prompt(request: ModelRequest) -> ModelRequest:
     if isinstance(stub, str):
         request, _ = _replace_skill_catalog(request, set(), stub)
     return request
+
+
+def _mark_decision_delivered(tool: Any) -> Any:
+    """Tag a relocated long-tail tool copy whose full schema is in the turn note."""
+    if not isinstance(tool, BaseTool):
+        return tool
+    extras = dict(tool.extras or {})
+    extras[_DECISION_DELIVERED_EXTRA] = True
+    return tool.model_copy(update={"extras": extras})
 
 
 def _tool_args_schema(tool: Any) -> str:
