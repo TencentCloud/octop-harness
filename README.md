@@ -541,9 +541,3 @@ async with ManagedMCPClient({"transport": "stdio", "command": "my-mcp", "args": 
 Explicit `await client.aclose()` is also supported. Closed or disconnected clients
 must be replaced; writes are never retried automatically. Default MCP tool loading
 remains stateless.
-
-For Octop group-chat protection, deploy this capability together with a gateway
-that emits `InboundMessage.allowed_tools` and an Octop version that forwards it.
-The Octop release must upgrade both SDKs; older gateways silently lack the field,
-while older harness versions reject the new request parameter. Source integration
-tests are distinct from acceptance with the released, locked dependency set.
