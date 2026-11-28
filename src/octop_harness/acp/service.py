@@ -7,9 +7,11 @@ import atexit
 import contextlib
 import logging
 import os
+import shutil
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from octop_harness.acp.client import ACPHostedClient
@@ -28,6 +30,65 @@ from octop_harness.runtime_env import load_dotenv_path, overlay_env, prepend_use
 logger = logging.getLogger(__name__)
 
 MessageHandler = Callable[[dict[str, Any], bool], Awaitable[None]]
+
+
+_WINDOWS_SHELL_SHIMS = {".cmd", ".bat"}
+
+
+def resolve_acp_runner_argv(
+    command: str,
+    args: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+    is_windows: bool | None = None,
+    which: Callable[..., str | None] = shutil.which,
+) -> tuple[str, tuple[str, ...]]:
+    """Resolve a runner command for ``create_subprocess_exec``.
+
+    On Windows, npm and user-level installers often expose bare names such as
+    ``opencode`` as ``.cmd`` or ``.bat`` shims. ``CreateProcess`` does not honor
+    ``PATHEXT``, so ``asyncio.create_subprocess_exec("opencode", ...)`` raises
+    ``FileNotFoundError``. Resolve the name with ``shutil.which`` (which does
+    honor ``PATHEXT``) and launch shell shims through ``cmd.exe /c``.
+
+    Non-Windows platforms return the original command and args unchanged.
+
+    Args:
+        command: Runner executable or bare command name.
+        args: Arguments that follow the command.
+        env: Environment used to look up ``PATH`` and ``PATHEXT``. When omitted,
+            ``which`` uses the current process environment.
+        is_windows: Override for tests. Defaults to ``os.name == "nt"``.
+        which: Command resolver, defaulting to ``shutil.which``.
+
+    Returns:
+        The executable and argument tuple to pass to ``spawn_agent_process``.
+
+    Raises:
+        ACPSessionError: If the command cannot be resolved on Windows.
+    """
+    argv = tuple(args)
+    if is_windows is None:
+        is_windows = os.name == "nt"
+    if not is_windows:
+        return command, argv
+
+    path = None if env is None else env.get("PATH")
+    pathext = None if env is None else env.get("PATHEXT")
+    resolved = which(command, path=path, pathext=pathext)
+    if not resolved:
+        raise ACPSessionError(
+            f"ACP runner command {command!r} was not found on PATH. "
+            "On Windows, npm shims are often .cmd or .bat files that "
+            "CreateProcess cannot resolve from a bare name. Install the CLI "
+            "or set the runner command to the full path of the .exe, .cmd, or .bat."
+        )
+    if Path(resolved).suffix.lower() in _WINDOWS_SHELL_SHIMS:
+        comspec = "cmd.exe"
+        if env is not None and env.get("COMSPEC"):
+            comspec = env["COMSPEC"]
+        return comspec, ("/c", resolved, *argv)
+    return resolved, argv
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -303,12 +364,17 @@ class ACPService:
         spawn_env = overlay_env(os.environ, load_dotenv_path(os.path.join(cwd, ".env")), protect=True)
         spawn_env = overlay_env(spawn_env, runner_config.env, protect=False)
         spawn_env = prepend_user_cli_path(spawn_env)
+        command, command_args = resolve_acp_runner_argv(
+            runner_config.command,
+            runner_config.args,
+            env=spawn_env,
+        )
         try:
             conn, process = await exit_stack.enter_async_context(
                 spawn_agent_process(
                     client,  # type: ignore[arg-type]
-                    runner_config.command,
-                    *runner_config.args,
+                    command,
+                    *command_args,
                     cwd=cwd,
                     env=spawn_env,
                     transport_kwargs={"limit": runner_config.stdio_buffer_limit_bytes},
