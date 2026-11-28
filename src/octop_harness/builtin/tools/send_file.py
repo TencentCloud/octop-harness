@@ -10,8 +10,9 @@ Octop / octop-gateway should prefer ``path`` +
 :class:`~octop_harness.backends.workspace.BackendWorkspace` (virtual/host
 failback) when a workspace is available.
 
-Expected path mistakes (missing file, directory) are returned as recoverable
-``ToolException`` observations — they must not crash the agent turn.
+Expected path mistakes (missing file, directory, outside the workspace)
+are returned as recoverable ``ToolException`` observations — they must not
+crash the agent turn.
 """
 
 from __future__ import annotations
@@ -69,6 +70,13 @@ def _not_a_file_error(file_path: str) -> ToolException:
     return ToolException(f"send_file_to_user: not a regular file: {file_path}. Pass a file path, not a directory.")
 
 
+def _outside_workspace_error(file_path: str) -> ToolException:
+    return ToolException(
+        f"send_file_to_user: {file_path} resolves outside the workspace. "
+        "Use a workspace-relative path, or a host/virtual absolute path under the storage root."
+    )
+
+
 def build_send_file_to_user_tool(workspace: BackendWorkspace) -> Any:
     """Return ``send_file_to_user`` bound to *workspace*."""
 
@@ -82,7 +90,10 @@ def build_send_file_to_user_tool(workspace: BackendWorkspace) -> Any:
         Returns:
             A multimodal content block for the channel adapter.
         """
-        local = workspace.materialize_local(file_path)
+        try:
+            local = workspace.materialize_local(file_path)
+        except PermissionError as exc:
+            raise _outside_workspace_error(file_path) from exc
         if local is not None and local.exists() and not local.is_file():
             raise _not_a_file_error(file_path)
         if local is None or not local.is_file():

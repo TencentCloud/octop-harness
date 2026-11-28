@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- Windows 盘符和 UNC 绝对路径不再被当作工作区相对路径拼接，技能包挂载和 `send_file_to_user` 在虚拟根下可正确解析；越界路径以可恢复的工具错误返回。
+
 ## [1.0.13] - 2026-11-26
 
 ### 新增
