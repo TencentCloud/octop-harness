@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from copy import deepcopy
+from typing import Any, Literal
 from unittest.mock import patch
 
 import pytest
@@ -17,6 +18,48 @@ from octop_harness.llm.factory import (
 
 
 class TestBuildChatModel:
+    @pytest.mark.parametrize(
+        ("model_id", "api_mode", "adapts"),
+        [
+            ("gemini-3.8-flash", "chat_completions", True),
+            ("google/gemini-3.8-flash", "chat_completions", False),
+            ("gpt-5.5", "chat_completions", False),
+            ("gemini-3.8-flash", "responses", False),
+        ],
+    )
+    def test_nullable_tool_schema_for_gemini_chat_completions(
+        self, model_id: str, api_mode: Literal["chat_completions", "responses"], adapts: bool
+    ) -> None:
+        provider = ProviderConfig(id="test", base_url="https://api.example.com/v1", api_key="test")
+        instance = build_chat_model(provider, ModelConfig(id=model_id, api_mode=api_mode))
+        nullable_path = {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None}
+        nullable_count = {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]}
+        mixed_types = {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "null"}]}
+        parameters = {
+            "type": "object",
+            "required": ["paths"],
+            "properties": {
+                "base_dir": nullable_path,
+                "paths": {"type": "array", "items": nullable_path},
+                "max_count": nullable_count,
+                "mixed_types": mixed_types,
+            },
+        }
+        bound = instance.bind_tools([{"name": "list_files", "description": "List files", "parameters": parameters}])
+        original_tools = deepcopy(bound.kwargs["tools"])
+        payload = instance._get_request_payload([("human", "List the files.")], **bound.kwargs)
+        tool = payload["tools"][0]
+        output = tool.get("function", tool)["parameters"]
+
+        expected_path = {"type": "string", "nullable": True, "default": None} if adapts else nullable_path
+        expected_count = {"type": "integer", "minimum": 1, "nullable": True} if adapts else nullable_count
+        assert output["properties"]["base_dir"] == expected_path
+        assert output["properties"]["paths"]["items"] == expected_path
+        assert output["properties"]["max_count"] == expected_count
+        assert output["properties"]["mixed_types"] == mixed_types
+        assert output["required"] == ["paths"]
+        assert bound.kwargs["tools"] == original_tools
+
     def test_openai_protocol_invokes_chat_openai(self) -> None:
         provider = ProviderConfig(
             id="example",
