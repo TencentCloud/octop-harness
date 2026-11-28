@@ -212,9 +212,20 @@ class TestAgentManagerCRUD:
             mgr = HarnessAgentManager()
             mgr.create_agent(_config(tmp_path), agent_id="del-me")
         mgr.remove_agent("del-me")
-        mock_agent.close.assert_called_once()
+        mock_agent.close.assert_called_once_with(close_backend=True)
         with pytest.raises(KeyError):
             mgr.get_agent("del-me")
+
+    def test_rebuild_agent_does_not_close_shared_backend(self, tmp_path: Path) -> None:
+        first = _mock_agent()
+        second = _mock_agent()
+        with patch("octop_harness.manager.HarnessAgent", side_effect=[first, second]):
+            mgr = HarnessAgentManager()
+            mgr.create_agent(_config(tmp_path), agent_id="aid1")
+            mgr._rebuild_agent("aid1")
+        first.close.assert_called_once_with(close_backend=False)
+        second.close.assert_not_called()
+        assert mgr.get_agent("aid1").agent is second
 
     def test_remove_missing_raises(self) -> None:
         mgr = HarnessAgentManager()
@@ -804,6 +815,69 @@ class TestHarnessAgentManagerAsyncLifecycle:
             assert rebuilt.agent_id == "aid1"
             mgr.close()
 
+    @pytest.mark.asyncio
+    async def test_arebuild_agent_does_not_close_shared_backend(self, tmp_path: Path) -> None:
+        """Rebuild must leave sandbox wrappers usable by other holders (#261)."""
+
+        class FlagBackend:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        providers = [
+            ProviderConfig(
+                id="p",
+                base_url="https://x",
+                api_key="k",
+                models=[ModelConfig(id="m")],
+            )
+        ]
+        cfg = HarnessAgentConfig(
+            workspace_dir=tmp_path,
+            providers=providers,
+            default_model="p/m",
+            backend={"type": "filesystem", "root_dir": str(tmp_path), "virtual_mode": True},
+            memory_enabled=False,
+            session_log_enabled=False,
+            checkpointer=False,
+        )
+        with (
+            patch("langchain_openai.ChatOpenAI", return_value=MagicMock(name="seed-model")),
+            patch("deepagents.create_deep_agent", return_value=MagicMock(name="fake-graph")),
+        ):
+            mgr = HarnessAgentManager(providers=providers)
+            created = await mgr.acreate_agent(cfg, agent_id="aid1", init_workspace=True)
+            old_agent = created.agent
+            backend = FlagBackend()
+            old_agent._backend = backend
+            rebuilt = await mgr.arebuild_agent("aid1", cfg)
+            assert rebuilt.agent_id == "aid1"
+            assert rebuilt.agent is not old_agent
+            assert backend.closed is False
+            # A later close / GC of the retired runtime must not close it either.
+            old_agent.close()
+            assert backend.closed is False
+            mgr.close()
+
+    @pytest.mark.asyncio
+    async def test_aremove_agent_still_closes_backend(self, tmp_path: Path) -> None:
+        agent = _mock_agent()
+        agent.aclose = AsyncMock()
+        mgr = HarnessAgentManager()
+        mgr._registry.add(
+            AgentEntry(
+                agent_id="aid",
+                agent=agent,
+                config=_config(tmp_path),
+                metadata={},
+                tags=[],
+                created_at=datetime(2026, 9, 1, tzinfo=UTC),
+            )
+        )
+        await mgr.aremove_agent("aid")
+        agent.aclose.assert_awaited_once_with(close_backend=True)
+
 
 class TestARemoveAgentReleasesOnThisLoop:
     """``aremove_agent`` must await ``aclose`` here, not run ``close`` in a thread.
@@ -833,7 +907,7 @@ class TestARemoveAgentReleasesOnThisLoop:
         closed_on: list[int] = []
         agent = _mock_agent()
 
-        async def _aclose() -> None:
+        async def _aclose(*, close_backend: bool = True) -> None:
             closed_on.append(threading.get_ident())
 
         agent.aclose = _aclose
