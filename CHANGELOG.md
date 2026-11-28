@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- Windows 上启动 ACP runner 时按 PATHEXT 解析裸命令名；若解析到 `.cmd` / `.bat` 垫片则通过 `cmd.exe /c` 启动，避免 `FileNotFoundError`。
+
 ## [1.0.13] - 2026-11-26
 
 ### 新增
