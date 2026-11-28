@@ -134,7 +134,9 @@ class HarnessAgentManager:
         # Pin Memory so remove-then-create keeps the same backend / checkpointer
         # pool. MCP / policy changes only compile a new graph.
         with hold_shared_memory(entry.config, getattr(entry.agent, "_workspace_path", None)):
-            self.remove_agent(agent_id)
+            # Keep the sandbox wrapper open: other holders (in-flight HTTP
+            # reads, media adapters, tool closures) still use it (#261).
+            self.remove_agent(agent_id, close_backend=False)
             self._register_agent(
                 config,
                 metadata=metadata,
@@ -267,9 +269,9 @@ class HarnessAgentManager:
     def get_agent(self, agent_id: str) -> AgentEntry:
         return self._registry.get(agent_id)
 
-    def remove_agent(self, agent_id: str) -> None:
+    def remove_agent(self, agent_id: str, *, close_backend: bool = True) -> None:
         entry = self._registry.remove(agent_id)
-        entry.agent.close()
+        entry.agent.close(close_backend=close_backend)
 
     async def acreate_agent(
         self,
@@ -290,19 +292,23 @@ class HarnessAgentManager:
             init_workspace=init_workspace,
         )
 
-    async def aremove_agent(self, agent_id: str) -> None:
+    async def aremove_agent(self, agent_id: str, *, close_backend: bool = True) -> None:
         """Drop one agent and await resource release on this event loop.
 
         Sync :meth:`close` must not run in ``to_thread``: aiosqlite is bound
         to this loop, and the worker-thread fallback (``asyncio.run`` on
         ``stop()`` / ``close()``) waits for a loop that is itself waiting
         for the worker — the hang seen when Octop reloads MCP mid-chat.
+
+        Args:
+            close_backend: Forwarded to :meth:`HarnessAgent.aclose`. Rebuilds
+                pass ``False`` so a shared sandbox wrapper stays usable.
         """
         try:
             entry = self._registry.remove(agent_id)
         except KeyError:
             return
-        await entry.agent.aclose()
+        await entry.agent.aclose(close_backend=close_backend)
 
     async def arebuild_agent(
         self,
@@ -326,7 +332,8 @@ class HarnessAgentManager:
         resolved_metadata = dict(metadata if metadata is not None else entry.metadata)
         resolved_tags = list(tags if tags is not None else entry.tags)
         with hold_shared_memory(entry.config, getattr(entry.agent, "_workspace_path", None)):
-            await self.aremove_agent(agent_id)
+            # Do not close the sandbox wrapper: concurrent holders still use it (#261).
+            await self.aremove_agent(agent_id, close_backend=False)
             return await self.acreate_agent(
                 config,
                 agent_id=agent_id,

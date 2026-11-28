@@ -258,6 +258,10 @@ class HarnessAgent:
         self._lifecycle_lock = threading.Lock()
         self._in_flight = 0
         self._close_pending = False
+        # When a rebuild detaches this runtime but other holders still
+        # use the same sandbox wrapper, skip closing the backend even if
+        # a later close() / __del__ runs on this instance.
+        self._owns_backend = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -1184,7 +1188,7 @@ class HarnessAgent:
         if service is not None:
             await service.close_all_sessions()
 
-    def close(self) -> None:
+    def close(self, *, close_backend: bool = True) -> None:
         """Release long-lived resources (idempotent, sync).
 
         Closes the memory SQLite backend and the AsyncSqliteSaver connection
@@ -1200,7 +1204,16 @@ class HarnessAgent:
         While ``call`` / ``stream`` / ``resume_hitl`` is in flight the release is
         deferred and performed once the last one finishes, so a hot-reload
         cannot pull the checkpointer out from under a running turn.
+
+        Args:
+            close_backend: When ``False``, release memory and checkpointer but
+                leave the backend wrapper open so other holders (in-flight
+                requests, media adapters, tool closures) can keep using it.
+                Used by a manager rebuild. Subsequent :meth:`close` / ``__del__``
+                calls on this instance also skip the backend.
         """
+        if not close_backend:
+            self._owns_backend = False
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
@@ -1211,9 +1224,10 @@ class HarnessAgent:
             self._model_factory.close()
         self._memory_runtime.close()
         self._release_checkpointer()
-        self._close_backend()
+        if self._owns_backend:
+            self._close_backend()
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, close_backend: bool = True) -> None:
         """Release long-lived resources (idempotent, async).
 
         Same resources as :meth:`close`, but awaits ``aiosqlite.Connection.close()``
@@ -1221,7 +1235,12 @@ class HarnessAgent:
         with`` blocks or other async shutdown paths.
 
         Deferred while an invocation is in flight, exactly like :meth:`close`.
+
+        Args:
+            close_backend: Same meaning as :meth:`close`.
         """
+        if not close_backend:
+            self._owns_backend = False
         if self._defer_close_while_busy():
             return
         self._hitl_resume_configs.clear()
@@ -1232,7 +1251,8 @@ class HarnessAgent:
             await self._model_factory.aclose()
         self._memory_runtime.close()
         await self._release_checkpointer_async()
-        self._close_backend()
+        if self._owns_backend:
+            self._close_backend()
 
     def __del__(self) -> None:
         with contextlib.suppress(Exception):  # pragma: no cover - destructor must not raise

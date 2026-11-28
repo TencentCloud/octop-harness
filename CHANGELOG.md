@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 重建 agent 时不再关闭仍被其他持有者使用的沙箱包装器，避免并发读写误报 “DockerSandbox is closed”。
+
 ## [1.0.13] - 2026-11-26
 
 ### 新增
