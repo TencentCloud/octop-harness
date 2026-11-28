@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 出站 Chat Completions 请求会将多条 `system`/`developer` 消息合并到第 0 条，避免严格 Jinja 模板（如 llama.cpp `--jinja` 上的 Qwen）返回 HTTP 500。
+
 ## [1.0.13] - 2026-11-26
 
 ### 新增

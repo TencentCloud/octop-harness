@@ -10,6 +10,7 @@ import pytest
 from octop_harness.config import ModelConfig, ProviderConfig
 from octop_harness.llm.factory import (
     ChatModelFactory,
+    _coalesce_system_messages,
     _get_reasoning_aware_chat_openai,
     _is_responses_api_unsupported_error,
     build_chat_model,
@@ -1019,3 +1020,87 @@ class TestRetainFinalStreamUsage:
         assert cleaned.message.response_metadata["model_name"] == "demo"
         assert cleaned.message.content == "x"
         assert chunk.message.usage_metadata is not None
+
+
+class TestChatCompletionsSystemCoalescing:
+    """Strict Jinja templates reject system/developer messages after index 0."""
+
+    def test_no_system_messages_is_noop(self) -> None:
+        messages = [{"role": "user", "content": "hi"}]
+        assert _coalesce_system_messages(messages) is messages
+
+    def test_single_leading_system_is_noop(self) -> None:
+        messages = [{"role": "system", "content": "Be concise."}, {"role": "user", "content": "hi"}]
+        assert _coalesce_system_messages(messages) is messages
+
+    def test_two_leading_system_messages_are_merged(self) -> None:
+        messages = [
+            {"role": "system", "content": "Agent prompt."},
+            {"role": "system", "content": "Dispatch prompt."},
+            {"role": "user", "content": "hello"},
+        ]
+        original = list(messages)
+        result = _coalesce_system_messages(messages)
+        assert messages == original
+        assert result[0] == {"role": "system", "content": "Agent prompt.\n\nDispatch prompt."}
+        assert result[1] == {"role": "user", "content": "hello"}
+        assert len(result) == 2
+
+    def test_system_after_user_is_moved_to_front(self) -> None:
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "Be concise."},
+        ]
+        result = _coalesce_system_messages(messages)
+        assert result[0] == {"role": "system", "content": "Be concise."}
+        assert result[1] == {"role": "user", "content": "hello"}
+        assert messages[0]["role"] == "user"
+
+    def test_mixed_system_and_developer_roles_are_merged(self) -> None:
+        messages = [
+            {"role": "system", "content": "System rules."},
+            {"role": "user", "content": "hello"},
+            {"role": "developer", "content": "Developer rules."},
+        ]
+        result = _coalesce_system_messages(messages)
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "System rules.\n\nDeveloper rules."
+        assert result[1] == {"role": "user", "content": "hello"}
+
+    def test_multipart_blocks_keep_order_and_cache_control(self) -> None:
+        cache_block = {"type": "text", "text": "cached prefix", "cache_control": {"type": "ephemeral"}}
+        messages = [
+            {"role": "system", "content": [cache_block]},
+            {"role": "system", "content": "Follow-up instructions."},
+            {"role": "user", "content": "hello"},
+        ]
+        result = _coalesce_system_messages(messages)
+        assert result[0]["content"] == [
+            cache_block,
+            {"type": "text", "text": "Follow-up instructions."},
+        ]
+        assert result[0]["content"][0] is cache_block
+
+    def test_get_request_payload_coalesces_mid_history_system_message(self) -> None:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        provider = ProviderConfig(
+            id="example",
+            base_url="https://api.example.com/v1",
+            api_key="sk-x",
+            protocol="openai",
+        )
+        instance = build_chat_model(provider, ModelConfig(id="qwen"))
+        payload = instance._get_request_payload(
+            [
+                SystemMessage(content="Agent prompt."),
+                SystemMessage(content="Dispatch prompt."),
+                HumanMessage(content="hello"),
+            ]
+        )
+        roles = [message["role"] for message in payload["messages"]]
+        assert roles[0] == "system"
+        assert "system" not in roles[1:]
+        assert payload["messages"][0]["content"] == "Agent prompt.\n\nDispatch prompt."
+        assert payload["messages"][1]["role"] == "user"
+        assert payload["messages"][1]["content"] == "hello"

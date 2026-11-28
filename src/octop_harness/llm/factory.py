@@ -759,6 +759,7 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
             supported: set[str] = getattr(self, "_harness_supported_input", set()) or {"text", "image"}
             if "image" not in supported:
                 _strip_unsupported_content_types(messages_out)
+            payload["messages"] = _coalesce_system_messages(messages_out)
             source_messages = _source_messages_for_payload(input_, kwargs, self._convert_input)
             if not source_messages:
                 return payload
@@ -766,6 +767,60 @@ def _get_reasoning_aware_chat_openai(base_cls: type[Any]) -> type[Any]:
 
     _REASONING_AWARE_CHAT_OPENAI[id(base_cls)] = _ReasoningAwareChatOpenAI
     return _ReasoningAwareChatOpenAI
+
+
+# ---------------------------------------------------------------------------
+# Outbound system/developer coalescing
+# ---------------------------------------------------------------------------
+
+_SYSTEM_ROLES = frozenset({"system", "developer"})
+
+
+def _is_system_role_message(message: Any) -> bool:
+    return isinstance(message, dict) and message.get("role") in _SYSTEM_ROLES
+
+
+def _merge_system_contents(messages: list[Any]) -> str | list[Any]:
+    """Join system/developer content in original order.
+
+    All-text messages stay a string. Mixed string and multipart content becomes
+    a block list so existing block metadata such as ``cache_control`` is kept.
+    """
+    parts: list[Any] = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            if content:
+                parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(content)
+    if all(isinstance(part, str) for part in parts):
+        return "\n\n".join(parts)
+    blocks: list[Any] = []
+    for part in parts:
+        if isinstance(part, str):
+            blocks.append({"type": "text", "text": part})
+        else:
+            blocks.append(part)
+    return blocks
+
+
+def _coalesce_system_messages(messages: list[Any]) -> list[Any]:
+    """Move every system/developer message into a single entry at index 0.
+
+    Strict Jinja chat templates (for example Qwen served with ``llama.cpp --jinja``)
+    reject a system or developer message that is not at the beginning of the
+    payload. This is a no-op when there are no such entries, or already exactly
+    one at index 0. The caller's list is not mutated when a rewrite is needed.
+    """
+    systems = [message for message in messages if _is_system_role_message(message)]
+    if not systems:
+        return messages
+    if len(systems) == 1 and messages and messages[0] is systems[0]:
+        return messages
+    rest = [message for message in messages if not _is_system_role_message(message)]
+    merged = {**systems[0], "content": _merge_system_contents(systems)}
+    return [merged, *rest]
 
 
 # ---------------------------------------------------------------------------
