@@ -519,3 +519,32 @@ class TestDesktopScreenshot:
         ):
             block = desktop_screenshot.invoke({"path": str(target), "capture_window": True})
         assert block["type"] == "image"
+
+    def test_outside_workspace_returns_recoverable_error(self, tmp_path: Path) -> None:
+        from deepagents.backends import FilesystemBackend
+        from langchain_core.messages import ToolMessage
+        from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
+
+        from octop_harness.backends.workspace import BackendWorkspace
+        from octop_harness.builtin.tools.send_file import build_send_file_to_user_tool
+
+        backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+        tool = build_send_file_to_user_tool(BackendWorkspace(backend, tmp_path))
+        # Relative escape still raises PermissionError from the workspace; the
+        # tool must turn that into a recoverable ToolException, not abort the turn.
+        content = tool.invoke({"file_path": "../outside.mp4"})
+        assert isinstance(content, str)
+        assert "outside the workspace" in content
+
+        node = ToolNode([tool])
+        call = {
+            "name": "send_file_to_user",
+            "args": {"file_path": "../outside.mp4"},
+            "id": "call_outside",
+            "type": "tool_call",
+        }
+        req = ToolCallRequest(tool_call=call, tool=tool, state={"messages": []}, runtime=None)
+        msg = node._execute_tool_sync(req, "dict", {})
+        assert isinstance(msg, ToolMessage)
+        assert msg.status == "error"
+        assert "outside the workspace" in str(msg.content)

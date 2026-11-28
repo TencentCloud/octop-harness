@@ -12,10 +12,11 @@ and is not an agent-facing concept — do not treat the two as peer trees.
 
 Path rules for :meth:`resolve_path`:
 
-* **Relative** (does not start with ``/``) → ``{workspace_dir}/{fragment}``
-* **Absolute** (starts with ``/``) → when the backend uses ``virtual_mode``,
-  mapped through ``backend._resolve_path`` onto that backend's ``root_dir``;
-  otherwise unchanged
+* **Relative** (does not start with ``/`` and is not a Windows drive/UNC path)
+  → ``{workspace_dir}/{fragment}``
+* **Absolute** (starts with ``/``, or a Windows drive-letter / UNC path) → when
+  the backend uses ``virtual_mode``, mapped through ``backend._resolve_path``
+  onto that backend's ``root_dir``; otherwise left as a host path
 
 ``~/…`` is expanded to a host path (still absolute). ``..`` in relative
 fragments raises ``PermissionError`` if it escapes ``workspace_dir``.
@@ -105,6 +106,89 @@ def _strip_relative_prefix(fragment: str) -> str:
     return fragment
 
 
+def is_windows_absolute_path(raw: str) -> bool:
+    """True for Windows drive-letter (``C:/`` / ``C:\\``) and UNC paths.
+
+    Detection is by path shape, so it is safe on POSIX hosts and in tests.
+    POSIX paths cannot look like ``<letter>:<sep>`` or UNC, so a Linux
+    workspace will not mis-classify a relative fragment.
+    """
+    text = raw.strip()
+    if len(text) >= 3 and text[0].isascii() and text[0].isalpha() and text[1] == ":" and text[2] in "\\/":
+        return True
+    return text.startswith("\\\\") or text.startswith("//")
+
+
+def _is_absolute_input(raw: str) -> bool:
+    """True for POSIX ``/…``, ``~…``, and Windows drive/UNC absolutes."""
+    text = raw.strip()
+    return text.startswith(("/", "~")) or is_windows_absolute_path(text)
+
+
+def _posixify_path(raw: str) -> str:
+    return raw.strip().replace("\\", "/")
+
+
+def _strip_windows_prefix(posix: str) -> str:
+    """``C:/Users/a`` → ``/Users/a``; ``//server/share/a`` → ``/a``."""
+    text = posix.strip()
+    if len(text) >= 3 and text[0].isalpha() and text[1] == ":" and text[2] == "/":
+        return text[2:] or "/"
+    if text.startswith("//"):
+        parts = [part for part in text.split("/") if part]
+        if len(parts) >= 2:
+            rest = "/".join(parts[2:])
+            return "/" if not rest else f"/{rest}"
+        return "/"
+    return text if text.startswith("/") else f"/{text.lstrip('/')}"
+
+
+def _virtual_key_from_windows_absolute(raw: str, backend: object) -> str | None:
+    """Map a Windows absolute onto a virtual ``/…`` key when it is under the mount."""
+    if not is_windows_absolute_path(raw) or not _backend_virtual_mode(backend):
+        return None
+    cwd = _backend_cwd(backend)
+    if cwd is None:
+        return None
+    try:
+        local = Path(raw)
+        if local.is_absolute():
+            return _virtual_key_under_mount(local.expanduser().resolve(), backend)
+        # Path on POSIX treats ``C:/…`` as relative; don't resolve against cwd.
+    except (OSError, ValueError):
+        pass
+    body = _strip_windows_prefix(_posixify_path(raw))
+    cwd_posix = _posixify_path(str(cwd))
+    if is_windows_absolute_path(cwd_posix):
+        cwd_posix = _strip_windows_prefix(cwd_posix)
+    if not cwd_posix.startswith("/"):
+        cwd_posix = "/" + cwd_posix.lstrip("/")
+    cwd_r = cwd_posix.rstrip("/") or "/"
+    if body == cwd_r or body.startswith("/" if cwd_r == "/" else cwd_r + "/"):
+        rel = body[len(cwd_r) :].lstrip("/")
+        return "/" if not rel else f"/{rel}"
+    return None
+
+
+def _absolute_virtual_or_posix(raw: str, backend: object) -> str | None:
+    """Return a ``/…`` key for a POSIX or Windows absolute input, else ``None``.
+
+    Windows drive/UNC paths that sit under the backend mount become virtual
+    keys (``C:/Users/a`` with root ``C:/`` → ``/Users/a``). Other Windows
+    absolutes keep a leading-``/`` form so they are never joined onto
+    ``workspace_dir``.
+    """
+    s = raw.strip()
+    if s.startswith("/"):
+        return s.replace("\\", "/")
+    if is_windows_absolute_path(s):
+        virt = _virtual_key_from_windows_absolute(s, backend)
+        if virt is not None:
+            return virt
+        return _strip_windows_prefix(_posixify_path(s))
+    return None
+
+
 def normalize_system_files_path(value: str | Path | None) -> str:
     """Return a workspace-relative system-files prefix, or ``\"\"`` for workspace root."""
     if value is None:
@@ -112,7 +196,7 @@ def normalize_system_files_path(value: str | Path | None) -> str:
     text = str(value).strip().replace("\\", "/")
     if not text or text in {".", "./"}:
         return ""
-    if text.startswith("/") or text.startswith("~"):
+    if _is_absolute_input(text):
         msg = f"system_files_path must be workspace-relative, got {value!r}"
         raise ValueError(msg)
     text = text.strip("/")
@@ -416,7 +500,7 @@ class BackendWorkspace:
     def _read_fragments(self, path: str) -> list[str]:
         """Ordered workspace-relative fragments to probe on read (canonical first)."""
         s = str(path).strip().replace("\\", "/")
-        if s.startswith("~") or s.startswith("/"):
+        if _is_absolute_input(s):
             return [s]
         raw = _strip_relative_prefix(s).lstrip("/")
         if not raw or raw == ".":
@@ -481,8 +565,9 @@ class BackendWorkspace:
         s = str(path)
         if s.startswith("~"):
             return str(Path(s).expanduser().resolve())
-        if s.startswith("/"):
-            mapped = apply_system_files_prefix(s.replace("\\", "/"), self._system_files_path)
+        mapped = _absolute_virtual_or_posix(s, self._backend)
+        if mapped is not None:
+            mapped = apply_system_files_prefix(mapped, self._system_files_path)
             if getattr(self._backend, "sandbox_fs", False):
                 return mapped
             if _backend_virtual_mode(self._backend):
@@ -534,8 +619,9 @@ class BackendWorkspace:
         if s.startswith("~"):
             expanded = str(Path(s).expanduser().resolve())
             return self._remap_cloud_absolute(expanded) if is_cloud_storage_backend(self._backend) else expanded
-        if s.startswith("/"):
-            mapped = apply_system_files_prefix(s.replace("\\", "/"), self._system_files_path)
+        mapped = _absolute_virtual_or_posix(s, self._backend)
+        if mapped is not None:
+            mapped = apply_system_files_prefix(mapped, self._system_files_path)
             return self._remap_cloud_absolute(mapped) if is_cloud_storage_backend(self._backend) else mapped
 
         fragment = self._stored_relative(s) if map_system_paths else _strip_relative_prefix(s.replace("\\", "/"))
@@ -581,7 +667,7 @@ class BackendWorkspace:
         if not is_cloud_storage_backend(self._backend):
             return None
         text = str(fragment).strip().replace("\\", "/")
-        if text.startswith("~") or text.startswith("/"):
+        if _is_absolute_input(text):
             return None
         stored = self._stored_relative(text) if map_system_paths else _strip_relative_prefix(text)
         if not stored or stored == ".":
@@ -638,8 +724,9 @@ class BackendWorkspace:
         cwd = _backend_cwd(self._backend)
         if _backend_virtual_mode(self._backend) and cwd is not None:
             return (cwd / key.lstrip("/")).resolve()
-        if s.startswith("/"):
-            return Path(s).resolve()
+        if _is_absolute_input(s):
+            mapped = _absolute_virtual_or_posix(s, self._backend) or s
+            return Path(mapped).resolve()
         return _local_workspace_path(self._stored_relative(_normalize_workspace_fragment(path)), self._workspace_dir)
 
     def _iter_materialize_candidates(
@@ -693,13 +780,14 @@ class BackendWorkspace:
             add(Path(raw).expanduser())
             return out
 
-        if raw.startswith("/"):
+        if _is_absolute_input(raw):
+            mapped = _absolute_virtual_or_posix(raw, self._backend) or _posixify_path(raw)
             if virtual:
                 resolve_fn = getattr(self._backend, "_resolve_path", None)
                 if callable(resolve_fn):
                     with contextlib.suppress(OSError, PermissionError, ValueError):
-                        add(Path(resolve_fn(raw)))
-            add(Path(raw))
+                        add(Path(resolve_fn(mapped)))
+            add(Path(mapped))
             return out
 
         fragment = self._stored_relative(raw) if map_system_paths else _strip_relative_prefix(raw)
@@ -843,7 +931,10 @@ class BackendWorkspace:
             for child in sorted(local.iterdir()):
                 # Always workspace-relative (``skills/demo``), never basename-only —
                 # the dashboard maps entry paths to ``/skills/demo`` API calls.
-                rel = child.relative_to(self._workspace_dir).as_posix()
+                try:
+                    rel = child.relative_to(self._workspace_dir).as_posix()
+                except ValueError:
+                    rel = child.resolve().as_posix()
                 entries.append({"path": rel, "is_dir": child.is_dir()})
             return entries
         storage_path = key

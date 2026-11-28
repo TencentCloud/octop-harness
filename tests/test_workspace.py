@@ -902,3 +902,81 @@ class TestSystemFilesPath:
         ws = BackendWorkspace(fs_backend, tmp_path, system_files_path=".octop")
         ws.init_workspace(include_md_files=False, include_skills=False, include_agents=False)
         assert (tmp_path / ".octop").is_dir()
+
+
+class TestWindowsAbsolutePaths:
+    """Drive-letter / UNC paths must not be joined onto workspace_dir (#320)."""
+
+    def test_is_windows_absolute_path_shape(self) -> None:
+        from octop_harness.backends.workspace import is_windows_absolute_path
+
+        assert is_windows_absolute_path("C:/Users/octop/skill-packages/S1/skills")
+        assert is_windows_absolute_path(r"C:\Users\octop\skills")
+        assert is_windows_absolute_path(r"\\server\share\skills")
+        assert is_windows_absolute_path("//server/share/skills")
+        assert not is_windows_absolute_path("/Users/octop/skills")
+        assert not is_windows_absolute_path("skills/fx-rate")
+        assert not is_windows_absolute_path("C:relative")
+
+    def test_drive_absolute_is_not_joined_to_workspace(self, tmp_path: Path) -> None:
+        from deepagents.backends import FilesystemBackend
+
+        from octop_harness.backends.workspace import BackendWorkspace
+
+        workspace = tmp_path / "agents" / "main"
+        workspace.mkdir(parents=True)
+        backend = FilesystemBackend(root_dir="/", virtual_mode=True)
+        ws = BackendWorkspace(backend, workspace)
+        win = "C:/Users/octop/skill-packages/S8H5BD/skills"
+        # Pre-fix this raised PermissionError after joining onto workspace_dir.
+        resolved = ws.resolve_path(win)
+        assert Path(resolved).is_absolute() or resolved.startswith("/")
+        assert str(workspace) not in str(resolved).replace("\\", "/")
+        key = ws._backend_storage_key(win)
+        assert key is not None
+        assert key.startswith("/")
+        assert str(workspace) not in key
+        assert ".." not in Path(key).parts
+
+    def test_drive_absolute_under_virtual_root_maps_and_lists(self, tmp_path: Path) -> None:
+        from deepagents.backends import FilesystemBackend
+
+        from octop_harness.backends.workspace import BackendWorkspace
+
+        root = tmp_path / "root"
+        workspace = tmp_path / "agents" / "main"
+        skills = root / "skill-packages" / "S8H5BD" / "skills" / "fx-rate-query"
+        skills.mkdir(parents=True)
+        (skills / "SKILL.md").write_text("ok", encoding="utf-8")
+        workspace.mkdir(parents=True)
+        backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
+        ws = BackendWorkspace(backend, workspace)
+
+        win_file = "C:" + root.as_posix() + "/skill-packages/S8H5BD/skills/fx-rate-query/SKILL.md"
+        win_dir = "C:" + root.as_posix() + "/skill-packages/S8H5BD/skills"
+
+        resolved = ws.resolve_path(win_file)
+        assert Path(resolved) == (skills / "SKILL.md").resolve()
+        local = ws.materialize_local(win_file)
+        assert local is not None
+        assert local.resolve() == (skills / "SKILL.md").resolve()
+        assert ws.read_text(win_file) == "ok"
+
+        entries = ws.list_dir(win_dir)
+        assert entries is not None
+        names = {
+            Path(row["path"]).name if isinstance(row, dict) else Path(getattr(row, "path", row)).name for row in entries
+        }
+        assert "fx-rate-query" in names
+
+    def test_backslash_drive_absolute_storage_key(self, tmp_path: Path) -> None:
+        from deepagents.backends import FilesystemBackend
+
+        from octop_harness.backends.workspace import BackendWorkspace
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        backend = FilesystemBackend(root_dir="/", virtual_mode=True)
+        ws = BackendWorkspace(backend, workspace)
+        key = ws._backend_storage_key(r"C:\Users\octop\skills")
+        assert key == "/Users/octop/skills"
