@@ -286,3 +286,102 @@ def test_auth_error_mentioning_temperature_does_not_retry(monkeypatch: pytest.Mo
         assert len(requests) == 1
     finally:
         factory.close()
+
+
+class _ChatEventCollector:
+    """Collect chat-model callback events from an enclosing LangChain run."""
+
+    def __init__(self) -> None:
+        from langchain_core.callbacks import BaseCallbackHandler
+
+        self.names: list[str] = []
+
+        collector = self
+
+        class _Handler(BaseCallbackHandler):
+            def on_chat_model_start(self, serialized: dict[str, Any], messages: list[Any], **kwargs: Any) -> None:
+                del serialized, messages, kwargs
+                collector.names.append("on_chat_model_start")
+
+            def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
+                del serialized, prompts, kwargs
+                collector.names.append("on_llm_start")
+
+        self.handler = _Handler()
+
+
+def test_call_llm_does_not_leak_into_parent_runnable_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aux memory calls must stay out of the turn callback tree (#208)."""
+    from langchain_core.messages import HumanMessage
+    from langchain_core.runnables import RunnableLambda
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        del self, kwargs
+        return _response(request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    factory = _factory()
+    client = HarnessAgentLLMClient(factory, default_model="local/Qwen3")
+    main_model = factory.get_chat_model("local/Qwen3")
+    collector = _ChatEventCollector()
+
+    try:
+
+        def _turn_step(_: object) -> tuple[str, str]:
+            aux_text = client.call_llm("review memory documents", temperature=0.0, max_tokens=256)
+            assert collector.names == []
+            main_reply = main_model.invoke([HumanMessage(content="after aux")])
+            return aux_text, str(main_reply.content)
+
+        aux_text, main_text = RunnableLambda(_turn_step).invoke(
+            {},
+            config={
+                "callbacks": [collector.handler],
+                "metadata": {"thread_id": "thread-42", "langgraph_node": "tools"},
+            },
+        )
+        assert aux_text == "ok"
+        assert main_text == "ok"
+        # Only the subsequent turn-model call is visible to the parent collector.
+        assert collector.names == ["on_chat_model_start"]
+    finally:
+        factory.close()
+
+
+def test_call_llm_restores_parent_runnable_config_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_core.messages import HumanMessage
+    from langchain_core.runnables import RunnableLambda
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        del self, kwargs
+        if b"fail-aux" in request.content:
+            return httpx.Response(401, request=request, json={"error": {"message": "unauthorized"}})
+        return _response(request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    factory = _factory()
+    client = HarnessAgentLLMClient(factory, default_model="local/Qwen3", max_retries=0)
+    main_model = factory.get_chat_model("local/Qwen3")
+    collector = _ChatEventCollector()
+
+    try:
+
+        def _turn_step(_: object) -> str:
+            with pytest.raises(LLMClientError, match="unauthorized"):
+                client.call_llm("fail-aux")
+            assert collector.names == []
+            reply = main_model.invoke([HumanMessage(content="main continues")])
+            return str(reply.content)
+
+        result = RunnableLambda(_turn_step).invoke(
+            {},
+            config={"callbacks": [collector.handler], "metadata": {"thread_id": "thread-err"}},
+        )
+        assert result == "ok"
+        assert collector.names == ["on_chat_model_start"]
+    finally:
+        factory.close()

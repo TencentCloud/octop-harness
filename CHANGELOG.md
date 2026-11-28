@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 对话轮次内的记忆辅助模型调用不再并入外层 LangChain 回调树，避免文档核对的原始 JSON 泄漏到聊天记录和轨迹事件。
+
 ## [1.0.13] - 2026-11-26
 
 ### 新增
